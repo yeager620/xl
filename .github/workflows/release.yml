@@ -1,0 +1,92 @@
+# Push a tag like v0.1.0 to build packages, publish a GitHub Release and
+# update the APT repository on GitHub Pages.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Build on the oldest supported Ubuntu: packages need its glibc or newer.
+    container: ubuntu:22.04
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: ./packaging/setup-build-deps.sh
+      - name: Check the tag matches the version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [ "v$VERSION" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME doesn't match Cargo version $VERSION"; exit 1; }
+      - name: Build .deb
+        run: . "$HOME/.cargo/env" && make deb
+      - name: Build AppImage
+        run: . "$HOME/.cargo/env" && make appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            target/packages/*.deb
+            target/packages/*.AppImage
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" packages/* \
+            --repo "$GITHUB_REPOSITORY" --title "xl ${GITHUB_REF_NAME#v}" --generate-notes
+
+  apt:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages
+      - name: Tools
+        run: sudo apt-get install -y -qq apt-utils gnupg >/dev/null
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          [ -n "$APT_SIGNING_KEY" ] || { echo "APT_SIGNING_KEY secret is missing (run packaging/apt-keygen.sh)"; exit 1; }
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+      - name: Update the repository on gh-pages
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin gh-pages; then
+            git worktree add site FETCH_HEAD
+          else
+            git worktree add --detach site
+            git -C site checkout --orphan gh-pages
+            git -C site rm -rf -q .
+          fi
+          KEY=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          GPG_KEY_ID=$KEY SITE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}" \
+            packaging/apt-repo.sh site packages/*.deb
+          cd site
+          git add -A
+          git commit -q -m "APT repository: $GITHUB_REF_NAME"
+          git push origin HEAD:gh-pages

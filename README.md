@@ -3,6 +3,20 @@
 A fast, native spreadsheet for Linux. Rust + GPUI (GPU-rendered), with an
 incremental recalculation engine. See [PLAN.md](PLAN.md) for the full design and roadmap.
 
+## Install
+
+On Debian or Ubuntu (22.04 and newer), add the xl APT repository once:
+
+```sh
+curl -fsSL https://yeager620.github.io/xl/xl-archive-keyring.gpg | sudo tee /usr/share/keyrings/xl-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/xl-archive-keyring.gpg] https://yeager620.github.io/xl stable main" | sudo tee /etc/apt/sources.list.d/xl.list
+sudo apt update
+sudo apt install xl
+```
+
+Updates then arrive with `sudo apt upgrade`. Other options: download the `.deb` or
+AppImage from [Releases](https://github.com/yeager620/xl/releases).
+
 ## Build & run
 
 ```sh
@@ -15,7 +29,7 @@ cargo run --release -p xl        # or: cargo run --release -p xl -- budget.xlsx
 
 Rust 1.98.1 is pinned in `rust-toolchain.toml` (rustup installs it automatically).
 
-## Install
+## Install from source
 
 ```sh
 make install                         # just for you: ~/.local (no sudo)
@@ -35,8 +49,18 @@ xl), the app icon and AppStream metadata.
 | `make flatpak` | `target/packages/xl.flatpak` | Needs `flatpak-builder` (`sudo apt install flatpak-builder`) and `uv`; downloads the Freedesktop 25.08 runtime on first run. |
 
 Built packages link against the build machine's glibc, so they run on that
-distro release and newer. For the widest compatibility, build release packages
-on the oldest distro you want to support (e.g. in an Ubuntu 22.04 container).
+distro release and newer. Official releases are built in an Ubuntu 22.04
+container for that reason.
+
+## Releasing
+
+1. One time: `./packaging/apt-keygen.sh` creates the APT signing key and stores it
+   as the `APT_SIGNING_KEY` repository secret. Back the key up offline.
+2. Bump `version` in `Cargo.toml` and add a `<release>` to
+   `packaging/dev.xl.Xl.metainfo.xml`, commit, then tag and push:
+   `git tag v0.2.0 && git push origin v0.2.0`.
+3. The Release workflow builds the `.deb` and AppImage on Ubuntu 22.04, publishes
+   a GitHub Release, and adds the `.deb` to the APT repository on GitHub Pages.
 
 ## Test & benchmark
 

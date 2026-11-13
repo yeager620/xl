@@ -18,6 +18,9 @@
       <li>Autosave with crash recovery</li>
     </ul>
   </description>
+  <url type="homepage">https://github.com/yeager620/xl</url>
+  <url type="bugtracker">https://github.com/yeager620/xl/issues</url>
+  <url type="vcs-browser">https://github.com/yeager620/xl</url>
   <developer id="dev.xl">
     <name>xl contributors</name>
   </developer>
