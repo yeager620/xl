@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>xl APT repository</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem;color:#1e2024}pre{background:#f1f2f4;padding:1rem;overflow-x:auto}</style>
+<h1>xl APT repository</h1>
+<p>Install <a href="https://github.com/yeager620/xl">xl</a>, a fast native spreadsheet, on Debian or Ubuntu:</p>
+<pre>curl -fsSL https://yeager620.github.io/xl/xl-archive-keyring.gpg | sudo tee /usr/share/keyrings/xl-archive-keyring.gpg &gt;/dev/null
+echo "deb [signed-by=/usr/share/keyrings/xl-archive-keyring.gpg] https://yeager620.github.io/xl stable main" | sudo tee /etc/apt/sources.list.d/xl.list
+sudo apt update
+sudo apt install xl</pre>
+<p>Updates arrive with <code>sudo apt upgrade</code>.</p>

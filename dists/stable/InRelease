@@ -1,0 +1,30 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Fri, 13 Nov 2026 23:27:46 +0000
+Description: xl spreadsheet
+Label: xl
+Origin: xl
+Suite: stable
+MD5Sum:
+ 2fea6e2a1a8c0355c47c3e6d0a8099f1             1013 main/binary-amd64/Packages
+ 0adc0c02876a55b662323d794653af6e              678 main/binary-amd64/Packages.gz
+SHA1:
+ 72aa31bdc4498dcd23f01eb29638433102bc2bde             1013 main/binary-amd64/Packages
+ b954d679169afa0ce64286d96a8c73d0bc33e1a2              678 main/binary-amd64/Packages.gz
+SHA256:
+ fe16ec1bffd39a355e053420c77f2fceefd076530234fbb72922b213a87ed65c             1013 main/binary-amd64/Packages
+ 3d6b98d9f7a7a6cdaf7b0780fb24563584762bb17e7abbfe2ef6ab0a91c43801              678 main/binary-amd64/Packages.gz
+SHA512:
+ 34718860801896295c4ee94a6fd250a91c415c8a30fbc2a339e8dbb1f65122abad3e0a78d1dba3f89f9d9934328f581f77e856d793d5d50fb0a5625346f1d993             1013 main/binary-amd64/Packages
+ e6018cb063c5257e9b82561a79b3559b05ec308e1bfcc194f684b9d3f66978e58961805c10e5e404e0b880f5f83e291cb6cf04ec943d0f8e974188d30f009061              678 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCavec8gAKCRD8DLAncLzv
+iEPkAQCMo4LnKfQNCQqHO+tnhPnHNRyGh2QBlHxm9Muv/SDExAEAlhL3dvLaP5G5
+3689yOT+065BriMIt9smQfe0KhMdigg=
+=Uiyo
+-----END PGP SIGNATURE-----
