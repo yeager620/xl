@@ -29,7 +29,7 @@ modules:
       - type: git
         url: https://github.com/yeager620/xl.git
         tag: v0.1.1
-        commit: RELEASE_COMMIT
+        commit: 1571fee5fbcc2f0f3849954c5987dc4470daf23d
       - type: archive
         url: https://github.com/zed-industries/zed/archive/dc93abce2fa6c0bf349d425310db4884aa953467.tar.gz
         sha256: 2ca1f2e9d120e1531bf92115c35c1349d5eab1c14e7fba8c092be681892a9b8b
