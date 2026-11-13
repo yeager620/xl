@@ -11,14 +11,14 @@ use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS,
 
 use crate::theme::Theme;
 
-pub const ROW_H: f64 = 24.0;
+pub const ROW_H: f64 = 22.0;
 pub const DEF_COL_W: f64 = 100.0;
 pub const MIN_COL_W: f64 = 28.0;
-pub const HEADER_W: f64 = 52.0;
-pub const HEADER_H: f64 = 26.0;
+pub const HEADER_W: f64 = 46.0;
+pub const HEADER_H: f64 = 22.0;
 pub const CELL_PAD: f64 = 6.0;
-pub const CELL_FONT: f32 = 13.0;
-pub const HEADER_FONT: f32 = 11.5;
+pub const CELL_FONT: f32 = 14.0;
+pub const HEADER_FONT: f32 = 12.5;
 /// Largest selection for copy/fill.
 const MAX_BULK: u64 = 2_000_000;
 /// Larger selections get formats only on their non-empty cells.
@@ -120,9 +120,11 @@ type UndoEntry = Vec<(Addr, CellSnapshot)>;
 /// Which toolbar popover is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Menu {
+    NumberFormat,
     TextColor,
     Fill,
     Borders,
+    Main,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -899,24 +901,20 @@ impl Spreadsheet {
 
     // ------------------------------------------------------------------ files
 
+    /// A small, real-looking workbook so the first launch shows what xl does.
     fn load_welcome(&mut self) {
         let s = self.cur;
-        self.wb.rename_sheet(s, "Welcome").ok();
+        self.wb.rename_sheet(s, "Q1 Budget").ok();
         let rows: &[&[&str]] = &[
-            &["Welcome to xl", "", "", ""],
-            &["", "", "", ""],
-            &["Item", "Qty", "Price", "Total"],
-            &["Coffee beans", "3", "$14.50", "=B4*C4"],
-            &["Oat milk", "6", "$2.25", "=B5*C5"],
-            &["Croissants", "12", "$1.80", "=B6*C6"],
-            &["", "", "Subtotal", "=SUM(D4:D6)"],
-            &["", "", "Tax rate", "8.25%"],
-            &["", "", "Tax", "=ROUND(D7*D8,2)"],
-            &["", "", "Total", "=D7+D9"],
-            &["", "", "", ""],
-            &["Ordered", "=TODAY()", "", ""],
-            &["", "", "", ""],
-            &["Try: edit a Qty — totals update instantly. Type = then use the arrow keys to point at cells.", "", "", ""],
+            &["Operating budget, Q1 2026"],
+            &[],
+            &["Category", "Jan", "Feb", "Mar", "Q1 total", "Budget", "Variance"],
+            &["Salaries", "$42,000", "$42,000", "$44,500", "=SUM(B4:D4)", "$132,000", "=E4/F4-1"],
+            &["Rent", "$6,200", "$6,200", "$6,200", "=SUM(B5:D5)", "$18,600", "=E5/F5-1"],
+            &["Software", "$1,940", "$2,115", "$2,380", "=SUM(B6:D6)", "$6,000", "=E6/F6-1"],
+            &["Travel", "$3,400", "$1,250", "$4,860", "=SUM(B7:D7)", "$9,000", "=E7/F7-1"],
+            &["Marketing", "$5,000", "$7,500", "$6,100", "=SUM(B8:D8)", "$18,000", "=E8/F8-1"],
+            &["Total", "=SUM(B4:B8)", "=SUM(C4:C8)", "=SUM(D4:D8)", "=SUM(E4:E8)", "=SUM(F4:F8)", "=E9/F9-1"],
         ];
         let mut items = Vec::new();
         for (r, row) in rows.iter().enumerate() {
@@ -927,25 +925,21 @@ impl Spreadsheet {
             }
         }
         self.last_stats = Some(self.wb.set_inputs(items));
-        for r in 4..=7 {
-            self.wb.set_format(Addr::new(s, CellRef::new(r - 1, 3)), Some("$#,##0.00"));
-        }
-        for r in [9, 10] {
-            self.wb.set_format(Addr::new(s, CellRef::new(r - 1, 3)), Some("$#,##0.00"));
-        }
-        self.wb.set_col_width(s, 0, Some(140.0));
         let at = |a1: &str| Addr::new(s, CellRef::parse(a1).unwrap());
-        self.wb.set_style(at("A1"), &Style { bold: true, ..Style::default() });
-        let header = Style { bold: true, fill: Some(0xDDEBF7), bottom: Border::THIN, ..Style::default() };
-        for c in ["A3", "B3", "C3", "D3"] {
-            let mut st = header.clone();
-            st.align = if c == "A3" { HAlign::General } else { HAlign::Right };
-            self.wb.set_style(at(c), &st);
+        for r in 4..=9 {
+            for c in ["B", "C", "D", "E", "F"] {
+                self.wb.set_format(at(&format!("{c}{r}")), Some("$#,##0"));
+            }
+            // Over budget (positive variance) is the number to notice.
+            self.wb.set_format(at(&format!("G{r}")), Some("[Red]+0.0%;-0.0%;0.0%"));
         }
-        let total = Style { bold: true, top: Border::THIN, bottom: Border { style: xl_engine::LineStyle::Double, color: None }, ..Style::default() };
-        self.wb.set_style(at("C10"), &total);
-        self.wb.set_style(at("D10"), &total);
-        self.wb.set_style(at("A14"), &Style { italic: true, color: Some(0x7F7F7F), ..Style::default() });
+        self.wb.set_style(at("A1"), &Style { bold: true, ..Style::default() });
+        for c in ["A", "B", "C", "D", "E", "F", "G"] {
+            let align = if c == "A" { HAlign::General } else { HAlign::Right };
+            self.wb.set_style(at(&format!("{c}3")), &Style { bold: true, align, bottom: Border::THIN, ..Style::default() });
+            self.wb.set_style(at(&format!("{c}9")), &Style { bold: true, top: Border::THIN, ..Style::default() });
+        }
+        self.wb.set_col_width(s, 0, Some(150.0));
         self.active = CellRef::new(3, 1);
         self.anchor = self.active;
         self.dirty = false;
@@ -1428,7 +1422,7 @@ impl Spreadsheet {
         let cells: Vec<CellRef> = self.wb.store(self.cur).iter_range(r).take(5_000).map(|(c, _)| c).collect();
         for c in cells {
             let s = self.wb.display(self.at(c)).text;
-            let line = crate::paint::shape(window, s, f.clone(), self.theme.text, CELL_FONT);
+            let line = crate::paint::shape(window, s, f.clone(), self.theme.ink, CELL_FONT);
             w = w.max(f64::from(line.width) + 2.0 * CELL_PAD + 2.0);
         }
         self.wb.set_col_width(self.cur, col, Some(w.min(800.0)));
@@ -1451,7 +1445,8 @@ impl Spreadsheet {
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled".into())
     }
 
-    pub(crate) fn selection_summary(&self) -> Option<String> {
+    /// Sum / Average / Count of the selection, as (label, value) pairs.
+    pub(crate) fn selection_summary(&self) -> Option<Vec<(&'static str, String)>> {
         let sel = self.selection();
         if sel.cell_count() < 2 {
             return None;
@@ -1472,15 +1467,15 @@ impl Spreadsheet {
             return None;
         }
         if nums == 0 {
-            return Some(format!("Count  {count}"));
+            return Some(vec![("Count", count.to_string())]);
         }
         // Show totals in the active cell's number format when it has one.
         let fmt = self.wb.format(self.at(self.active)).filter(|f| !f.is_general()).cloned();
         let show = |n: f64| match &fmt {
-            Some(f) => f.format(&Value::Number(n)).text,
+            Some(f) => f.format(&Value::Number(n)).text.trim().to_string(),
             None => xl_engine::format_general(n),
         };
-        Some(format!("Sum  {}     Average  {}     Count  {count}", show(sum), show(sum / nums as f64)))
+        Some(vec![("Sum", show(sum)), ("Average", show(sum / nums as f64)), ("Count", count.to_string())])
     }
 
     /// Short label for the active cell's number format.

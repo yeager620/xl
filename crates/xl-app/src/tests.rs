@@ -5,8 +5,54 @@ use xl_engine::{Addr, CellRef, Value};
 
 use crate::app::Spreadsheet;
 
+/// A fixed workbook for interaction tests (independent of the welcome sheet).
+fn fixture() -> xl_engine::Workbook {
+    use xl_engine::{Border, Style, Workbook};
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    wb.rename_sheet(s, "Welcome").unwrap();
+    let rows: &[&[&str]] = &[
+        &["Welcome to xl"],
+        &[],
+        &["Item", "Qty", "Price", "Total"],
+        &["Coffee beans", "3", "$14.50", "=B4*C4"],
+        &["Oat milk", "6", "$2.25", "=B5*C5"],
+        &["Croissants", "12", "$1.80", "=B6*C6"],
+        &["", "", "Subtotal", "=SUM(D4:D6)"],
+        &["", "", "Tax rate", "8.25%"],
+        &["", "", "Tax", "=ROUND(D7*D8,2)"],
+        &["", "", "Total", "=D7+D9"],
+        &[],
+        &["Ordered", "=TODAY()"],
+        &[],
+        &["A note in the last row of data"],
+    ];
+    let mut items = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            if !v.is_empty() {
+                items.push((Addr::new(s, CellRef::new(r as u32, c as u32)), v.to_string()));
+            }
+        }
+    }
+    wb.set_inputs(items);
+    for a1 in ["D4", "D5", "D6", "D7", "D9", "D10"] {
+        wb.set_format(Addr::new(s, CellRef::parse(a1).unwrap()), Some("$#,##0.00"));
+    }
+    wb.set_style(Addr::new(s, CellRef::parse("A3").unwrap()), &Style { bold: true, bottom: Border::THIN, ..Style::default() });
+    wb.set_col_width(s, 0, Some(140.0));
+    wb
+}
+
 fn setup(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestContext) {
     let (view, cx) = cx.add_window_view(|window, cx| Spreadsheet::new(None, window, cx));
+    view.update(cx, |s, _| {
+        s.wb = fixture();
+        s.cur = s.wb.sheet_ids()[0];
+        s.active = CellRef::parse("B4").unwrap();
+        s.anchor = s.active;
+        s.dirty = false;
+    });
     cx.run_until_parked();
     (view, cx)
 }
@@ -420,6 +466,8 @@ fn command_palette_runs_commands_jumps_and_inserts_functions(cx: &mut TestAppCon
 /// armed "drag to move"; a 1px wobble during the click started a compositor
 /// move (swallowing the click). The test window's start_window_move/zoom
 /// panic, so any such move fails this test.
+// Element lookups (debug_bounds) are only recorded with debug assertions.
+#[cfg(debug_assertions)]
 #[gpui::test]
 fn clicking_title_bar_buttons_never_starts_a_window_move(cx: &mut TestAppContext) {
     use gpui::{Decorations, Modifiers, MouseButton, Tiling, point, px};

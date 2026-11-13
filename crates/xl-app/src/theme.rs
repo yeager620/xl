@@ -1,24 +1,36 @@
 use gpui::{Hsla, WindowAppearance, rgb, rgba};
 
+/// Design tokens. "Quiet pro tool": neutral graphite chrome, a white (or
+/// near-black) canvas for the grid, and one deep-blue accent reserved for
+/// selection, focus and active state.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
-    pub bg: Hsla,
-    pub surface: Hsla,
-    pub border: Hsla,
-    pub header_bg: Hsla,
-    pub header_active_bg: Hsla,
-    pub header_fg: Hsla,
-    pub header_active_fg: Hsla,
-    pub grid: Hsla,
-    pub text: Hsla,
-    pub muted: Hsla,
+    /// The grid and editable surfaces.
+    pub canvas: Hsla,
+    /// Title bar, headers, bottom bar.
+    pub chrome: Hsla,
+    /// Hover state on chrome controls.
+    pub chrome_hover: Hsla,
+    /// Pressed / toggled-on state on chrome controls.
+    pub chrome_active: Hsla,
+    /// Dividers between chrome regions.
+    pub divider: Hsla,
+    /// Gridlines.
+    pub rule: Hsla,
+    pub ink: Hsla,
+    pub ink_muted: Hsla,
+    pub ink_faint: Hsla,
     pub accent: Hsla,
-    pub accent_fg: Hsla,
+    pub on_accent: Hsla,
+    /// Selected range fill.
     pub selection: Hsla,
-    pub editor_bg: Hsla,
+    /// Row/column header of the selection.
+    pub header_selected: Hsla,
     pub error: Hsla,
     pub scrollbar: Hsla,
+    pub popover: Hsla,
+    /// Formula reference highlight colors.
     pub ref_colors: [Hsla; 6],
 }
 
@@ -41,46 +53,46 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             dark: false,
-            bg: c(0xFFFFFF),
-            surface: c(0xF7F7F8),
-            border: c(0xE4E4E7),
-            header_bg: c(0xF6F6F7),
-            header_active_bg: c(0xE6E8FF),
-            header_fg: c(0x8A8A93),
-            header_active_fg: c(0x3B3FC4),
-            grid: c(0xEDEDF0),
-            text: c(0x1A1A1E),
-            muted: c(0x75757E),
-            accent: c(0x4F52E5),
-            accent_fg: c(0xFFFFFF),
-            selection: ca(0x4F52E51A),
-            editor_bg: c(0xFFFFFF),
-            error: c(0xD92D20),
-            scrollbar: ca(0x00000030),
-            ref_colors: [c(0x2563EB), c(0x16A34A), c(0x9333EA), c(0xEA580C), c(0xDB2777), c(0x0D9488)],
+            canvas: c(0xFFFFFF),
+            chrome: c(0xF1F2F4),
+            chrome_hover: c(0xE4E6EA),
+            chrome_active: c(0xD9DCE2),
+            divider: c(0xD7DADF),
+            rule: c(0xE4E6E9),
+            ink: c(0x1E2024),
+            ink_muted: c(0x6A6F78),
+            ink_faint: c(0x9AA0A9),
+            accent: c(0x1F5FBF),
+            on_accent: c(0xFFFFFF),
+            selection: ca(0x1F5FBF1F),
+            header_selected: c(0xDCE4F2),
+            error: c(0xC4271B),
+            scrollbar: ca(0x1E202440),
+            popover: c(0xFFFFFF),
+            ref_colors: [c(0x1F5FBF), c(0x1E8449), c(0x8E44AD), c(0xC0661A), c(0xC2185B), c(0x00838F)],
         }
     }
 
     pub fn dark() -> Self {
         Self {
             dark: true,
-            bg: c(0x141417),
-            surface: c(0x1B1B1F),
-            border: c(0x2B2B31),
-            header_bg: c(0x1B1B1F),
-            header_active_bg: c(0x2C2B55),
-            header_fg: c(0x7C7C86),
-            header_active_fg: c(0xC7CBFF),
-            grid: c(0x24242A),
-            text: c(0xEBEBEF),
-            muted: c(0x8C8C96),
-            accent: c(0x8487FF),
-            accent_fg: c(0x0F0F14),
-            selection: ca(0x8487FF24),
-            editor_bg: c(0x1E1E23),
-            error: c(0xFF6B5E),
-            scrollbar: ca(0xFFFFFF33),
-            ref_colors: [c(0x60A5FA), c(0x4ADE80), c(0xC084FC), c(0xFB923C), c(0xF472B6), c(0x2DD4BF)],
+            canvas: c(0x1D1E21),
+            chrome: c(0x26282C),
+            chrome_hover: c(0x303237),
+            chrome_active: c(0x3A3D43),
+            divider: c(0x37393F),
+            rule: c(0x2E3035),
+            ink: c(0xE3E5E9),
+            ink_muted: c(0x9196A0),
+            ink_faint: c(0x666B74),
+            accent: c(0x6EA2F2),
+            on_accent: c(0x0F1A2C),
+            selection: ca(0x6EA2F229),
+            header_selected: c(0x2F3A4C),
+            error: c(0xF2766B),
+            scrollbar: ca(0xE3E5E94D),
+            popover: c(0x2B2D32),
+            ref_colors: [c(0x6EA2F2), c(0x5CC98A), c(0xC39BE0), c(0xE9A15E), c(0xF07DA8), c(0x4DC9D4)],
         }
     }
 }

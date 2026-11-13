@@ -30,7 +30,8 @@ cargo run --release -p xl-bench  # recalc benchmarks
 | `crates/xl-io` | xlsx read (streaming) / write, CSV/TSV |
 | `crates/xl-app` | The GPUI desktop app (`xl` binary): grid, formula bar, sheet tabs, format & style toolbar, command palette, IME input |
 | `crates/xl-bench` | Recalc benchmarks |
-| `assets/fonts` | Bundled Inter (SIL OFL) |
+| `assets/fonts` | Bundled Source Sans 3 (SIL OFL) |
+| `assets/icons` | Bundled Lucide icons (ISC) |
 
 ## Keyboard
 

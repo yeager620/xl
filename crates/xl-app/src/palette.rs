@@ -199,10 +199,10 @@ impl Spreadsheet {
                 .py(px(7.))
                 .rounded(px(6.))
                 .cursor_pointer()
-                .when(selected, |d| d.bg(t.header_active_bg).text_color(t.header_active_fg))
-                .when(!selected, |d| d.hover(|s| s.bg(t.header_bg)))
+                .when(selected, |d| d.bg(t.header_selected).text_color(t.ink))
+                .when(!selected, |d| d.hover(|s| s.bg(t.chrome_hover)))
                 .child(div().child(SharedString::from(label)))
-                .child(div().text_size(px(11.)).text_color(t.muted).child(SharedString::from(hint)))
+                .child(div().text_size(px(11.)).text_color(t.ink_muted).child(SharedString::from(hint)))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.run_palette_item(item, window, cx);
                     cx.notify();
@@ -218,12 +218,12 @@ impl Spreadsheet {
             .flex_col()
             .gap(px(4.))
             .rounded(px(10.))
-            .bg(t.bg)
+            .bg(t.popover)
             .border_1()
-            .border_color(t.border)
+            .border_color(t.divider)
             .shadow_lg()
             .text_size(px(13.))
-            .text_color(t.text)
+            .text_color(t.ink)
             .child(
                 div()
                     .flex()
@@ -233,14 +233,14 @@ impl Spreadsheet {
                     .px(px(10.))
                     .mb(px(4.))
                     .rounded(px(6.))
-                    .bg(t.surface)
+                    .bg(t.canvas)
                     .border_1()
-                    .border_color(t.border)
-                    .child(div().text_color(if p.query.is_empty() { t.muted } else { t.text }).child(query))
+                    .border_color(t.divider)
+                    .child(div().text_color(if p.query.is_empty() { t.ink_muted } else { t.ink }).child(query))
                     .when(!p.query.is_empty(), |d| d.child(div().w(px(1.5)).h(px(16.)).bg(t.accent))),
             )
             .children(rows)
-            .when(items.is_empty(), |d| d.child(div().px(px(12.)).py(px(8.)).text_color(t.muted).font_weight(FontWeight::NORMAL).child("No matches")))
+            .when(items.is_empty(), |d| d.child(div().px(px(12.)).py(px(8.)).text_color(t.ink_muted).font_weight(FontWeight::NORMAL).child("No matches")))
     }
 }
 

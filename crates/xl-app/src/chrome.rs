@@ -1,17 +1,42 @@
-//! Everything around the grid: toolbar, formula bar, sheet tabs, status bar.
+//! Everything around the grid: title bar (toolbar), formula bar, bottom bar
+//! (sheet tabs + selection summary), menus, tooltips and the window frame.
 
 use gpui::{
-    AnyElement, Context, CursorStyle, Decorations, ExternalPaths, FontWeight, HitboxBehavior, Pixels, Point, ResizeEdge, Size, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, deferred, div, prelude::FluentBuilder, px, rgb,
+    AnyElement, AnyView, App, AppContext, Context, CursorStyle, Decorations, ExternalPaths, FontWeight, Hsla, HitboxBehavior, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, ResizeEdge, SharedString, Size, StatefulInteractiveElement, Styled, Window,
+    canvas, deferred, div, prelude::FluentBuilder, px, rgb, svg,
 };
-use xl_engine::{HAlign, Rgb, quote_sheet_name};
+use xl_engine::{HAlign, NumberFormat, Rgb, Value, quote_sheet_name};
 
 use crate::app::{BorderPreset, EditMode, Emphasis, Menu, Spreadsheet};
+use crate::paint::paint_ops;
+use crate::refs::scan_refs;
+use crate::theme::Theme;
 
-/// Swatch palette: strong colors, then light tints.
-const PALETTE: [[Rgb; 8]; 2] = [
-    [0x000000, 0x7F7F7F, 0xC00000, 0xE26B0A, 0xBF8F00, 0x548235, 0x2F5597, 0x7030A0],
-    [0xFFFFFF, 0xD9D9D9, 0xF8CBAD, 0xFCE4D6, 0xFFF2CC, 0xE2EFDA, 0xDDEBF7, 0xE4DFEC],
+const TITLE_H: f32 = 40.0;
+const FORMULA_H: f32 = 30.0;
+const BOTTOM_H: f32 = 30.0;
+const ICON: f32 = 16.0;
+const RADIUS: f32 = 4.0;
+
+/// Swatches: strong colors, then light tints.
+const SWATCHES: [[Rgb; 8]; 2] = [
+    [0x000000, 0x6A6F78, 0xC4271B, 0xD9730D, 0xB7950B, 0x2E7D32, 0x1F5FBF, 0x6A3FA0],
+    [0xFFFFFF, 0xE4E6E9, 0xF6D5D2, 0xFBE3CC, 0xFFF1C2, 0xD9EDDA, 0xD6E3F7, 0xE6DCF2],
+];
+
+/// Number formats offered in the format menu: (name, code, sample value is a date?).
+const NUMBER_FORMATS: [(&str, Option<&str>, bool); 10] = [
+    ("General", None, false),
+    ("Number", Some("#,##0.00"), false),
+    ("Currency", Some("$#,##0.00"), false),
+    ("Accounting", Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)"), false),
+    ("Percent", Some("0.00%"), false),
+    ("Scientific", Some("0.00E+00"), false),
+    ("Short date", Some("m/d/yyyy"), true),
+    ("Long date", Some("dddd, mmmm d, yyyy"), true),
+    ("Time", Some("h:mm AM/PM"), true),
+    ("Text", Some("@"), false),
 ];
 
 /// Width of the invisible border used for resizing (and the shadow) when we
@@ -52,8 +77,69 @@ fn no_drag<E: InteractiveElement>(e: E) -> E {
     e.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_mouse_move(|_, _, cx| cx.stop_propagation())
 }
 
-/// GNOME-style round window button.
-fn window_button(t: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+fn icon(name: &'static str, color: Hsla) -> impl IntoElement {
+    svg().path(format!("icons/{name}.svg")).size(px(ICON)).flex_none().text_color(color)
+}
+
+// ---------------------------------------------------------------- tooltips
+
+struct Tip {
+    text: SharedString,
+    keys: Option<SharedString>,
+    theme: Theme,
+}
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(RADIUS))
+            .bg(t.popover)
+            .border_1()
+            .border_color(t.divider)
+            .shadow_md()
+            .font_family(crate::FONT)
+            .text_size(px(12.5))
+            .text_color(t.ink)
+            .child(self.text.clone())
+            .when_some(self.keys.clone(), |d, k| d.child(div().text_color(t.ink_muted).child(k)))
+    }
+}
+
+fn tip(t: Theme, text: &'static str, keys: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_, cx| cx.new(|_| Tip { text: text.into(), keys: (!keys.is_empty()).then(|| keys.into()), theme: t }).into()
+}
+
+// ----------------------------------------------------------------- buttons
+
+fn tool_button(t: &Theme, id: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(|| id.to_string())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(2.))
+        .h(px(28.))
+        .min_w(px(28.))
+        .px(px(6.))
+        .rounded(px(RADIUS))
+        .cursor_pointer()
+        .when(active, |d| d.bg(t.chrome_active))
+        .when(!active, |d| d.hover(|s| s.bg(t.chrome_hover)))
+}
+
+fn divider(t: &Theme) -> impl IntoElement {
+    div().w(px(1.)).h(px(18.)).mx(px(6.)).bg(t.divider)
+}
+
+fn window_button(t: &Theme, id: &'static str, name: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .debug_selector(|| id.to_string())
@@ -62,163 +148,237 @@ fn window_button(t: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
         .justify_center()
         .size(px(24.))
         .rounded_full()
-        .bg(rgb(if t.dark { 0x2E2E34 } else { 0xE4E4E8 }))
-        .text_color(t.text)
+        .bg(t.chrome_hover)
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(if t.dark { 0x3A3A42 } else { 0xD6D6DC })))
+        .hover(|s| s.bg(t.chrome_active))
+        .child(svg().path(format!("icons/{name}.svg")).size(px(14.)).text_color(t.ink))
 }
 
-/// A small icon of three text lines aligned left/center/right.
-fn align_icon(t: &Theme, a: HAlign) -> impl IntoElement {
-    let bar = |w: f32| div().h(px(1.5)).w(px(w)).bg(t.muted).rounded(px(1.));
-    let col = div().flex().flex_col().gap(px(2.5)).w(px(14.));
-    let col = match a {
-        HAlign::Left => col.items_start(),
-        HAlign::Center => col.items_center(),
-        _ => col.items_end(),
-    };
-    col.child(bar(14.)).child(bar(9.)).child(bar(12.))
-}
-
-fn icon_button(t: &Theme, id: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+fn menu_panel(t: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
     div()
-        .id(id)
-        .debug_selector(|| id.to_string())
+        .id("menu-panel")
+        .occlude()
+        .mt(px(4.))
+        .w(px(width))
+        .p(px(4.))
         .flex()
-        .items_center()
-        .justify_center()
-        .h(px(26.))
-        .min_w(px(28.))
-        .px(px(6.))
+        .flex_col()
         .rounded(px(6.))
-        .cursor_pointer()
-        .text_size(px(13.))
-        .when(active, |d| d.bg(t.header_active_bg).text_color(t.header_active_fg))
-        .when(!active, |d| d.text_color(t.muted).hover(|s| s.bg(t.header_bg)))
-}
-use crate::paint::paint_ops;
-use crate::refs::scan_refs;
-use crate::theme::Theme;
-
-fn kbd(t: &Theme, keys: &'static str, label: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .text_size(px(12.))
-        .text_color(t.muted)
-        .child(div().px(px(5.)).py(px(1.)).rounded(px(4.)).border_1().border_color(t.border).text_size(px(10.5)).child(keys))
-        .child(label)
+        .bg(t.popover)
+        .border_1()
+        .border_color(t.divider)
+        .shadow_lg()
+        .text_size(px(14.))
+        .text_color(t.ink)
+        .whitespace_nowrap()
 }
 
-fn segment(t: &Theme, id: &'static str, label: &'static str, active: bool, tip_left: bool, tip_right: bool) -> gpui::Stateful<gpui::Div> {
+fn menu_item(t: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, detail: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
+        .flex_row()
         .items_center()
-        .justify_center()
-        .h(px(26.))
-        .px(px(9.))
-        .text_size(px(12.))
+        .justify_between()
+        .gap(px(16.))
+        .h(px(28.))
+        .px(px(8.))
+        .rounded(px(RADIUS))
         .cursor_pointer()
-        .when(tip_left, |d| d.rounded_l(px(6.)))
-        .when(tip_right, |d| d.rounded_r(px(6.)))
-        .when(!tip_left, |d| d.border_l_1().border_color(t.border))
-        .when(active, |d| d.bg(t.header_active_bg).text_color(t.header_active_fg).font_weight(FontWeight::MEDIUM))
-        .when(!active, |d| d.text_color(t.muted).hover(|s| s.bg(t.header_bg)))
-        .child(label)
+        .hover(|s| s.bg(t.chrome_hover))
+        .child(div().child(label.into()))
+        .child(div().text_color(t.ink_muted).child(detail.into()))
+}
+
+fn menu_separator(t: &Theme) -> impl IntoElement {
+    div().h(px(1.)).mx(px(4.)).my(px(4.)).bg(t.divider)
 }
 
 impl Spreadsheet {
+    // ----------------------------------------------------------- title bar
+
     fn render_window_controls(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let controls = window.window_controls();
-        let maximized = window.is_maximized();
-        let stroke = t.text;
         no_drag(div())
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.))
-            .ml(px(8.))
+            .gap(px(10.))
+            .ml(px(10.))
             .when(controls.minimize, |d| {
-                d.child(window_button(&t, "win-min").child(div().w(px(9.)).h(px(1.5)).bg(stroke)).on_click(|_, window, cx| {
+                d.child(window_button(&t, "win-min", "minus").on_click(|_, window, cx| {
                     cx.stop_propagation();
                     window.minimize_window();
                 }))
             })
             .when(controls.maximize, |d| {
-                let icon = if maximized {
-                    // Restore: two overlapping squares.
-                    div()
-                        .relative()
-                        .size(px(10.))
-                        .child(div().absolute().top(px(-2.)).left(px(2.)).size(px(8.)).border(px(1.5)).border_color(stroke))
-                        .child(div().absolute().top(px(1.)).left(px(-1.)).size(px(8.)).border(px(1.5)).border_color(stroke).bg(rgb(if t.dark { 0x2E2E34 } else { 0xE4E4E8 })))
-                } else {
-                    div().size(px(9.)).border(px(1.5)).border_color(stroke)
-                };
-                d.child(window_button(&t, "win-max").child(icon).on_click(|_, window, cx| {
+                let name = if window.is_maximized() { "copy" } else { "square" };
+                d.child(window_button(&t, "win-max", name).on_click(|_, window, cx| {
                     cx.stop_propagation();
                     window.zoom_window();
                 }))
             })
+            .child(window_button(&t, "win-close", "x").on_click(cx.listener(|_, _, window, cx| {
+                cx.stop_propagation();
+                window.remove_window();
+            })))
+    }
+
+    /// A toolbar button that opens a menu, with the menu attached below it.
+    fn menu_button(&self, id: &'static str, m: Menu, tooltip: &'static str, content: AnyElement, cx: &mut Context<Self>) -> impl IntoElement {
+        self.menu_button_inner(id, m, tooltip, content, true, cx)
+    }
+
+    fn menu_button_inner(&self, id: &'static str, m: Menu, tooltip: &'static str, content: AnyElement, chevron: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let open = self.menu == Some(m);
+        div()
+            .relative()
             .child(
-                window_button(&t, "win-close")
-                    .text_size(px(15.))
-                    .child("×")
-                    .on_click(cx.listener(|_, _, window, cx| {
-                        cx.stop_propagation();
-                        window.remove_window();
+                tool_button(&t, id, open)
+                    .child(content)
+                    .when(chevron, |d| d.child(icon("chevron-down", t.ink_faint)))
+                    .when(!open, |d| d.tooltip(tip(t, tooltip, "")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = if this.menu == Some(m) { None } else { Some(m) };
+                        cx.notify();
                     })),
             )
+            .when(open, |d| {
+                let panel = div().absolute().top(px(30.)).child(self.render_menu(m, cx));
+                let panel = if m == Menu::Main { panel.right_0() } else { panel.left_0() };
+                d.child(deferred(panel).with_priority(2))
+            })
     }
 
     fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let client_frame = matches!(window.window_decorations(), Decorations::Client { .. });
         let t = self.theme;
-        let fmt = self.format_label();
-        let formats: [(&'static str, &'static str, Option<&'static str>, &[&str]); 5] = [
-            ("fmt-general", "General", None, &["General"]),
-            ("fmt-number", "1,234", Some("#,##0.00"), &["Number", "Scientific"]),
-            ("fmt-currency", "$", Some("$#,##0.00"), &["Currency"]),
-            ("fmt-percent", "%", Some("0%"), &["Percent"]),
-            ("fmt-date", "Date", Some("m/d/yyyy"), &["Date", "Time"]),
-        ];
-        let n = formats.len();
-        let group = no_drag(div()).flex().flex_row().items_center().rounded(px(6.)).border_1().border_color(t.border).children(formats.into_iter().enumerate().map(
-            |(i, (id, label, code, kinds))| {
-                segment(&t, id, label, kinds.contains(&fmt), i == 0, i == n - 1).on_click(cx.listener(move |this, _, _, cx| {
-                    this.apply_format(code);
-                    cx.notify();
-                }))
-            },
-        ));
-        let decimals = no_drag(div())
+        let client_frame = matches!(window.window_decorations(), Decorations::Client { .. });
+        let st = self.wb.style(self.at(self.active)).clone();
+
+        let emph = |id: &'static str, name: &'static str, on: bool, e: Emphasis, label: &'static str, keys: &'static str, cx: &mut Context<Self>| {
+            tool_button(&t, id, on).child(icon(name, t.ink)).tooltip(tip(t, label, keys)).on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_emphasis(e);
+                cx.notify();
+            }))
+        };
+        let format_label = self.format_label();
+        let text_color = st.color.map_or(t.ink, |c| rgb(c).into());
+
+        let tools = no_drag(div())
             .flex()
             .flex_row()
             .items_center()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(t.border)
-            .child(segment(&t, "dec-less", ".0←", false, true, false).on_click(cx.listener(|this, _, _, cx| {
-                this.bump_decimals(-1);
+            .gap(px(2.))
+            .child(tool_button(&t, "undo", false).child(icon("undo-2", t.ink)).tooltip(tip(t, "Undo", "Ctrl+Z")).on_click(cx.listener(|this, _, _, cx| {
+                this.undo_redo(true);
                 cx.notify();
             })))
-            .child(segment(&t, "dec-more", ".00→", false, false, true).on_click(cx.listener(|this, _, _, cx| {
-                this.bump_decimals(1);
+            .child(tool_button(&t, "redo", false).child(icon("redo-2", t.ink)).tooltip(tip(t, "Redo", "Ctrl+Y")).on_click(cx.listener(|this, _, _, cx| {
+                this.undo_redo(false);
                 cx.notify();
-            })));
+            })))
+            .child(divider(&t))
+            .child(self.menu_button(
+                "number-format",
+                Menu::NumberFormat,
+                "Number format",
+                div().min_w(px(72.)).text_size(px(14.)).text_color(t.ink).child(format_label).into_any_element(),
+                cx,
+            ))
+            .child(tool_button(&t, "fmt-currency", format_label == "Currency").child(icon("dollar-sign", t.ink)).tooltip(tip(t, "Currency", "Ctrl+Shift+4")).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.apply_format(Some("$#,##0.00"));
+                    cx.notify();
+                }),
+            ))
+            .child(tool_button(&t, "fmt-percent", format_label == "Percent").child(icon("percent", t.ink)).tooltip(tip(t, "Percent", "Ctrl+Shift+5")).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.apply_format(Some("0%"));
+                    cx.notify();
+                }),
+            ))
+            .child(tool_button(&t, "dec-less", false).child(icon("decimals-arrow-left", t.ink)).tooltip(tip(t, "Fewer decimal places", "")).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.bump_decimals(-1);
+                    cx.notify();
+                }),
+            ))
+            .child(tool_button(&t, "dec-more", false).child(icon("decimals-arrow-right", t.ink)).tooltip(tip(t, "More decimal places", "")).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.bump_decimals(1);
+                    cx.notify();
+                }),
+            ))
+            .child(divider(&t))
+            .child(emph("bold", "bold", st.bold, Emphasis::Bold, "Bold", "Ctrl+B", cx))
+            .child(emph("italic", "italic", st.italic, Emphasis::Italic, "Italic", "Ctrl+I", cx))
+            .child(emph("underline", "underline", st.underline, Emphasis::Underline, "Underline", "Ctrl+U", cx))
+            .child(emph("strike", "strikethrough", st.strike, Emphasis::Strike, "Strikethrough", "Ctrl+5", cx))
+            .child(divider(&t))
+            .child(self.menu_button(
+                "text-color",
+                Menu::TextColor,
+                "Text color",
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(icon("baseline", t.ink))
+                    .child(div().mt(px(-3.)).w(px(14.)).h(px(3.)).bg(text_color))
+                    .into_any_element(),
+                cx,
+            ))
+            .child(self.menu_button(
+                "fill-color",
+                Menu::Fill,
+                "Fill color",
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(icon("paint-bucket", t.ink))
+                    .child(div().mt(px(-3.)).w(px(14.)).h(px(3.)).when_some(st.fill, |d, f| d.bg(rgb(f))).when(st.fill.is_none(), |d| d.border_1().border_color(t.ink_faint)))
+                    .into_any_element(),
+                cx,
+            ))
+            .child(divider(&t))
+            .children([("align-left", "align-left", HAlign::Left, "Align left"), ("align-center", "align-center", HAlign::Center, "Center"), (
+                "align-right",
+                "align-right",
+                HAlign::Right,
+                "Align right",
+            )]
+            .map(|(id, name, a, label)| {
+                tool_button(&t, id, st.align == a).child(icon(name, t.ink)).tooltip(tip(t, label, "")).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_align(a);
+                    cx.notify();
+                }))
+            }))
+            .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx));
+
+        let file = no_drag(div()).flex().flex_row().items_center().gap(px(2.)).child(
+            tool_button(&t, "palette", false).child(icon("search", t.ink)).tooltip(tip(t, "Search commands", "Ctrl+K")).on_click(cx.listener(|this, _, _, cx| {
+                this.open_palette();
+                cx.notify();
+            })),
+        );
+        let main_menu = no_drag(div()).child(self.menu_button_inner("main-menu", Menu::Main, "Menu", icon("menu", t.ink).into_any_element(), false, cx));
 
         div()
             .id("titlebar")
             .flex()
             .flex_row()
             .items_center()
-            .h(px(44.))
-            .px(px(14.))
-            .gap(px(10.))
-            .bg(t.surface)
+            .flex_none()
+            .h(px(TITLE_H))
+            .pl(px(12.))
+            .pr(px(8.))
+            .gap(px(4.))
+            .bg(t.chrome)
+            .border_b_1()
+            .border_color(t.divider)
             // Title-bar behavior: drag to move, double-click to maximize,
             // right-click for the window menu. A move only starts once the
             // mouse actually moves, so clicking buttons never drags.
@@ -252,167 +412,48 @@ impl Spreadsheet {
                     }
                 })
             })
-            .border_b_1()
-            .border_color(t.border)
+            .child(icon("sheet", t.ink_muted))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(22.))
-                    .rounded(px(6.))
-                    .bg(t.accent)
-                    .text_color(t.accent_fg)
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("xl"),
+                    .ml(px(4.))
+                    .mr(px(8.))
+                    .max_w(px(220.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.ink)
+                    .child(self.file_name())
+                    .when(self.dirty, |d| d.child(div().ml(px(4.)).text_color(t.ink_faint).font_weight(FontWeight::NORMAL).child("— edited"))),
             )
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).child(self.file_name()))
-            .when(self.dirty, |d| d.child(div().size(px(6.)).rounded_full().bg(t.muted)))
-            .child(div().w(px(10.)))
-            .child(group)
-            .child(decimals)
-            .child(self.render_style_controls(cx))
-            .child(div().flex_1())
-            .child(kbd(&t, "Ctrl+O", "Open"))
-            .child(kbd(&t, "Ctrl+S", "Save"))
-            .child(
-                no_drag(div().id("theme-toggle"))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(26.))
-                    .px(px(10.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(t.border)
-                    .text_size(px(12.))
-                    .text_color(t.muted)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.header_bg))
-                    .child(if t.dark { "Light" } else { "Dark" })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_theme();
-                        cx.notify();
-                    })),
-            )
+            .child(tools)
+            .child(div().flex_1().h_full())
+            .child(file)
+            .child(main_menu)
             .when(client_frame, |d| d.child(self.render_window_controls(window, cx)))
-    }
-
-    fn render_style_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        let st = self.wb.style(self.at(self.active)).clone();
-        let sep = || div().w(px(1.)).h(px(18.)).bg(t.border).mx(px(3.));
-        let emph = |id: &'static str, label: &'static str, on: bool, e: Emphasis, cx: &mut Context<Self>| {
-            let base = icon_button(&t, id, on).font_weight(FontWeight::SEMIBOLD).child(label);
-            let base = match e {
-                Emphasis::Bold => base.font_weight(FontWeight::BOLD),
-                Emphasis::Italic => base.italic(),
-                Emphasis::Underline => base.underline(),
-                Emphasis::Strike => base.line_through(),
-            };
-            base.on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_emphasis(e);
-                cx.notify();
-            }))
-        };
-        let menu_button = |id: &'static str, m: Menu, content: AnyElement, cx: &mut Context<Self>| {
-            let open = self.menu == Some(m);
-            div()
-                .flex()
-                .flex_col()
-                .child(icon_button(&t, id, open).gap(px(3.)).child(content).child(div().text_size(px(9.)).child("▾")).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.menu = if this.menu == Some(m) { None } else { Some(m) };
-                        cx.notify();
-                    },
-                )))
-                .relative()
-                .when(open, |d| d.child(deferred(div().absolute().top(px(28.)).left_0().child(self.render_menu(m, cx))).with_priority(2)))
-        };
-        let text_color_icon = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(13.)).child("A"))
-            .child(div().w(px(14.)).h(px(3.)).rounded(px(1.)).bg(st.color.map_or(t.text, |c| rgb(c).into())))
-            .into_any_element();
-        let fill_icon = div()
-            .size(px(14.))
-            .rounded(px(3.))
-            .border_1()
-            .border_color(t.muted)
-            .when_some(st.fill, |d, f| d.bg(rgb(f)))
-            .into_any_element();
-        let border_icon = div().size(px(14.)).border_1().border_color(t.muted).child(div().mt(px(5.)).h(px(1.)).bg(t.muted)).into_any_element();
-        let aligns = [("align-left", HAlign::Left), ("align-center", HAlign::Center), ("align-right", HAlign::Right)];
-        no_drag(div())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(1.))
-            .child(sep())
-            .child(emph("bold", "B", st.bold, Emphasis::Bold, cx))
-            .child(emph("italic", "I", st.italic, Emphasis::Italic, cx))
-            .child(emph("underline", "U", st.underline, Emphasis::Underline, cx))
-            .child(emph("strike", "S", st.strike, Emphasis::Strike, cx))
-            .child(sep())
-            .child(menu_button("text-color", Menu::TextColor, text_color_icon, cx))
-            .child(menu_button("fill-color", Menu::Fill, fill_icon, cx))
-            .child(sep())
-            .children(aligns.map(|(id, a)| {
-                icon_button(&t, id, st.align == a).child(align_icon(&t, a)).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_align(a);
-                    cx.notify();
-                }))
-            }))
-            .child(sep())
-            .child(menu_button("borders", Menu::Borders, border_icon, cx))
     }
 
     fn render_menu(&self, m: Menu, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let panel = div()
-            .id("menu-panel")
-            .occlude()
-            .min_w(px(196.))
-            .whitespace_nowrap()
-            .mt(px(4.))
-            .p(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .rounded(px(8.))
-            .bg(t.bg)
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .text_size(px(12.))
-            .text_color(t.text);
-        let item = |id: &'static str, label: &'static str| {
-            div().id(id).px(px(8.)).py(px(5.)).rounded(px(5.)).cursor_pointer().hover(|s| s.bg(t.header_bg)).child(label)
-        };
         match m {
             Menu::TextColor | Menu::Fill => {
                 let is_fill = m == Menu::Fill;
-                let reset = item(if is_fill { "no-fill" } else { "auto-color" }, if is_fill { "No fill" } else { "Automatic" }).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        if is_fill { this.set_fill(None) } else { this.set_text_color(None) }
-                        cx.notify();
-                    },
-                ));
+                let reset = menu_item(&t, "reset-color", if is_fill { "No fill" } else { "Automatic" }, "").on_click(cx.listener(move |this, _, _, cx| {
+                    if is_fill { this.set_fill(None) } else { this.set_text_color(None) }
+                    cx.notify();
+                }));
                 let mut rows = Vec::new();
-                for (ri, row) in PALETTE.iter().enumerate() {
+                for (ri, row) in SWATCHES.iter().enumerate() {
                     let mut swatches = Vec::new();
                     for (ci, &c) in row.iter().enumerate() {
                         swatches.push(
                             div()
                                 .id(("swatch", ri * 8 + ci))
                                 .size(px(20.))
-                                .rounded(px(4.))
+                                .rounded(px(3.))
                                 .bg(rgb(c))
                                 .border_1()
-                                .border_color(t.border)
+                                .border_color(t.divider)
                                 .cursor_pointer()
                                 .hover(|s| s.border_color(t.accent))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -421,31 +462,92 @@ impl Spreadsheet {
                                 })),
                         );
                     }
-                    rows.push(div().flex().flex_row().gap(px(4.)).children(swatches));
+                    rows.push(div().flex().flex_row().gap(px(4.)).px(px(8.)).py(px(2.)).children(swatches));
                 }
-                panel.child(reset).children(rows).into_any_element()
+                menu_panel(&t, 208.).child(reset).child(div().h(px(4.))).children(rows).child(div().h(px(4.))).into_any_element()
             }
             Menu::Borders => {
                 let presets = [
-                    ("b-all", "All borders", BorderPreset::All),
-                    ("b-outside", "Outside borders", BorderPreset::Outside),
-                    ("b-bottom", "Bottom border", BorderPreset::Bottom),
-                    ("b-thick", "Thick bottom border", BorderPreset::ThickBottom),
-                    ("b-top", "Top border", BorderPreset::Top),
-                    ("b-none", "No borders", BorderPreset::None),
+                    ("All borders", BorderPreset::All),
+                    ("Outside borders", BorderPreset::Outside),
+                    ("Bottom border", BorderPreset::Bottom),
+                    ("Thick bottom border", BorderPreset::ThickBottom),
+                    ("Top border", BorderPreset::Top),
+                    ("No borders", BorderPreset::None),
                 ];
-                panel
-                    .gap(px(0.))
-                    .children(presets.map(|(id, label, p)| {
-                        item(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                menu_panel(&t, 196.)
+                    .children(presets.into_iter().enumerate().map(|(i, (label, p))| {
+                        menu_item(&t, ("border", i), label, "").on_click(cx.listener(move |this, _, _, cx| {
                             this.apply_borders(p);
                             cx.notify();
                         }))
                     }))
                     .into_any_element()
             }
+            Menu::NumberFormat => {
+                // Each format previews the active cell's value (or a sample).
+                let a = self.at(self.active);
+                let v = self.wb.value(a).clone();
+                let is_date = self.wb.format(a).is_some_and(|f| f.is_date());
+                let number = if v.is_number() { v.clone() } else { Value::Number(1234.5) };
+                // Date formats preview the cell's date if it holds one, else now.
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) / 86_400.0 + 25_569.0;
+                let date = if is_date { v } else { Value::Number(now) };
+                menu_panel(&t, 300.)
+                    .children(NUMBER_FORMATS.into_iter().enumerate().map(|(i, (name, code, is_date))| {
+                        let sample = match code {
+                            None => xl_engine::format_general(match &number {
+                                Value::Number(n) => *n,
+                                _ => 0.0,
+                            }),
+                            Some(c) => NumberFormat::parse(c).format(if is_date { &date } else { &number }).text,
+                        };
+                        menu_item(&t, ("numfmt", i), name, sample.trim().to_string()).on_click(cx.listener(move |this, _, _, cx| {
+                            this.apply_format(code);
+                            this.menu = None;
+                            cx.notify();
+                        }))
+                    }))
+                    .into_any_element()
+            }
+            Menu::Main => {
+                let dark = t.dark;
+                let close = |this: &mut Spreadsheet| this.menu = None;
+                menu_panel(&t, 230.)
+                    .child(menu_item(&t, "m-open", "Open…", "Ctrl+O").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.open(cx);
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "m-save", "Save", "Ctrl+S").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.save(false, cx);
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "m-save-as", "Save as…", "Ctrl+Shift+S").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.save(true, cx);
+                        cx.notify();
+                    })))
+                    .child(menu_separator(&t))
+                    .child(menu_item(&t, "m-palette", "Search commands…", "Ctrl+K").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.open_palette();
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "m-theme", if dark { "Light appearance" } else { "Dark appearance" }, "").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.toggle_theme();
+                        cx.notify();
+                    })))
+                    .child(menu_separator(&t))
+                    .child(menu_item(&t, "m-quit", "Quit", "Ctrl+Q").on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                    .into_any_element()
+            }
         }
     }
+
+    // --------------------------------------------------------- formula bar
 
     fn render_formula_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
@@ -454,7 +556,7 @@ impl Spreadsheet {
             Some(e) if e.at.sheet != self.cur => format!("{}!{}", quote_sheet_name(self.wb.sheet_name(e.at.sheet)), e.at.cell),
             Some(e) => e.at.cell.to_string(),
             None if sel.start == sel.end => self.active.to_string(),
-            None => format!("{}R × {}C", sel.rows(), sel.cols()),
+            None => format!("{} × {}", sel.rows(), sel.cols()),
         };
         let (text, caret) = match &self.edit {
             Some(e) => (e.text.clone(), Some(e.cursor)),
@@ -468,13 +570,13 @@ impl Spreadsheet {
         spans.sort_by_key(|s| s.0);
         for (s, e, col) in spans {
             if s > pos {
-                segments.push((text[pos..s].to_string(), t.text));
+                segments.push((text[pos..s].to_string(), t.ink));
             }
             segments.push((text[s..e].to_string(), col));
             pos = e;
         }
         if pos < text.len() {
-            segments.push((text[pos..].to_string(), t.text));
+            segments.push((text[pos..].to_string(), t.ink));
         }
         let mut children: Vec<AnyElement> = Vec::new();
         let caret_el = || div().w(px(1.5)).h(px(16.)).bg(t.accent).into_any_element();
@@ -505,27 +607,27 @@ impl Spreadsheet {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(36.))
-            .bg(t.bg)
+            .flex_none()
+            .h(px(FORMULA_H))
+            .bg(t.canvas)
             .border_b_1()
-            .border_color(t.border)
+            .border_color(t.divider)
             .child(
                 div()
-                    .w(px(110.))
+                    .w(px(96.))
                     .h_full()
                     .flex()
                     .items_center()
-                    .px(px(12.))
+                    .px(px(10.))
                     .border_r_1()
-                    .border_color(t.border)
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(t.muted)
+                    .border_color(t.divider)
+                    .text_size(px(14.))
+                    .text_color(t.ink)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(name_box),
             )
-            .child(div().px(px(12.)).text_size(px(12.)).italic().text_color(if self.edit.is_some() { t.accent } else { t.muted }).child("fx"))
+            .child(div().px(px(8.)).child(icon("square-function", if self.edit.is_some() { t.accent } else { t.ink_faint })))
             .child(
                 div()
                     .id("formula-bar")
@@ -536,7 +638,7 @@ impl Spreadsheet {
                     .items_center()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_size(px(13.))
+                    .text_size(px(14.))
                     .cursor_text()
                     .children(children)
                     .on_mouse_down(
@@ -553,7 +655,9 @@ impl Spreadsheet {
             )
     }
 
-    fn render_sheet_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    // ---------------------------------------------------------- bottom bar
+
+    fn render_bottom_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ids = self.wb.sheet_ids().to_vec();
         let many = ids.len() > 1;
@@ -566,28 +670,27 @@ impl Spreadsheet {
                     .flex()
                     .items_center()
                     .min_w(px(40.))
-                    .px(px(4.))
-                    .rounded(px(3.))
-                    .bg(t.editor_bg)
-                    .border_1()
-                    .border_color(t.accent)
                     .child(SharedString::from(name))
-                    .child(div().w(px(1.5)).h(px(14.)).bg(t.accent))
+                    .child(div().w(px(1.5)).h(px(15.)).bg(t.accent))
                     .into_any_element(),
                 None => div().child(SharedString::from(self.wb.sheet_name(id).to_string())).into_any_element(),
             };
             div()
                 .id(("sheet-tab", id as usize))
                 .flex()
+                .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .h(px(26.))
-                .px(px(12.))
-                .rounded(px(6.))
-                .text_size(px(12.5))
+                .h_full()
+                .px(px(14.))
+                .text_size(px(14.))
                 .cursor_pointer()
-                .when(active, |d| d.bg(t.bg).border_1().border_color(t.border).text_color(t.text).font_weight(FontWeight::MEDIUM))
-                .when(!active, |d| d.text_color(t.muted).hover(|s| s.bg(t.header_bg)))
+                .border_r_1()
+                .border_color(t.divider)
+                // The active tab is part of the sheet: canvas-colored, with an
+                // accent rule along its bottom edge.
+                .when(active, |d| d.bg(t.canvas).text_color(t.ink).font_weight(FontWeight::SEMIBOLD).border_b_2().border_color(t.accent))
+                .when(!active, |d| d.text_color(t.ink_muted).hover(|s| s.bg(t.chrome_hover).text_color(t.ink)))
                 .child(label)
                 .when(active && many && self.renaming.is_none(), |d| {
                     d.child(
@@ -596,13 +699,14 @@ impl Spreadsheet {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .h(px(16.))
-                            .px(px(if confirming { 6. } else { 3. }))
-                            .rounded(px(4.))
-                            .text_size(px(11.))
-                            .when(confirming, |d| d.bg(t.error).text_color(t.accent_fg))
-                            .when(!confirming, |d| d.text_color(t.muted).hover(|s| s.bg(t.header_bg).text_color(t.error)))
-                            .child(if confirming { "Delete?" } else { "×" })
+                            .h(px(18.))
+                            .px(px(if confirming { 6. } else { 1. }))
+                            .rounded(px(3.))
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::NORMAL)
+                            .when(confirming, |d| d.bg(t.error).text_color(t.on_accent).child("Delete sheet?"))
+                            .when(!confirming, |d| d.hover(|s| s.bg(t.chrome_hover)).child(svg().path("icons/x.svg").size(px(13.)).text_color(t.ink_faint)))
+                            .tooltip(tip(t, "Delete sheet", ""))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.confirm_delete == Some(id) {
                                     this.delete_sheet(id);
@@ -629,72 +733,52 @@ impl Spreadsheet {
                 }))
         });
 
+        let mode = match &self.edit {
+            None if self.loading.is_some() => Some("Opening…"),
+            None => None,
+            Some(e) if e.can_point() && e.mode == EditMode::Enter => Some("Point"),
+            Some(e) if e.mode == EditMode::Enter => Some("Enter"),
+            Some(_) => Some("Edit"),
+        };
+        let summary = self.selection_summary();
+
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.))
-            .h(px(36.))
-            .px(px(8.))
-            .bg(t.surface)
+            .flex_none()
+            .h(px(BOTTOM_H))
+            .bg(t.chrome)
             .border_t_1()
-            .border_color(t.border)
-            .children(tabs)
+            .border_color(t.divider)
+            .text_size(px(13.5))
+            .child(div().flex().flex_row().h_full().border_r_1().border_color(t.divider).children(tabs))
             .child(
-                div()
-                    .id("add-sheet")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.))
-                    .rounded(px(6.))
-                    .text_size(px(16.))
-                    .text_color(t.muted)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.header_bg).text_color(t.text))
-                    .child("+")
+                tool_button(&t, "add-sheet", false)
+                    .mx(px(4.))
+                    .h(px(24.))
+                    .child(icon("plus", t.ink_muted))
+                    .tooltip(tip(t, "New sheet", "Ctrl+Shift+N"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.focus.focus(window, cx);
                         this.add_sheet();
                         cx.notify();
                     })),
             )
-    }
-
-    fn render_status_bar(&self) -> impl IntoElement {
-        let t = self.theme;
-        let mode = match &self.edit {
-            None if self.loading.is_some() => "Loading",
-            None if self.renaming.is_some() => "Rename",
-            None => "Ready",
-            Some(e) if e.can_point() && e.mode == EditMode::Enter => "Point",
-            Some(e) if e.mode == EditMode::Enter => "Enter",
-            Some(_) => "Edit",
-        };
-        let mode = if self.palette.is_some() { "Command" } else { mode };
-        let recalc = self.last_stats.map(|s| {
-            let us = s.elapsed.as_secs_f64() * 1e6;
-            let time = if us < 1000.0 { format!("{us:.0} µs") } else { format!("{:.1} ms", us / 1000.0) };
-            format!("Recalc {time} · {} cells", s.evaluated)
-        });
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(14.))
-            .h(px(28.))
-            .px(px(12.))
-            .bg(t.surface)
-            .border_t_1()
-            .border_color(t.border)
-            .text_size(px(11.5))
-            .text_color(t.muted)
-            .child(div().px(px(7.)).py(px(1.)).rounded(px(4.)).bg(t.header_active_bg).text_color(t.header_active_fg).font_weight(FontWeight::MEDIUM).child(mode))
-            .when_some(self.message.clone(), |d, (msg, err)| d.child(div().text_color(if err { t.error } else { t.muted }).child(msg)))
-            .child(div().flex_1())
-            .when_some(self.selection_summary(), |d, s| d.child(div().text_color(t.text).child(s)))
-            .child(self.format_label())
-            .when_some(recalc, |d, s| d.child(s))
+            .child(
+                div()
+                    .flex_1()
+                    .px(px(12.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .when_some(self.message.clone(), |d, (msg, err)| d.text_color(if err { t.error } else { t.ink_muted }).child(msg)),
+            )
+            .when_some(mode, |d, m| d.child(div().px(px(12.)).text_color(t.ink_muted).child(m)))
+            .when_some(summary, |d, parts| {
+                d.child(div().flex().flex_row().gap(px(18.)).pr(px(14.)).children(parts.into_iter().map(|(label, value)| {
+                    div().flex().flex_row().gap(px(6.)).child(div().text_color(t.ink_muted).child(label)).child(div().text_color(t.ink).child(value))
+                })))
+            })
     }
 }
 
@@ -735,10 +819,10 @@ impl Render for Spreadsheet {
             .size_full()
             .flex()
             .flex_col()
-            .bg(t.bg)
-            .text_color(t.text)
-            .font_family("Inter")
-            .text_size(px(13.))
+            .bg(t.canvas)
+            .text_color(t.ink)
+            .font_family(crate::FONT)
+            .text_size(px(14.))
             .child(self.render_toolbar(window, cx))
             .child(self.render_formula_bar(cx))
             .child(
@@ -754,8 +838,7 @@ impl Render for Spreadsheet {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll)),
             )
-            .child(self.render_sheet_tabs(cx))
-            .child(self.render_status_bar())
+            .child(self.render_bottom_bar(cx))
             .relative()
             .when(self.menu.is_some() || self.palette.is_some(), |d| {
                 // Transparent backdrop: a click anywhere outside the open menu or palette closes it.
@@ -773,7 +856,7 @@ impl Render for Spreadsheet {
                 )
             })
             .when(self.palette.is_some(), |d| {
-                d.child(deferred(div().absolute().top(px(90.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
+                d.child(deferred(div().absolute().top(px(64.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
             });
         self.window_frame(content, window)
     }
@@ -824,8 +907,8 @@ impl Spreadsheet {
             .size_full()
             .overflow_hidden()
             .cursor(CursorStyle::Arrow)
-            .bg(t.bg)
-            .border_color(gpui::rgb(if t.dark { 0x3A3A40 } else { 0xC9C9CF }))
+            .bg(t.canvas)
+            .border_color(gpui::rgb(if t.dark { 0x3A3C42 } else { 0xC4C7CD }))
             .when(!(tiling.top || tiling.left), |d| d.rounded_tl(rounding))
             .when(!(tiling.top || tiling.right), |d| d.rounded_tr(rounding))
             .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(rounding))
@@ -835,7 +918,7 @@ impl Spreadsheet {
             .when(!tiling.left, |d| d.border_l_1())
             .when(!tiling.right, |d| d.border_r_1())
             .when(!tiling.is_tiled(), |d| {
-                d.shadow(vec![gpui::BoxShadow::new(px(0.), px(2.), gpui::hsla(0., 0., 0., if t.dark { 0.5 } else { 0.25 })).blur_radius(inset / 1.5)])
+                d.shadow(vec![gpui::BoxShadow::new(px(0.), px(2.), gpui::hsla(0., 0., 0., if t.dark { 0.5 } else { 0.22 })).blur_radius(inset / 1.5)])
             })
             .on_mouse_move(|_, _, cx| cx.stop_propagation())
             .child(content);

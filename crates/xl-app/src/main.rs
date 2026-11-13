@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod chrome;
 mod ime;
 mod palette;
@@ -15,20 +16,27 @@ use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorat
 
 use crate::app::Spreadsheet;
 
+/// UI and cell typeface. Source Sans 3's default figures are tabular, so
+/// columns of numbers line up.
+pub const FONT: &str = "Source Sans 3";
+
+pub fn load_fonts(cx: &App) {
+    cx.text_system()
+        .add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-Regular.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-It.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-Semibold.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-SemiboldIt.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-Bold.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../../assets/fonts/SourceSans3-BoldIt.ttf").as_slice()),
+        ])
+        .expect("failed to load bundled fonts");
+}
+
 fn main() {
     let path = std::env::args().nth(1).map(PathBuf::from);
-    gpui_platform::application().run(move |cx: &mut App| {
-        cx.text_system()
-            .add_fonts(vec![
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Medium.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Bold.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Italic.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-BoldItalic.ttf").as_slice()),
-            ])
-            .expect("failed to load bundled fonts");
-
+    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        load_fonts(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -42,7 +50,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions { title: Some("xl".into()), ..Default::default() }),
                 app_id: Some("dev.xl.Xl".into()),
-                window_min_size: Some(size(px(480.), px(320.))),
+                window_min_size: Some(size(px(560.), px(360.))),
                 // GNOME on Wayland doesn't draw window frames; we draw our own
                 // title bar (falls back to the system's where it provides one).
                 window_decorations: Some(WindowDecorations::Client),
