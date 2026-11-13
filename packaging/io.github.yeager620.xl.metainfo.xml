@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>dev.xl.Xl</id>
+  <id>io.github.yeager620.xl</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <name>xl</name>
@@ -21,10 +21,10 @@
   <url type="homepage">https://github.com/yeager620/xl</url>
   <url type="bugtracker">https://github.com/yeager620/xl/issues</url>
   <url type="vcs-browser">https://github.com/yeager620/xl</url>
-  <developer id="dev.xl">
+  <developer id="io.github.yeager620">
     <name>xl contributors</name>
   </developer>
-  <launchable type="desktop-id">dev.xl.Xl.desktop</launchable>
+  <launchable type="desktop-id">io.github.yeager620.xl.desktop</launchable>
   <provides>
     <binary>xl</binary>
     <mediatype>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</mediatype>
@@ -34,12 +34,35 @@
     <category>Office</category>
     <category>Spreadsheet</category>
   </categories>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A budget with live totals for the selected cells</caption>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-1.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Writing a formula, with each reference highlighted in the grid</caption>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-2.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Every command a keystroke away in the command palette</caption>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-3.png</image>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#D6E3F7</color>
+    <color type="primary" scheme_preference="dark">#26282C</color>
+  </branding>
   <content_rating type="oars-1.1"/>
   <supports>
     <control>keyboard</control>
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.1.1" date="2026-11-13">
+      <description>
+        <p>Packaged for Flathub under the app ID io.github.yeager620.xl.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-13">
       <description>
         <p>First release.</p>

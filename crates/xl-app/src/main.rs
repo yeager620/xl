@@ -50,7 +50,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions { title: Some("xl".into()), ..Default::default() }),
-                app_id: Some("dev.xl.Xl".into()),
+                app_id: Some("io.github.yeager620.xl".into()),
                 window_min_size: Some(size(px(560.), px(360.))),
                 // GNOME on Wayland doesn't draw window frames; we draw our own
                 // title bar (falls back to the system's where it provides one).

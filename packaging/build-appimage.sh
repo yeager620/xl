@@ -22,8 +22,8 @@ rm -rf "$APPDIR"
 make install DESTDIR="$APPDIR" PREFIX=/usr
 strip "$APPDIR/usr/bin/xl"
 # AppImage layout: desktop entry and icon at the root, AppRun launches the binary.
-cp packaging/dev.xl.Xl.desktop "$APPDIR/"
-cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/dev.xl.Xl.png" "$APPDIR/dev.xl.Xl.png"
+cp packaging/io.github.yeager620.xl.desktop "$APPDIR/"
+cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/io.github.yeager620.xl.png" "$APPDIR/io.github.yeager620.xl.png"
 ln -sf usr/bin/xl "$APPDIR/AppRun"
 
 mkdir -p target/packages

@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let svg = PathBuf::from(args.next().ok_or("usage: render-icons <icon.svg> <out-dir> [name]")?);
     let out = PathBuf::from(args.next().ok_or("missing <out-dir>")?);
-    let name = args.next().unwrap_or_else(|| "dev.xl.Xl".into());
+    let name = args.next().unwrap_or_else(|| "io.github.yeager620.xl".into());
     let tree = usvg::Tree::from_data(&std::fs::read(&svg)?, &usvg::Options::default())?;
     for size in SIZES.iter().copied().chain([512]) {
         let mut pixmap = tiny_skia::Pixmap::new(size, size).ok_or("bad size")?;

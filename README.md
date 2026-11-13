@@ -57,7 +57,7 @@ container for that reason.
 1. One time: `./packaging/apt-keygen.sh` creates the APT signing key and stores it
    as the `APT_SIGNING_KEY` repository secret. Back the key up offline.
 2. Bump `version` in `Cargo.toml` and add a `<release>` to
-   `packaging/dev.xl.Xl.metainfo.xml`, commit, then tag and push:
+   `packaging/io.github.yeager620.xl.metainfo.xml`, commit, then tag and push:
    `git tag v0.2.0 && git push origin v0.2.0`.
 3. The Release workflow builds the `.deb` and AppImage on Ubuntu 22.04, publishes
    a GitHub Release, and adds the `.deb` to the APT repository on GitHub Pages.

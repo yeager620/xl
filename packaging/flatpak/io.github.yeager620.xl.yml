@@ -1,5 +1,5 @@
 # Flatpak manifest. Build with: make flatpak   (see packaging/build-flatpak.sh)
-id: dev.xl.Xl
+id: io.github.yeager620.xl
 runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk

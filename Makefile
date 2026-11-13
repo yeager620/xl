@@ -7,7 +7,7 @@
 
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
-APP_ID := dev.xl.Xl
+APP_ID := io.github.yeager620.xl
 BIN := target/release/xl
 ICONS := target/icons/hicolor
 
@@ -18,10 +18,10 @@ DATADIR := $(DESTDIR)$(PREFIX)/share
 
 all: build
 
-vendor/zed/.git:
+vendor/zed/Cargo.toml:
 	./scripts/fetch-gpui.sh
 
-build: vendor/zed/.git
+build: vendor/zed/Cargo.toml
 	cargo build --release -p xl
 
 icons: $(ICONS)/scalable/apps/$(APP_ID).svg

@@ -18,7 +18,7 @@ uv run -q --with aiohttp --with tomlkit python3 "$GEN" Cargo.lock -o packaging/f
 
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak-builder --user --install-deps-from=flathub --force-clean \
-  --repo=target/flatpak-repo target/flatpak-build packaging/flatpak/dev.xl.Xl.yml
+  --repo=target/flatpak-repo target/flatpak-build packaging/flatpak/io.github.yeager620.xl.yml
 mkdir -p target/packages
-flatpak build-bundle target/flatpak-repo target/packages/xl.flatpak dev.xl.Xl
+flatpak build-bundle target/flatpak-repo target/packages/xl.flatpak io.github.yeager620.xl
 echo "Built target/packages/xl.flatpak (install with: flatpak install --user target/packages/xl.flatpak)"
