@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod chrome;
 mod ime;
+mod lifecycle;
 mod palette;
 mod paint;
 mod refs;

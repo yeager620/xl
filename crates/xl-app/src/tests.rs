@@ -52,6 +52,11 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestContex
         s.active = CellRef::parse("B4").unwrap();
         s.anchor = s.active;
         s.dirty = false;
+        // Never touch the real recovery directory from tests.
+        s.recovery_offer = None;
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        s.recovery_dir = std::env::temp_dir().join(format!("xl-test-recovery-{}-{n}", std::process::id()));
     });
     cx.run_until_parked();
     (view, cx)
@@ -492,4 +497,80 @@ fn clicking_title_bar_buttons_never_starts_a_window_move(cx: &mut TestAppContext
     cx.simulate_mouse_move(point(max.x + px(1.), max.y + px(1.)), MouseButton::Left, Modifiers::none());
     view.read_with(cx, |s, _| assert!(!s.should_move));
     cx.simulate_mouse_up(point(px(300.), px(500.)), MouseButton::Left, Modifiers::none());
+}
+
+
+#[gpui::test]
+fn unsaved_changes_ask_before_closing(cx: &mut TestAppContext) {
+    use crate::lifecycle::After;
+    let (view, cx) = setup(cx);
+    // Nothing unsaved: Ctrl+W closes without asking.
+    view.update_in(cx, |s, window, cx| {
+        s.request(After::Close, window, cx);
+        assert!(s.pending.is_none() && s.close_confirmed);
+        s.close_confirmed = false;
+    });
+}
+
+#[gpui::test]
+fn dialog_cancel_and_save(cx: &mut TestAppContext) {
+    use crate::lifecycle::After;
+    let (view, cx) = setup(cx);
+    cx.simulate_input("99");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("ctrl-w");
+    view.read_with(cx, |s, _| assert_eq!(s.pending, Some(After::Close)));
+    // The dialog is modal: typing doesn't reach the sheet.
+    cx.simulate_input("5");
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| {
+        assert!(s.pending.is_none() && s.edit.is_none() && s.dirty);
+        assert!(!s.close_confirmed);
+    });
+    // The window manager asking to close also goes through the dialog.
+    let allowed = view.update(cx, |s, cx| s.should_close(cx));
+    assert!(!allowed);
+    // Save (Enter) writes the file, then closes.
+    let path = std::env::temp_dir().join(format!("xl-dialog-test-{}.xlsx", std::process::id()));
+    view.update(cx, |s, _| s.path = Some(path.clone()));
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(!s.dirty && s.close_confirmed && s.pending.is_none()));
+    let reopened = xl_io::open(&path).unwrap().workbook;
+    let b4 = Addr::new(reopened.sheet_ids()[0], CellRef::parse("B4").unwrap());
+    assert_eq!(*reopened.value(b4), Value::Number(99.0));
+    std::fs::remove_file(path).ok();
+}
+
+#[gpui::test]
+fn autosave_survives_a_crash_and_restores(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    cx.simulate_input("77");
+    cx.simulate_keystrokes("enter");
+    let (dir, file) = view.update(cx, |s, _| {
+        s.path = Some(std::path::PathBuf::from("/tmp/Budget.xlsx"));
+        s.autosave();
+        (s.recovery_dir.clone(), s.recovery_file())
+    });
+    assert!(file.exists(), "autosave wrote a recovery copy");
+    // Pretend that instance crashed: rename the copy to a dead pid.
+    let dead = dir.join("999999998.xlsx");
+    std::fs::rename(&file, &dead).unwrap();
+    std::fs::rename(file.with_extension("path"), dead.with_extension("path")).unwrap();
+    // A fresh window offers it back.
+    let offer = crate::lifecycle::find_recovery(&dir).unwrap();
+    view.update(cx, |s, cx| {
+        s.wb = xl_engine::Workbook::new();
+        s.path = None;
+        s.dirty = false;
+        s.recovery_offer = Some(offer);
+        s.restore_recovery(cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.path.as_deref(), Some(std::path::Path::new("/tmp/Budget.xlsx")), "restored as the original document");
+        assert!(s.dirty, "restored changes still need saving");
+        assert!(!dead.exists(), "the crash copy is consumed");
+    });
+    assert_eq!(val(&view, cx, "B4"), Value::Number(77.0));
+    std::fs::remove_dir_all(dir).ok();
 }

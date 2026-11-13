@@ -179,6 +179,18 @@ pub struct Spreadsheet {
     pub(crate) palette: Option<crate::palette::Palette>,
     /// Mouse went down on empty title-bar space; a following move drags the window.
     pub(crate) should_move: bool,
+    /// Unsaved-changes dialog: what to do once it's answered.
+    pub(crate) pending: Option<crate::lifecycle::After>,
+    /// The user chose to close without saving (or nothing was unsaved).
+    pub(crate) close_confirmed: bool,
+    /// A crash left a recovery copy behind; offered in a bar.
+    pub(crate) recovery_offer: Option<crate::lifecycle::Recovery>,
+    /// Loading a recovery copy: (original document path, recovery file).
+    pub(crate) restore_as: Option<(Option<PathBuf>, PathBuf)>,
+    pub(crate) recovery_dir: PathBuf,
+    /// Bumped on every change; autosave writes only when it moved.
+    pub(crate) edit_generation: u64,
+    pub(crate) autosaved_generation: Option<u64>,
     _appearance: Subscription,
 }
 
@@ -223,13 +235,29 @@ impl Spreadsheet {
             loading: None,
             palette: None,
             should_move: false,
+            pending: None,
+            close_confirmed: false,
+            recovery_offer: None,
+            restore_as: None,
+            recovery_dir: crate::lifecycle::recovery_dir(),
+            edit_generation: 0,
+            autosaved_generation: None,
             _appearance: appearance,
         };
+        this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| weak.update(cx, |this, cx| this.should_close(cx)).unwrap_or(true));
+        this.start_autosave(cx);
         match path {
             Some(p) => this.load(p, cx),
             None => this.load_welcome(),
         }
         this
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.edit_generation += 1;
     }
 
     pub(crate) fn at(&self, c: CellRef) -> Addr {
@@ -488,7 +516,7 @@ impl Spreadsheet {
     pub(crate) fn add_sheet(&mut self) {
         if let Ok(id) = self.wb.add_sheet(None) {
             self.switch_sheet(id);
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -527,7 +555,7 @@ impl Spreadsheet {
                 self.undo.retain(|e| e.iter().all(|(a, _)| a.sheet != id));
                 self.redo.retain(|e| e.iter().all(|(a, _)| a.sheet != id));
                 self.message = Some((format!("Deleted sheet ({} formulas recalculated)", stats.evaluated), false));
-                self.dirty = true;
+                self.mark_dirty();
             }
             Err(e) => self.message = Some((e, true)),
         }
@@ -554,7 +582,7 @@ impl Spreadsheet {
                 if let Some(stats) = stats {
                     self.push_undo(vec![(edit.at, before)]);
                     self.last_stats = Some(stats);
-                    self.dirty = true;
+                    self.mark_dirty();
                 }
                 self.message = None;
                 if self.cur != edit.at.sheet {
@@ -599,7 +627,7 @@ impl Spreadsheet {
         let undo = self.snapshots(changes.iter().map(|(a, _)| *a));
         self.last_stats = Some(self.wb.set_inputs(changes));
         self.push_undo(undo);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Apply exact snapshots (inputs + formats) as one undoable step.
@@ -610,7 +638,7 @@ impl Spreadsheet {
         let undo = self.snapshots(items.iter().map(|(a, _)| *a));
         self.last_stats = Some(self.wb.restore(items));
         self.push_undo(undo);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     pub(crate) fn undo_redo(&mut self, is_undo: bool) {
@@ -630,7 +658,7 @@ impl Spreadsheet {
         }
         self.last_stats = Some(self.wb.restore(entry));
         if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Delete clears contents but keeps formats, like Excel.
@@ -785,7 +813,7 @@ impl Spreadsheet {
             self.wb.set_format(a, code);
         }
         self.push_undo(undo);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Change the style of every targeted cell as one undoable step.
@@ -803,7 +831,7 @@ impl Spreadsheet {
             self.wb.set_style(a, &st);
         }
         self.push_undo(undo);
-        self.dirty = true;
+        self.mark_dirty();
         self.menu = None;
     }
 
@@ -877,7 +905,7 @@ impl Spreadsheet {
             self.wb.set_format(a, None);
         }
         self.push_undo(undo);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Add or remove decimal places, based on the active cell's format.
@@ -945,6 +973,15 @@ impl Spreadsheet {
         self.dirty = false;
     }
 
+    /// Open a file, first asking about unsaved changes if there are any.
+    pub(crate) fn open_or_ask(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.dirty {
+            self.pending = Some(crate::lifecycle::After::Open(path));
+        } else {
+            self.load(path, cx);
+        }
+    }
+
     /// Open a file on a background thread; the window stays responsive.
     pub(crate) fn load(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -990,6 +1027,13 @@ impl Spreadsheet {
                     None => (format!("Opened {name} ({} cells)", loaded.cells), false),
                 });
                 self.path = Some(path);
+                if let Some((original, file)) = self.restore_as.take() {
+                    // A restored recovery copy stands in for the original document.
+                    self.path = original;
+                    self.mark_dirty();
+                    crate::lifecycle::remove_recovery(&file);
+                    self.message = Some(("Restored your unsaved changes. Save to keep them.".into(), false));
+                }
             }
             Err(e) => self.message = Some((format!("Could not open {name}: {e}"), true)),
         }
@@ -1003,6 +1047,7 @@ impl Spreadsheet {
             Ok(()) => {
                 let csv = xl_io::FileKind::of(&path) == Some(xl_io::FileKind::Csv);
                 self.dirty = false;
+                self.clear_recovery();
                 self.message = Some(if csv && self.wb.sheet_ids().len() > 1 {
                     (format!("Saved {} (CSV holds only the current sheet)", path.display()), false)
                 } else {
@@ -1049,7 +1094,7 @@ impl Spreadsheet {
                 && let Some(path) = paths.into_iter().next()
             {
                 this.update(cx, |this, cx| {
-                    this.load(path, cx);
+                    this.open_or_ask(path, cx);
                     cx.notify();
                 })
                 .ok();
@@ -1060,7 +1105,7 @@ impl Spreadsheet {
 
     pub(crate) fn on_drop_files(&mut self, paths: &ExternalPaths, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = paths.paths().iter().find(|p| xl_io::FileKind::of(p).is_some()) {
-            self.load(p.clone(), cx);
+            self.open_or_ask(p.clone(), cx);
             cx.notify();
         }
     }
@@ -1073,7 +1118,13 @@ impl Spreadsheet {
         let key = ks.key.as_str();
         let ctrl = m.control || m.platform;
         let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
-        let handled = if palette_key {
+        let handled = if self.pending.is_some() {
+            self.key_dialog(key, window, cx)
+        } else if ctrl && (key == "q" || key == "w") {
+            let after = if key == "q" { crate::lifecycle::After::Quit } else { crate::lifecycle::After::Close };
+            self.request(after, window, cx);
+            true
+        } else if palette_key {
             if self.palette.take().is_none() {
                 self.open_palette();
             }
@@ -1277,7 +1328,6 @@ impl Spreadsheet {
             ("s", true) => self.save(shift, cx),
             ("o", true) => self.open(cx),
             ("n", true) if shift => self.add_sheet(),
-            ("q", true) => cx.quit(),
             // Typing starts an edit through the input handler (see ime.rs).
             _ => return false,
         }
@@ -1378,7 +1428,7 @@ impl Spreadsheet {
             Drag::ResizeCol { col, start_x, start_w } => {
                 let w = (start_w + f64::from(ev.position.x) - start_x).max(MIN_COL_W);
                 self.wb.set_col_width(self.cur, col, Some(w));
-                self.dirty = true;
+                self.mark_dirty();
             }
             Drag::Select | Drag::Point => {
                 let vp = self.viewport;
@@ -1426,7 +1476,7 @@ impl Spreadsheet {
             w = w.max(f64::from(line.width) + 2.0 * CELL_PAD + 2.0);
         }
         self.wb.set_col_width(self.cur, col, Some(w.min(800.0)));
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     pub(crate) fn toggle_theme(&mut self) {

@@ -219,9 +219,9 @@ impl Spreadsheet {
                     window.zoom_window();
                 }))
             })
-            .child(window_button(&t, "win-close", "x").on_click(cx.listener(|_, _, window, cx| {
+            .child(window_button(&t, "win-close", "x").on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
-                window.remove_window();
+                this.request(crate::lifecycle::After::Close, window, cx);
             })))
     }
 
@@ -541,7 +541,10 @@ impl Spreadsheet {
                         cx.notify();
                     })))
                     .child(menu_separator(&t))
-                    .child(menu_item(&t, "m-quit", "Quit", "Ctrl+Q").on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                    .child(menu_item(&t, "m-quit", "Quit", "Ctrl+Q").on_click(cx.listener(|this, _, window, cx| {
+                        this.menu = None;
+                        this.request(crate::lifecycle::After::Quit, window, cx);
+                    })))
                     .into_any_element()
             }
         }
@@ -825,6 +828,7 @@ impl Render for Spreadsheet {
             .text_size(px(14.))
             .child(self.render_toolbar(window, cx))
             .child(self.render_formula_bar(cx))
+            .children(self.render_recovery_bar(cx))
             .child(
                 div()
                     .flex_1()
@@ -858,6 +862,7 @@ impl Render for Spreadsheet {
             .when(self.palette.is_some(), |d| {
                 d.child(deferred(div().absolute().top(px(64.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
             });
+        let content = content.when(self.pending.is_some(), |d| d.child(deferred(self.render_dialog(cx)).with_priority(3)));
         self.window_frame(content, window)
     }
 }

@@ -84,7 +84,7 @@ impl EntityInputHandler for Spreadsheet {
     }
 
     fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        if text.is_empty() || text.chars().all(char::is_control) {
+        if text.is_empty() || text.chars().all(char::is_control) || self.pending.is_some() {
             return;
         }
         if let Some(p) = self.palette.as_mut() {

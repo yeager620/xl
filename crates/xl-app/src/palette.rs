@@ -65,7 +65,8 @@ pub fn commands() -> Vec<Command> {
         cmd!("Decrease decimals", "", |s, w, cx| s.bump_decimals(-1)),
         cmd!("Autofit column width", "Double-click header edge", |s, w, cx| s.autofit(s.active.col, w)),
         cmd!("Toggle dark mode", "", |s, w, cx| s.toggle_theme()),
-        cmd!("Quit", "Ctrl+Q", |s, w, cx| cx.quit()),
+        cmd!("Close window", "Ctrl+W", |s, w, cx| s.request(crate::lifecycle::After::Close, w, cx)),
+        cmd!("Quit", "Ctrl+Q", |s, w, cx| s.request(crate::lifecycle::After::Quit, w, cx)),
     ]
 }
 
