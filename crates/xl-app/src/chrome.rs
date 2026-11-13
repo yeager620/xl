@@ -1,7 +1,7 @@
 //! Everything around the grid: toolbar, formula bar, sheet tabs, status bar.
 
 use gpui::{
-    AnyElement, Context, ExternalPaths, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString,
+    AnyElement, Context, CursorStyle, Decorations, ExternalPaths, FontWeight, HitboxBehavior, Pixels, Point, ResizeEdge, Size, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Window, canvas, deferred, div, prelude::FluentBuilder, px, rgb,
 };
 use xl_engine::{HAlign, Rgb, quote_sheet_name};
@@ -13,6 +13,51 @@ const PALETTE: [[Rgb; 8]; 2] = [
     [0x000000, 0x7F7F7F, 0xC00000, 0xE26B0A, 0xBF8F00, 0x548235, 0x2F5597, 0x7030A0],
     [0xFFFFFF, 0xD9D9D9, 0xF8CBAD, 0xFCE4D6, 0xFFF2CC, 0xE2EFDA, 0xDDEBF7, 0xE4DFEC],
 ];
+
+/// Width of the invisible border used for resizing (and the shadow) when we
+/// draw our own window frame.
+const FRAME: f32 = 10.0;
+const CORNER: f32 = 10.0;
+
+fn resize_edge(pos: Point<Pixels>, inset: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
+    let (left, right) = (pos.x < inset, pos.x > size.width - inset);
+    let (top, bottom) = (pos.y < inset, pos.y > size.height - inset);
+    Some(match (top, bottom, left, right) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::TopRight,
+        (_, true, true, _) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (true, ..) => ResizeEdge::Top,
+        (_, true, ..) => ResizeEdge::Bottom,
+        (_, _, true, _) => ResizeEdge::Left,
+        (_, _, _, true) => ResizeEdge::Right,
+        _ => return None,
+    })
+}
+
+fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
+    match edge {
+        ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+        ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
+        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+    }
+}
+
+/// GNOME-style round window button.
+fn window_button(t: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.))
+        .rounded_full()
+        .bg(rgb(if t.dark { 0x2E2E34 } else { 0xE4E4E8 }))
+        .text_color(t.text)
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(if t.dark { 0x3A3A42 } else { 0xD6D6DC })))
+}
 
 /// A small icon of three text lines aligned left/center/right.
 fn align_icon(t: &Theme, a: HAlign) -> impl IntoElement {
@@ -75,7 +120,43 @@ fn segment(t: &Theme, id: &'static str, label: &'static str, active: bool, tip_l
 }
 
 impl Spreadsheet {
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_window_controls(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let controls = window.window_controls();
+        let maximized = window.is_maximized();
+        let stroke = t.text;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .ml(px(8.))
+            .when(controls.minimize, |d| {
+                d.child(window_button(&t, "win-min").child(div().w(px(9.)).h(px(1.5)).bg(stroke)).on_click(|_, window, _| window.minimize_window()))
+            })
+            .when(controls.maximize, |d| {
+                let icon = if maximized {
+                    // Restore: two overlapping squares.
+                    div()
+                        .relative()
+                        .size(px(10.))
+                        .child(div().absolute().top(px(-2.)).left(px(2.)).size(px(8.)).border(px(1.5)).border_color(stroke))
+                        .child(div().absolute().top(px(1.)).left(px(-1.)).size(px(8.)).border(px(1.5)).border_color(stroke).bg(rgb(if t.dark { 0x2E2E34 } else { 0xE4E4E8 })))
+                } else {
+                    div().size(px(9.)).border(px(1.5)).border_color(stroke)
+                };
+                d.child(window_button(&t, "win-max").child(icon).on_click(|_, window, _| window.zoom_window()))
+            })
+            .child(
+                window_button(&t, "win-close")
+                    .text_size(px(15.))
+                    .child("×")
+                    .on_click(cx.listener(|_, _, window, _| window.remove_window())),
+            )
+    }
+
+    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let client_frame = matches!(window.window_decorations(), Decorations::Client { .. });
         let t = self.theme;
         let fmt = self.format_label();
         let formats: [(&'static str, &'static str, Option<&'static str>, &[&str]); 5] = [
@@ -111,6 +192,7 @@ impl Spreadsheet {
             })));
 
         div()
+            .id("titlebar")
             .flex()
             .flex_row()
             .items_center()
@@ -118,6 +200,39 @@ impl Spreadsheet {
             .px(px(14.))
             .gap(px(10.))
             .bg(t.surface)
+            // Title-bar behavior: drag to move, double-click to maximize,
+            // right-click for the window menu. A move only starts once the
+            // mouse actually moves, so clicking buttons never drags.
+            .when(client_frame, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| {
+                        this.should_move = true;
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| {
+                        this.should_move = false;
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, _, _| {
+                    this.should_move = false;
+                }))
+                .on_mouse_move(cx.listener(|this, _, window, _| {
+                    if this.should_move {
+                        this.should_move = false;
+                        window.start_window_move();
+                    }
+                }))
+                .on_click(|ev, window, _| {
+                    if ev.is_right_click() {
+                        window.show_window_menu(ev.position());
+                    } else if ev.click_count() == 2 {
+                        window.zoom_window();
+                    }
+                })
+            })
             .border_b_1()
             .border_color(t.border)
             .child(
@@ -163,6 +278,7 @@ impl Spreadsheet {
                         cx.notify();
                     })),
             )
+            .when(client_frame, |d| d.child(self.render_window_controls(window, cx)))
     }
 
     fn render_style_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -593,7 +709,7 @@ impl Render for Spreadsheet {
         )
         .size_full();
 
-        div()
+        let content = div()
             .key_context("Spreadsheet")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -605,7 +721,7 @@ impl Render for Spreadsheet {
             .text_color(t.text)
             .font_family("Inter")
             .text_size(px(13.))
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .child(self.render_formula_bar(cx))
             .child(
                 div()
@@ -640,6 +756,71 @@ impl Render for Spreadsheet {
             })
             .when(self.palette.is_some(), |d| {
                 d.child(deferred(div().absolute().top(px(90.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
+            });
+        self.window_frame(content, window)
+    }
+}
+
+impl Spreadsheet {
+    /// When we draw our own decorations: an invisible resize border with
+    /// cursors, rounded corners, a hairline border and a soft shadow — all
+    /// dropped on the sides where the window is tiled or maximized.
+    fn window_frame(&self, content: impl IntoElement, window: &mut Window) -> impl IntoElement {
+        let t = self.theme;
+        let Decorations::Client { tiling } = window.window_decorations() else {
+            window.set_client_inset(px(0.));
+            return div().size_full().child(content).into_any_element();
+        };
+        let inset = px(FRAME);
+        window.set_client_inset(inset);
+        let rounding = px(CORNER);
+        let frame = div()
+            .id("window-frame")
+            .size_full()
+            .bg(gpui::transparent_black())
+            .child(
+                canvas(
+                    |_, window, _| window.insert_hitbox(gpui::Bounds::new(gpui::point(px(0.), px(0.)), window.window_bounds().get_bounds().size), HitboxBehavior::Normal),
+                    move |_, hitbox, window, _| {
+                        let size = window.window_bounds().get_bounds().size;
+                        if let Some(edge) = resize_edge(window.mouse_position(), inset, size) {
+                            window.set_cursor_style(resize_cursor(edge), &hitbox);
+                        }
+                    },
+                )
+                .size_full()
+                .absolute(),
+            )
+            .when(!tiling.top, |d| d.pt(inset))
+            .when(!tiling.bottom, |d| d.pb(inset))
+            .when(!tiling.left, |d| d.pl(inset))
+            .when(!tiling.right, |d| d.pr(inset))
+            .on_mouse_move(|_, window, _| window.refresh())
+            .on_mouse_down(MouseButton::Left, move |ev, window, _| {
+                let size = window.window_bounds().get_bounds().size;
+                if let Some(edge) = resize_edge(ev.position, inset, size) {
+                    window.start_window_resize(edge);
+                }
+            });
+        let inner = div()
+            .size_full()
+            .overflow_hidden()
+            .cursor(CursorStyle::Arrow)
+            .bg(t.bg)
+            .border_color(gpui::rgb(if t.dark { 0x3A3A40 } else { 0xC9C9CF }))
+            .when(!(tiling.top || tiling.left), |d| d.rounded_tl(rounding))
+            .when(!(tiling.top || tiling.right), |d| d.rounded_tr(rounding))
+            .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(rounding))
+            .when(!(tiling.bottom || tiling.right), |d| d.rounded_br(rounding))
+            .when(!tiling.top, |d| d.border_t_1())
+            .when(!tiling.bottom, |d| d.border_b_1())
+            .when(!tiling.left, |d| d.border_l_1())
+            .when(!tiling.right, |d| d.border_r_1())
+            .when(!tiling.is_tiled(), |d| {
+                d.shadow(vec![gpui::BoxShadow::new(px(0.), px(2.), gpui::hsla(0., 0., 0., if t.dark { 0.5 } else { 0.25 })).blur_radius(inset / 1.5)])
             })
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .child(content);
+        frame.child(inner).into_any_element()
     }
 }

@@ -11,7 +11,7 @@ mod theme;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px, size};
 
 use crate::app::Spreadsheet;
 
@@ -43,6 +43,9 @@ fn main() {
                 titlebar: Some(TitlebarOptions { title: Some("xl".into()), ..Default::default() }),
                 app_id: Some("dev.xl.Xl".into()),
                 window_min_size: Some(size(px(480.), px(320.))),
+                // GNOME on Wayland doesn't draw window frames; we draw our own
+                // title bar (falls back to the system's where it provides one).
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Spreadsheet::new(path, window, cx)),

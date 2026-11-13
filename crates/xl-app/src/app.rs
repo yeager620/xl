@@ -175,6 +175,8 @@ pub struct Spreadsheet {
     /// File being opened in the background.
     pub(crate) loading: Option<String>,
     pub(crate) palette: Option<crate::palette::Palette>,
+    /// Mouse went down on empty title-bar space; a following move drags the window.
+    pub(crate) should_move: bool,
     _appearance: Subscription,
 }
 
@@ -218,6 +220,7 @@ impl Spreadsheet {
             menu: None,
             loading: None,
             palette: None,
+            should_move: false,
             _appearance: appearance,
         };
         match path {
