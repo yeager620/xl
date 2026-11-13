@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.xl.Xl</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>xl</name>
+  <summary>Edit spreadsheets, fast</summary>
+  <description>
+    <p>
+      xl is a native spreadsheet for Linux. It opens and saves Excel workbooks
+      and CSV files, and recalculates only what changed, so edits show up
+      instantly even in large sheets.
+    </p>
+    <ul>
+      <li>Formulas with Excel syntax, cross-sheet references and 77 functions</li>
+      <li>Number formats, cell styles and multiple sheets, round-tripped through .xlsx</li>
+      <li>Excel keyboard shortcuts, point-to-reference formula entry and a command palette</li>
+      <li>Autosave with crash recovery</li>
+    </ul>
+  </description>
+  <developer id="dev.xl">
+    <name>xl contributors</name>
+  </developer>
+  <launchable type="desktop-id">dev.xl.Xl.desktop</launchable>
+  <provides>
+    <binary>xl</binary>
+    <mediatype>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</mediatype>
+    <mediatype>text/csv</mediatype>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>Spreadsheet</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-13">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

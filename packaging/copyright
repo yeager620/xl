@@ -1,0 +1,16 @@
+xl — a native spreadsheet for Linux
+License: MIT OR Apache-2.0
+
+Bundled third-party assets:
+
+Source Sans 3 (fonts)
+  Copyright 2010-2022 Adobe, with Reserved Font Name 'Source'.
+  License: SIL Open Font License 1.1
+
+Lucide icons
+  Copyright (c) Lucide Contributors (and Feather, Cole Bemis).
+  License: ISC
+
+GPUI (UI framework, statically linked)
+  Copyright Zed Industries, Inc.
+  License: Apache-2.0

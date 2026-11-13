@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xl-engine", "crates/xl-io", "crates/xl-app", "crates/xl-bench"]
+members = ["crates/xl-engine", "crates/xl-io", "crates/xl-app", "crates/xl-bench", "crates/xl-pack"]
 exclude = ["vendor"]
 
 [workspace.package]

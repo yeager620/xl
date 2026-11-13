@@ -1,2 +1,3 @@
 /target
 /vendor
+packaging/flatpak/cargo-sources.json

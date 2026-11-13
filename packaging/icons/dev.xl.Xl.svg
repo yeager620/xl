@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Base thickness (GNOME-style depth) -->
+  <rect x="14" y="22" width="100" height="94" rx="10" fill="#B9BEC7"/>
+  <!-- Sheet -->
+  <rect x="14" y="16" width="100" height="94" rx="10" fill="#FFFFFF"/>
+  <!-- Column header band -->
+  <path d="M24 16 H104 A10 10 0 0 1 114 26 V36 H14 V26 A10 10 0 0 1 24 16 Z" fill="#2F3238"/>
+  <!-- Row header column -->
+  <rect x="14" y="36" width="20" height="64" fill="#E9EBEE"/>
+  <path d="M14 100 H34 V110 H24 A10 10 0 0 1 14 100 Z" fill="#E9EBEE"/>
+  <!-- Gridlines -->
+  <g stroke="#D3D6DB" stroke-width="2">
+    <line x1="34" y1="36" x2="34" y2="110"/>
+    <line x1="61" y1="36" x2="61" y2="110"/>
+    <line x1="88" y1="36" x2="88" y2="110"/>
+    <line x1="14" y1="54" x2="114" y2="54"/>
+    <line x1="14" y1="72" x2="114" y2="72"/>
+    <line x1="14" y1="90" x2="114" y2="90"/>
+  </g>
+  <!-- Selected cell -->
+  <rect x="61" y="54" width="27" height="18" fill="#1F5FBF" fill-opacity="0.14"/>
+  <rect x="61" y="54" width="27" height="18" fill="none" stroke="#1F5FBF" stroke-width="4"/>
+  <rect x="84" y="68" width="8" height="8" fill="#1F5FBF" stroke="#FFFFFF" stroke-width="2"/>
+</svg>

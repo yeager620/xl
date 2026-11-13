@@ -1,0 +1,14 @@
+[package]
+name = "xl-pack"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+description = "Packaging helpers for xl (icon rendering)"
+
+[[bin]]
+name = "render-icons"
+path = "src/render_icons.rs"
+
+[dependencies]
+resvg = "0.46"

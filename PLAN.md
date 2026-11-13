@@ -165,3 +165,9 @@ Cargo workspace: `crates/xl-engine`, `crates/xl-io`, `crates/xl-app`, `crates/xl
 - **Performance**: files open on a background thread; dedicated full-recalc pass (1M-cell CSV: 1.0 s -> 0.37 s); block-bucketed range index (edits under 100k rolling ranges ~9x faster).
 
 **Next (M4 – ship):** Flatpak / .deb / AppImage packaging, .desktop + MIME registration, app icon, autosave & crash recovery. Also on the list: background recalc for very long dependency chains, aggregate caches, wrap text / row heights, charts.
+
+### Update (2026-11-13): M4 (packaging) in progress
+
+Done: unsaved-changes dialog on close/quit/open; 30 s autosave of a recovery copy and restore-after-crash; app icon (SVG + rendered hicolor PNGs); desktop entry with xlsx/csv associations; AppStream metadata; `make install` / `uninstall`; `.deb` built and inspected.
+
+Written but not yet run here: AppImage (needs appimagetool download), Flatpak (needs flatpak-builder). Open items: a homepage URL for AppStream/Flathub; release builds on an older distro for glibc compatibility; Flatpak SDK Rust version vs. our pinned 1.98.1.
