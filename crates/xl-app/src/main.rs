@@ -21,6 +21,9 @@ fn main() {
                 Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice()),
                 Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Medium.ttf").as_slice()),
                 Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Bold.ttf").as_slice()),
+                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-Italic.ttf").as_slice()),
+                Cow::Borrowed(include_bytes!("../../../assets/fonts/Inter-BoldItalic.ttf").as_slice()),
             ])
             .expect("failed to load bundled fonts");
 

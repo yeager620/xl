@@ -24,6 +24,7 @@ use crate::format::{Formatted, NumberFormat};
 use crate::formula::{Expr, ParseError, SheetNames, parse_formula};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellInput, CellStore};
+use crate::style::Style;
 use crate::value::{ErrorKind, Value};
 
 // ------------------------------------------------------------------- sheets
@@ -33,6 +34,7 @@ pub struct SheetData {
     pub name: String,
     store: CellStore,
     formats: FxHashMap<CellRef, FmtId>,
+    styles: FxHashMap<CellRef, StyleId>,
     col_widths: BTreeMap<u32, f64>,
 }
 
@@ -111,6 +113,29 @@ impl FormatTable {
         &self.list[id.0 as usize]
     }
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StyleId(u32);
+
+#[derive(Default)]
+struct StyleTable {
+    list: Vec<Style>,
+    by_style: FxHashMap<Style, StyleId>,
+}
+
+impl StyleTable {
+    fn intern(&mut self, s: &Style) -> StyleId {
+        if let Some(id) = self.by_style.get(s) {
+            return *id;
+        }
+        let id = StyleId(self.list.len() as u32);
+        self.list.push(s.clone());
+        self.by_style.insert(s.clone(), id);
+        id
+    }
+}
+
+static DEFAULT_STYLE: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Style::default);
 
 // -------------------------------------------------------------------- graph
 
@@ -254,6 +279,7 @@ pub struct RecalcStats {
 pub struct CellSnapshot {
     pub input: String,
     pub format: Option<String>,
+    pub style: Style,
 }
 
 /// A cell as read from a file, applied without recalculation.
@@ -269,6 +295,7 @@ pub struct Workbook {
     sheets: Sheets,
     graph: DepGraph,
     formats: FormatTable,
+    styles: StyleTable,
 }
 
 enum Parsed {
@@ -324,7 +351,7 @@ impl Workbook {
             None => self.next_sheet_name(),
         };
         let id = self.sheets.slots.len() as SheetId;
-        self.sheets.slots.push(Some(SheetData { id, name, store: CellStore::default(), formats: FxHashMap::default(), col_widths: BTreeMap::new() }));
+        self.sheets.slots.push(Some(SheetData { id, name, store: CellStore::default(), formats: FxHashMap::default(), styles: FxHashMap::default(), col_widths: BTreeMap::new() }));
         self.sheets.order.push(id);
         Ok(id)
     }
@@ -445,12 +472,12 @@ impl Workbook {
     }
 
     pub fn snapshot(&self, a: Addr) -> CellSnapshot {
-        CellSnapshot { input: self.input_text(a), format: self.format_code(a).map(str::to_string) }
+        CellSnapshot { input: self.input_text(a), format: self.format_code(a).map(str::to_string), style: self.style(a).clone() }
     }
 
     /// Snapshot of `src` adjusted for placement at an offset (copy/fill).
     pub fn snapshot_shifted(&self, src: Addr, dr: i64, dc: i64) -> CellSnapshot {
-        CellSnapshot { input: self.input_text_shifted(src, dr, dc), format: self.format_code(src).map(str::to_string) }
+        CellSnapshot { input: self.input_text_shifted(src, dr, dc), format: self.format_code(src).map(str::to_string), style: self.style(src).clone() }
     }
 
     // ------------------------------------------------------------ writing
@@ -510,6 +537,7 @@ impl Workbook {
     pub fn set_inputs(&mut self, items: impl IntoIterator<Item = (Addr, String)>) -> RecalcStats {
         let mut seeds = Vec::new();
         let mut forced = FxHashSet::default();
+        let mut count = 0usize;
         for (a, raw) in items {
             if self.sheets.get(a.sheet).is_none() {
                 continue;
@@ -523,6 +551,12 @@ impl Workbook {
                 Err(_) => Some(CellInput::Value(Value::text(raw))),
             };
             self.apply(a, input, &mut seeds, &mut forced);
+            count += 1;
+        }
+        // Big batches (loads, huge pastes) are cheaper as one full recalc than
+        // as an incremental walk from every changed cell.
+        if count >= 10_000 && count * 4 >= self.graph.precedents.len() {
+            return self.recalc_all();
         }
         self.propagate(seeds, forced)
     }
@@ -536,6 +570,7 @@ impl Workbook {
                 continue;
             }
             self.set_format(a, snap.format.as_deref());
+            self.set_style(a, &snap.style);
             let input = match self.parse(&snap.input) {
                 Ok(Parsed::Clear) => None,
                 Ok(Parsed::Input(input, _)) => Some(input),
@@ -559,6 +594,33 @@ impl Workbook {
                 }
             }
         }
+    }
+
+    pub fn style(&self, a: Addr) -> &Style {
+        match self.sheets.get(a.sheet).and_then(|s| s.styles.get(&a.cell)) {
+            Some(id) => &self.styles.list[id.0 as usize],
+            None => &DEFAULT_STYLE,
+        }
+    }
+
+    /// Set a cell's style (the default style clears it). No recalc needed.
+    pub fn set_style(&mut self, a: Addr, style: &Style) {
+        let id = (!style.is_default()).then(|| self.styles.intern(style));
+        if let Some(s) = self.sheets.get_mut(a.sheet) {
+            match id {
+                Some(id) => {
+                    s.styles.insert(a.cell, id);
+                }
+                None => {
+                    s.styles.remove(&a.cell);
+                }
+            }
+        }
+    }
+
+    /// Every cell with a non-default style (including empty ones).
+    pub fn styled_cells(&self, sheet: SheetId) -> impl Iterator<Item = (CellRef, &Style)> + '_ {
+        self.sheets.get(sheet).into_iter().flat_map(move |s| s.styles.iter().map(move |(c, id)| (*c, &self.styles.list[id.0 as usize])))
     }
 
     /// Every cell with an explicit number format (including empty ones).
@@ -614,17 +676,93 @@ impl Workbook {
     }
 
     /// Recompute every formula from scratch.
+    ///
+    /// Orders formulas with a precedent-first DFS (formula cells inside range
+    /// references are found through a per-column index of formula rows), then
+    /// evaluates each exactly once. Cycles fall back to the incremental path,
+    /// which marks exactly the cycle members.
     pub fn recalc_all(&mut self) -> RecalcStats {
+        let start = Instant::now();
         let mut formulas = Vec::new();
+        // Formula rows per (sheet, column), ascending (store iteration is
+        // column-major with rows in order).
+        let mut rows: FxHashMap<(SheetId, u32), Vec<u32>> = FxHashMap::default();
         for &id in &self.sheets.order {
             for (c, cell) in self.sheets.store(id).unwrap().iter() {
                 if cell.is_formula() {
                     formulas.push(Addr::new(id, c));
+                    rows.entry((id, c.col)).or_default().push(c.row);
                 }
             }
         }
-        let forced = formulas.iter().copied().collect();
-        self.propagate(formulas, forced)
+        let n = formulas.len();
+        let index: FxHashMap<Addr, u32> = formulas.iter().enumerate().map(|(i, a)| (*a, i as u32)).collect();
+        // 0 = unvisited, 1 = on the DFS stack, 2 = ordered.
+        let mut state = vec![0u8; n];
+        let mut order: Vec<u32> = Vec::with_capacity(n);
+        let mut arena: Vec<u32> = Vec::new();
+        let mut stack: Vec<(u32, usize, usize)> = Vec::new();
+        let deps_of = |i: u32, arena: &mut Vec<u32>| {
+            let at = formulas[i as usize];
+            let Some(p) = self.graph.precedents.get(&at) else { return };
+            for c in &p.cells {
+                if let Some(&j) = index.get(c) {
+                    arena.push(j);
+                }
+            }
+            for (s, r) in &p.ranges {
+                for col in r.start.col..=r.end.col {
+                    let Some(v) = rows.get(&(*s, col)) else { continue };
+                    let lo = v.partition_point(|&row| row < r.start.row);
+                    let hi = v.partition_point(|&row| row <= r.end.row);
+                    for &row in &v[lo..hi] {
+                        arena.push(index[&Addr::new(*s, CellRef::new(row, col))]);
+                    }
+                }
+            }
+        };
+        for root in 0..n as u32 {
+            if state[root as usize] != 0 {
+                continue;
+            }
+            state[root as usize] = 1;
+            let s0 = arena.len();
+            deps_of(root, &mut arena);
+            stack.push((root, s0, arena.len()));
+            while let Some(top) = stack.last_mut() {
+                if top.1 < top.2 {
+                    let d = arena[top.1];
+                    top.1 += 1;
+                    match state[d as usize] {
+                        0 => {
+                            state[d as usize] = 1;
+                            let s = arena.len();
+                            deps_of(d, &mut arena);
+                            let e = arena.len();
+                            stack.push((d, s, e));
+                        }
+                        1 => {
+                            // Cycle: the incremental path marks exactly its members.
+                            let forced = formulas.iter().copied().collect();
+                            return self.propagate(formulas, forced);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    let (node, s, _) = stack.pop().unwrap();
+                    arena.truncate(s);
+                    state[node as usize] = 2;
+                    order.push(node);
+                }
+            }
+        }
+        for &i in &order {
+            let a = formulas[i as usize];
+            if let Some(v) = self.eval_cell(a) {
+                self.set_value(a, v);
+            }
+        }
+        RecalcStats { dirty: n, evaluated: n, elapsed: start.elapsed() }
     }
 
     // ------------------------------------------------------------ internals

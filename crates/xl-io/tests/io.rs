@@ -198,3 +198,92 @@ fn rejects_non_xlsx() {
     assert!(xl_io::open(&path).is_err());
     assert!(xl_io::open(&tmp("missing.xlsx")).is_err());
 }
+
+#[test]
+fn styles_roundtrip_through_xlsx() {
+    use xl_engine::{Border, HAlign, LineStyle, Style};
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let header = Style { bold: true, color: Some(0xFFFFFF), fill: Some(0x305496), align: HAlign::Center, bottom: Border { style: LineStyle::Medium, color: Some(0x1F3864) }, ..Style::default() };
+    let note = Style { italic: true, underline: true, strike: true, color: Some(0xC00000), align: HAlign::Right, ..Style::default() };
+    let boxed = Style { top: Border::THIN, bottom: Border::THIN, left: Border::THIN, right: Border { style: LineStyle::Double, color: None }, ..Style::default() };
+    wb.set_input(a(s, "A1"), "Header").unwrap();
+    wb.set_style(a(s, "A1"), &header);
+    wb.set_input(a(s, "A2"), "12.5%").unwrap();
+    wb.set_style(a(s, "A2"), &note);
+    wb.set_style(a(s, "C3"), &boxed); // styled but empty
+    let path = tmp("styles.xlsx");
+    xl_io::save(&wb, &path, s).unwrap();
+    let back = xl_io::open(&path).unwrap().workbook;
+    let bs = back.sheet_ids()[0];
+    assert_eq!(back.style(a(bs, "A1")), &header);
+    assert_eq!(back.style(a(bs, "A2")), &note);
+    assert_eq!(back.format_code(a(bs, "A2")), Some("0.00%"), "number format and style share one xf");
+    assert_eq!(back.style(a(bs, "C3")), &boxed);
+    assert!(back.style(a(bs, "B1")).is_default());
+}
+
+#[test]
+fn reads_theme_colors_and_excel_styles() {
+    let path = tmp("excel_styles.xlsx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut z = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    let mut put = |name: &str, body: &str| {
+        z.start_file(name, opts).unwrap();
+        z.write_all(body.as_bytes()).unwrap();
+    };
+    put("xl/workbook.xml", r#"<workbook xmlns:r="r"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#);
+    put("xl/_rels/workbook.xml.rels", r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#);
+    put(
+        "xl/theme/theme1.xml",
+        r#"<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="Office">
+<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+<a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+</a:clrScheme></a:themeElements></a:theme>"#,
+    );
+    put(
+        "xl/styles.xml",
+        r#"<styleSheet>
+<fonts count="3"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><color theme="0"/><name val="Calibri"/></font>
+<font><i/><u/><b val="0"/><color rgb="FFC00000"/></font></fonts>
+<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
+<fill><patternFill patternType="solid"><fgColor theme="4"/><bgColor indexed="64"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor theme="4" tint="0.79998168889431442"/></patternFill></fill></fills>
+<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>
+<border><left style="thin"><color indexed="64"/></left><right style="thin"><color indexed="10"/></right><top/><bottom style="medium"><color auto="1"/></bottom></border></borders>
+<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" applyFont="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="3" fontId="2" fillId="3" borderId="0"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="right"/></xf></cellXfs>
+</styleSheet>"#,
+    );
+    put(
+        "xl/worksheets/sheet1.xml",
+        r#"<worksheet><sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>Head</t></is></c><c r="B1" s="2"><v>1234</v></c><c r="C1" s="3"><v>1</v></c><c r="D1" s="0"><v>2</v></c></row></sheetData></worksheet>"#,
+    );
+    z.finish().unwrap();
+
+    let wb = xl_io::open(&path).unwrap().workbook;
+    let s = wb.sheet_ids()[0];
+    let head = wb.style(a(s, "A1"));
+    assert!(head.bold);
+    assert_eq!(head.color, Some(0xFFFFFF), "theme 0 is lt1 (white)");
+    assert_eq!(head.fill, Some(0x4472C4), "theme 4 is accent1");
+    assert_eq!(head.align, xl_engine::HAlign::Center);
+    assert_eq!(head.left.style, xl_engine::LineStyle::Thin);
+    assert_eq!(head.left.color, None, "indexed 64 = automatic");
+    assert_eq!(head.right.color, Some(0xFF0000), "indexed 10 is red");
+    assert_eq!(head.bottom.style, xl_engine::LineStyle::Medium);
+    let b1 = wb.style(a(s, "B1"));
+    assert!(b1.italic && b1.underline && !b1.bold);
+    assert_eq!(b1.color, Some(0xC00000));
+    let tinted = b1.fill.unwrap();
+    assert!((tinted >> 16) >= 0xD7 && (tinted >> 16) <= 0xDB, "accent1 lighter 80% ~ D9E1F2, got {tinted:06X}");
+    assert_eq!(wb.display(a(s, "B1")).text, "1,234");
+    assert_eq!(wb.style(a(s, "C1")).align, xl_engine::HAlign::Right);
+    assert!(wb.style(a(s, "A1")).color.is_some());
+    assert!(wb.style(a(s, "D1")).is_default(), "default font color (dk1) stays automatic");
+}

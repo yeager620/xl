@@ -14,7 +14,8 @@ use quick_xml::events::{BytesRef, BytesStart, Event};
 use xl_engine::format::builtin_format;
 use xl_engine::formula::parse_formula;
 use xl_engine::input::classify_literal;
-use xl_engine::{Addr, CellRef, ErrorKind, LoadedCell, MAX_COLS, SheetId, Value, Workbook, validate_sheet_name};
+use xl_engine::style::{INDEXED_COLORS, apply_tint};
+use xl_engine::{Addr, Border, CellRef, ErrorKind, HAlign, LineStyle, LoadedCell, MAX_COLS, Rgb, SheetId, Style, Value, Workbook, validate_sheet_name};
 use zip::ZipArchive;
 
 use crate::{Loaded, from_excel_width};
@@ -128,35 +129,225 @@ fn read_shared_strings(zip: &mut Zip) -> Result<Vec<Arc<str>>, String> {
     Ok(out)
 }
 
-/// Number format code for each cell style index (None = General).
-fn read_styles(zip: &mut Zip) -> Result<Vec<Option<String>>, String> {
+/// Theme colors in Excel's theme-index order (lt1, dk1, lt2, dk2, accent1..6, hlink, folHlink).
+fn read_theme(zip: &mut Zip) -> Result<Vec<Rgb>, String> {
+    // Office defaults, used when the file has no theme.
+    let mut scheme: Vec<Rgb> = vec![0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47, 0x0563C1, 0x954F72];
+    if let Some(bytes) = read_entry(zip, "xl/theme/theme1.xml")? {
+        let names = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+        let mut r = xml(&bytes);
+        let mut slot: Option<usize> = None;
+        loop {
+            match r.read_event().map_err(|e| e.to_string())? {
+                Event::Start(e) | Event::Empty(e) => {
+                    let n = local(e.name().as_ref()).to_string();
+                    if let Some(i) = names.iter().position(|x| *x == n) {
+                        slot = Some(i);
+                    } else if let Some(i) = slot {
+                        let v = match n.as_str() {
+                            "srgbClr" => attr(&e, "val"),
+                            "sysClr" => attr(&e, "lastClr"),
+                            _ => None,
+                        };
+                        if let Some(rgb) = v.and_then(|v| u32::from_str_radix(&v, 16).ok()) {
+                            scheme[i] = rgb;
+                            slot = None;
+                        }
+                    }
+                }
+                Event::End(e) if local(e.name().as_ref()) == "clrScheme" => break,
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    // dk1/lt1 and dk2/lt2 swap places in theme-index order.
+    scheme.swap(0, 1);
+    scheme.swap(2, 3);
+    Ok(scheme)
+}
+
+/// Resolve a <color>/<fgColor> element. Returns None for automatic.
+fn color_of(e: &BytesStart, theme: &[Rgb]) -> Option<Rgb> {
+    if attr(e, "auto").is_some_and(|v| v == "1" || v == "true") {
+        return None;
+    }
+    let base = if let Some(rgb) = attr(e, "rgb") {
+        let hex = if rgb.len() == 8 { &rgb[2..] } else { rgb.as_str() };
+        u32::from_str_radix(hex, 16).ok()?
+    } else if let Some(t) = attr(e, "theme").and_then(|v| v.parse::<usize>().ok()) {
+        *theme.get(t)?
+    } else if let Some(i) = attr(e, "indexed").and_then(|v| v.parse::<usize>().ok()) {
+        match i {
+            64 => return None, // system foreground
+            65 => 0xFFFFFF,    // system background
+            _ => *INDEXED_COLORS.get(i)?,
+        }
+    } else {
+        return None;
+    };
+    let tint: f64 = attr(e, "tint").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    Some(apply_tint(base, tint))
+}
+
+fn line_style(s: &str) -> LineStyle {
+    match s {
+        "thin" | "hair" => LineStyle::Thin,
+        "medium" | "mediumDashDot" | "mediumDashDotDot" => LineStyle::Medium,
+        "thick" => LineStyle::Thick,
+        "dashed" | "mediumDashed" | "dashDot" | "dashDotDot" | "slantDashDot" => LineStyle::Dashed,
+        "dotted" => LineStyle::Dotted,
+        "double" => LineStyle::Double,
+        _ => LineStyle::None,
+    }
+}
+
+fn flag(e: &BytesStart) -> bool {
+    attr(e, "val").is_none_or(|v| v != "0" && v != "false" && v != "none")
+}
+
+/// What one cellXfs entry contributes to a cell.
+#[derive(Clone, Default)]
+pub(crate) struct Xf {
+    num_fmt: Option<String>,
+    style: Style,
+}
+
+fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
+    let theme = read_theme(zip)?;
     let mut out = Vec::new();
     let Some(bytes) = read_entry(zip, "xl/styles.xml")? else { return Ok(out) };
     let mut r = xml(&bytes);
     let mut custom: HashMap<u32, String> = HashMap::new();
-    let mut in_cell_xfs = false;
+    let mut fonts: Vec<Style> = Vec::new();
+    let mut fills: Vec<Option<Rgb>> = Vec::new();
+    let mut borders: Vec<[Border; 4]> = Vec::new();
+    let mut section = String::new();
+    let mut cur_style = Style::default();
+    let mut cur_fill: Option<Rgb> = None;
+    let mut solid = false;
+    let mut cur_border = [Border::default(); 4];
+    let mut border_side: Option<usize> = None;
+    let mut cur_xf: Option<Xf> = None;
     loop {
-        match r.read_event().map_err(|e| e.to_string())? {
-            Event::Start(e) | Event::Empty(e) => match local(e.name().as_ref()) {
-                "numFmt" => {
+        let ev = r.read_event().map_err(|e| e.to_string())?;
+        let (e, empty) = match &ev {
+            Event::Start(e) => (Some(e.clone()), false),
+            Event::Empty(e) => (Some(e.clone()), true),
+            _ => (None, false),
+        };
+        if let Some(e) = e {
+            let name = local(e.name().as_ref()).to_string();
+            match (section.as_str(), name.as_str()) {
+                (_, "numFmt") => {
                     if let (Some(id), Some(code)) = (attr(&e, "numFmtId"), attr(&e, "formatCode")) {
                         custom.insert(id.parse().unwrap_or(0), code);
                     }
                 }
-                "cellXfs" => in_cell_xfs = true,
-                "xf" if in_cell_xfs => {
-                    let id: u32 = attr(&e, "numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let code = custom.get(&id).cloned().or_else(|| builtin_format(id).map(str::to_string));
-                    out.push(code.filter(|c| !c.eq_ignore_ascii_case("General")));
+                (_, "fonts" | "fills" | "borders" | "cellXfs" | "cellStyleXfs" | "dxfs") if !empty => section = name.clone(),
+                ("fonts", "font") => cur_style = Style::default(),
+                ("fonts", "b") => cur_style.bold = flag(&e),
+                ("fonts", "i") => cur_style.italic = flag(&e),
+                ("fonts", "u") => cur_style.underline = flag(&e),
+                ("fonts", "strike") => cur_style.strike = flag(&e),
+                ("fonts", "color") => {
+                    // The default text color (black / dark 1) stays automatic so dark mode works.
+                    cur_style.color = color_of(&e, &theme).filter(|&c| c != 0x000000 && c != theme[1]);
+                }
+                ("fills", "fill") => {
+                    cur_fill = None;
+                    solid = false;
+                }
+                ("fills", "patternFill") => solid = attr(&e, "patternType").as_deref() == Some("solid"),
+                ("fills", "fgColor") if solid => cur_fill = color_of(&e, &theme),
+                ("borders", "border") => cur_border = [Border::default(); 4],
+                ("borders", side @ ("top" | "bottom" | "left" | "right" | "start" | "end")) => {
+                    let i = match side {
+                        "top" => 0,
+                        "bottom" => 1,
+                        "left" | "start" => 2,
+                        _ => 3,
+                    };
+                    cur_border[i].style = attr(&e, "style").map_or(LineStyle::None, |s| line_style(&s));
+                    border_side = (!empty).then_some(i);
+                }
+                ("borders", "color") => {
+                    if let Some(i) = border_side {
+                        cur_border[i].color = color_of(&e, &theme).filter(|&c| c != 0x000000 && c != theme[1]);
+                    }
+                }
+                ("cellXfs", "xf") => {
+                    let num: u32 = attr(&e, "numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let code = custom.get(&num).cloned().or_else(|| builtin_format(num).map(str::to_string));
+                    let mut style = attr(&e, "fontId").and_then(|v| v.parse::<usize>().ok()).and_then(|i| fonts.get(i)).cloned().unwrap_or_default();
+                    style.fill = attr(&e, "fillId").and_then(|v| v.parse::<usize>().ok()).and_then(|i| fills.get(i).copied()).flatten();
+                    if let Some(b) = attr(&e, "borderId").and_then(|v| v.parse::<usize>().ok()).and_then(|i| borders.get(i)) {
+                        [style.top, style.bottom, style.left, style.right] = *b;
+                    }
+                    let xf = Xf { num_fmt: code.filter(|c| !c.eq_ignore_ascii_case("General")), style };
+                    if empty {
+                        out.push(xf);
+                    } else {
+                        cur_xf = Some(xf);
+                    }
+                }
+                ("cellXfs", "alignment") => {
+                    if let Some(xf) = cur_xf.as_mut() {
+                        xf.style.align = match attr(&e, "horizontal").as_deref() {
+                            Some("left") => HAlign::Left,
+                            Some("center" | "centerContinuous") => HAlign::Center,
+                            Some("right") => HAlign::Right,
+                            _ => HAlign::General,
+                        };
+                    }
                 }
                 _ => {}
-            },
-            Event::End(e) if local(e.name().as_ref()) == "cellXfs" => in_cell_xfs = false,
+            }
+            // Self-closing elements also end themselves.
+            if empty {
+                end_element(&name, &section, &mut fonts, &cur_style, &mut fills, cur_fill, &mut borders, &cur_border, &mut border_side);
+            }
+            continue;
+        }
+        match ev {
+            Event::End(e) => {
+                let name = local(e.name().as_ref()).to_string();
+                if name == section {
+                    section.clear();
+                } else if name == "xf" && section == "cellXfs" {
+                    if let Some(xf) = cur_xf.take() {
+                        out.push(xf);
+                    }
+                } else {
+                    end_element(&name, &section, &mut fonts, &cur_style, &mut fills, cur_fill, &mut borders, &cur_border, &mut border_side);
+                }
+            }
             Event::Eof => break,
             _ => {}
         }
     }
     Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn end_element(
+    name: &str,
+    section: &str,
+    fonts: &mut Vec<Style>,
+    cur_style: &Style,
+    fills: &mut Vec<Option<Rgb>>,
+    cur_fill: Option<Rgb>,
+    borders: &mut Vec<[Border; 4]>,
+    cur_border: &[Border; 4],
+    border_side: &mut Option<usize>,
+) {
+    match (section, name) {
+        ("fonts", "font") => fonts.push(cur_style.clone()),
+        ("fills", "fill") => fills.push(cur_fill),
+        ("borders", "border") => borders.push(*cur_border),
+        ("borders", "top" | "bottom" | "left" | "right" | "start" | "end") => *border_side = None,
+        _ => {}
+    }
 }
 
 #[derive(Default, PartialEq)]
@@ -176,7 +367,7 @@ struct SharedFormula {
 struct SheetCtx<'a> {
     id: SheetId,
     shared: &'a [Arc<str>],
-    styles: &'a [Option<String>],
+    styles: &'a [Xf],
 }
 
 fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize, warnings: &mut Vec<String>) -> Result<(), String> {
@@ -218,8 +409,9 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         f_shared = None;
                         if empty {
                             // Formatted but empty cell.
-                            if let Some(code) = style.and_then(|s| cx.styles.get(s)).and_then(|c| c.as_deref()) {
-                                wb.set_format(Addr::new(cx.id, cell), Some(code));
+                            if let Some(xf) = style.and_then(|s| cx.styles.get(s)) {
+                                wb.set_format(Addr::new(cx.id, cell), xf.num_fmt.as_deref());
+                                wb.set_style(Addr::new(cx.id, cell), &xf.style);
                             }
                         }
                     }
@@ -293,8 +485,9 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                             };
                         }
                     }
-                    if let Some(code) = style.and_then(|s| cx.styles.get(s)).and_then(|c| c.as_deref()) {
-                        wb.set_format(addr, Some(code));
+                    if let Some(xf) = style.and_then(|s| cx.styles.get(s)) {
+                        wb.set_format(addr, xf.num_fmt.as_deref());
+                        wb.set_style(addr, &xf.style);
                     }
                     match formula {
                         Some(src) => {

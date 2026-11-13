@@ -2,10 +2,11 @@
 //! window of cells, then paints it.
 
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Font, FontWeight, Hsla, PaintQuad, Pixels, Point, ShapedLine, SharedString, TextAlign,
-    TextRun, Window, fill, font, point, px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Font, FontStyle, FontWeight, Hsla, PaintQuad, Pixels, Point, ShapedLine, SharedString,
+    StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, fill, font, point, px, quad, size,
 };
-use xl_engine::{CellRef, FmtColor, MAX_COLS, Range, Value, col_name};
+use xl_engine::style::luminance;
+use xl_engine::{CellRef, FmtColor, HAlign, LineStyle, MAX_COLS, Range, Rgb, Style, Value, col_name};
 
 use crate::app::{CELL_FONT, CELL_PAD, HEADER_FONT, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
 use crate::refs::{RefSpan, scan_refs};
@@ -35,6 +36,41 @@ pub fn shape(window: &mut Window, text: impl Into<SharedString>, f: Font, color:
     let text: SharedString = text.into();
     let run = TextRun { len: text.len(), font: f, color, background_color: None, underline: None, strikethrough: None };
     window.text_system().shape_line(text, px(size_px), &[run], None)
+}
+
+fn rgb(c: Rgb) -> Hsla {
+    gpui::rgb(c).into()
+}
+
+/// Text color for a styled cell: explicit color, else one that reads well on
+/// the fill, else the theme's text color.
+fn text_color(t: &Theme, st: &Style) -> Hsla {
+    match (st.color, st.fill) {
+        // Near-black text on the plain dark-theme background would vanish.
+        (Some(c), None) if t.dark && luminance(c) < 0.03 => t.text,
+        (Some(c), _) => rgb(c),
+        (None, Some(f)) if luminance(f) > 0.35 => rgb(0x1A1A1E),
+        (None, Some(_)) => rgb(0xFFFFFF),
+        (None, None) => t.text,
+    }
+}
+
+fn shape_styled(window: &mut Window, text: impl Into<SharedString>, st: &Style, color: Hsla) -> ShapedLine {
+    let text: SharedString = text.into();
+    let f = Font {
+        weight: if st.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+        style: if st.italic { FontStyle::Italic } else { FontStyle::Normal },
+        ..cell_font()
+    };
+    let run = TextRun {
+        len: text.len(),
+        font: f,
+        color,
+        background_color: None,
+        underline: st.underline.then_some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false }),
+        strikethrough: st.strike.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+    };
+    window.text_system().shape_line(text, px(CELL_FONT), &[run], None)
 }
 
 fn shape_runs(window: &mut Window, text: SharedString, runs: Vec<TextRun>, size_px: f32) -> ShapedLine {
@@ -153,6 +189,43 @@ impl Spreadsheet {
         ops.push(Op::Quad(fill(b(ox, oy + HEADER_H - 1.0, vw, 1.0), t.border), all));
         ops.push(Op::Quad(fill(b(ox + HEADER_W - 1.0, oy, 1.0, vh), t.border), all));
 
+        // Cell fills (over gridlines, like Excel) and borders.
+        let mut border_ops = Vec::new();
+        for r in first_row..=last_row {
+            let y = row_y(r);
+            for &(c, x, w) in &cols {
+                let st = self.wb.style(self.at(CellRef::new(r, c)));
+                if let Some(f) = st.fill {
+                    ops.push(Op::Quad(fill(b(x, y - 1.0, w, ROW_H + 1.0), rgb(f)), grid_clip));
+                }
+                if st.has_borders() {
+                    let line = |b: &xl_engine::Border| if b.color.is_some() { rgb(b.color.unwrap()) } else { t.text };
+                    let mut edge = |bd: &xl_engine::Border, bx: f64, by: f64, bw: f64, bh: f64| {
+                        if bd.style == LineStyle::None {
+                            return;
+                        }
+                        let q = if bd.style == LineStyle::Double {
+                            // Two thin lines with a gap.
+                            let horiz = bw > bh;
+                            let (w2, h2) = if horiz { (bw, 1.0) } else { (1.0, bh) };
+                            border_ops.push(Op::Quad(fill(b(bx, by, w2, h2), line(bd)), grid_clip));
+                            let (ox2, oy2) = if horiz { (0.0, 2.0) } else { (2.0, 0.0) };
+                            fill(b(bx + ox2, by + oy2, w2, h2), line(bd))
+                        } else {
+                            fill(b(bx, by, bw, bh), line(bd))
+                        };
+                        border_ops.push(Op::Quad(q, grid_clip));
+                    };
+                    let tw = |bd: &xl_engine::Border| bd.style.width().max(1.0) as f64;
+                    edge(&st.top, x - 1.0, y - 1.0, w + 1.0, tw(&st.top));
+                    edge(&st.bottom, x - 1.0, y + ROW_H - tw(&st.bottom), w + 1.0, tw(&st.bottom));
+                    edge(&st.left, x - 1.0, y - 1.0, tw(&st.left), ROW_H + 1.0);
+                    edge(&st.right, x + w - tw(&st.right), y - 1.0, tw(&st.right), ROW_H + 1.0);
+                }
+            }
+        }
+        ops.extend(border_ops);
+
         // Selection fill (the active cell stays clear).
         if sel.start != sel.end {
             ops.push(Op::Quad(fill(rect_of(sel), t.selection), grid_clip));
@@ -185,22 +258,29 @@ impl Spreadsheet {
                     continue;
                 }
                 let shown = self.wb.display(self.at(cell));
+                let st = self.wb.style(self.at(cell));
                 let color = match (v, shown.color) {
                     (Value::Error(_), _) => t.error,
                     (_, Some(fc)) => fmt_color(&t, fc),
-                    _ => t.text,
+                    _ => text_color(&t, st),
                 };
-                let mut line = shape(window, shown.text, f.clone(), color, CELL_FONT);
+                let mut line = shape_styled(window, shown.text, st, color);
                 let tw = f64::from(line.width);
                 let avail = w - 2.0 * CELL_PAD;
-                let (tx, clip_w) = match v {
-                    Value::Number(_) => {
-                        if tw > avail {
-                            line = shape(window, "#".repeat((avail / 8.0).max(1.0) as usize), f.clone(), color, CELL_FONT);
-                        }
-                        (x + w - CELL_PAD - f64::from(line.width), w)
-                    }
-                    Value::Bool(_) | Value::Error(_) => (x + (w - tw) / 2.0, w),
+                if matches!(v, Value::Number(_)) && tw > avail {
+                    line = shape_styled(window, "#".repeat((avail / 8.0).max(1.0) as usize), st, color);
+                }
+                let lw = f64::from(line.width);
+                let align = match (st.align, v) {
+                    (HAlign::General, Value::Number(_)) => HAlign::Right,
+                    (HAlign::General, Value::Bool(_) | Value::Error(_)) => HAlign::Center,
+                    (HAlign::General, _) => HAlign::Left,
+                    (a, _) => a,
+                };
+                let (tx, clip_w) = match align {
+                    HAlign::Right => (x + w - CELL_PAD - lw, w),
+                    HAlign::Center => (x + (w - lw) / 2.0, w),
+                    _ if matches!(v, Value::Number(_)) => (x + CELL_PAD, w),
                     _ => {
                         // Text overflows into empty neighbours, like Excel.
                         let mut cw = w;

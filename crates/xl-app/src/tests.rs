@@ -277,3 +277,52 @@ fn save_and_reopen_xlsx(cx: &mut TestAppContext) {
     });
     std::fs::remove_file(path).ok();
 }
+
+fn style(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, a1: &str) -> xl_engine::Style {
+    view.read_with(cx, |s, _| s.wb.style(s.at(CellRef::parse(a1).unwrap())).clone())
+}
+
+#[gpui::test]
+fn style_shortcuts_toggle_and_undo(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "B4");
+    cx.simulate_keystrokes("shift-down ctrl-b");
+    assert!(style(&view, cx, "B4").bold && style(&view, cx, "B5").bold);
+    cx.simulate_keystrokes("ctrl-b");
+    assert!(!style(&view, cx, "B4").bold, "second press turns it off");
+    cx.simulate_keystrokes("ctrl-i ctrl-u ctrl-5");
+    let st = style(&view, cx, "B5");
+    assert!(st.italic && st.underline && st.strike);
+    cx.simulate_keystrokes("ctrl-z ctrl-z ctrl-z");
+    assert!(style(&view, cx, "B5").is_default());
+}
+
+#[gpui::test]
+fn colors_alignment_and_borders(cx: &mut TestAppContext) {
+    use xl_engine::{HAlign, LineStyle};
+    let (view, cx) = setup(cx);
+    go(&view, cx, "F2");
+    cx.simulate_keystrokes("shift-right shift-down"); // F2:G3
+    view.update(cx, |s, _| {
+        s.set_fill(Some(0xFFF2CC));
+        s.set_text_color(Some(0xC00000));
+        s.set_align(HAlign::Center);
+        s.apply_borders(crate::app::BorderPreset::Outside);
+    });
+    let tl = style(&view, cx, "F2");
+    assert_eq!((tl.fill, tl.color, tl.align), (Some(0xFFF2CC), Some(0xC00000), HAlign::Center));
+    assert_eq!((tl.top.style, tl.left.style, tl.bottom.style, tl.right.style), (LineStyle::Thin, LineStyle::Thin, LineStyle::None, LineStyle::None));
+    let br = style(&view, cx, "G3");
+    assert_eq!((br.top.style, br.right.style, br.bottom.style), (LineStyle::None, LineStyle::Thin, LineStyle::Thin));
+    // Clicking the same alignment again goes back to General.
+    view.update(cx, |s, _| s.set_align(HAlign::Center));
+    assert_eq!(style(&view, cx, "F2").align, HAlign::General);
+    // Styles copy with the cell.
+    go(&view, cx, "F2");
+    cx.simulate_keystrokes("ctrl-c");
+    go(&view, cx, "J1");
+    cx.simulate_keystrokes("ctrl-v");
+    assert_eq!(style(&view, cx, "J1").fill, Some(0xFFF2CC));
+    view.update(cx, |s, _| s.clear_formatting());
+    assert!(style(&view, cx, "J1").is_default());
+}

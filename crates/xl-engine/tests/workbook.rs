@@ -272,7 +272,7 @@ fn snapshots_restore_inputs_and_formats() {
     assert_eq!(t.shown("A1"), "15%");
     assert_eq!(t.v("A2"), n(0.3));
     let shifted = t.wb.snapshot_shifted(a(s, "A2"), 1, 1);
-    assert_eq!(shifted, CellSnapshot { input: "=B2*2".into(), format: None });
+    assert_eq!(shifted, CellSnapshot { input: "=B2*2".into(), format: None, style: Default::default() });
 }
 
 #[test]
@@ -290,6 +290,28 @@ fn loading_keeps_cached_values_for_unsupported_formulas() {
     assert_eq!(*wb.value(a(s, "A4")), n(9.0), "unparseable syntax keeps the cached value");
     assert_eq!(*wb.value(a(s, "A5")), n(14.0), "dependents use cached values");
     assert_eq!(wb.input_text(a(s, "A4")), "=Table1[Qty]");
+}
+
+#[test]
+fn styles_follow_snapshots_and_copies() {
+    use xl_engine::{Border, HAlign, Style};
+    let mut t = T::new();
+    let s = t.s;
+    let bold_red = Style { bold: true, color: Some(0xC00000), fill: Some(0xFFF2CC), align: HAlign::Center, bottom: Border::THIN, ..Style::default() };
+    t.set("A1", "=1+1");
+    t.wb.set_style(a(s, "A1"), &bold_red);
+    assert_eq!(t.wb.style(a(s, "A1")), &bold_red);
+    let snap = t.wb.snapshot(a(s, "A1"));
+    t.wb.set_style(a(s, "A1"), &Style::default());
+    assert!(t.wb.style(a(s, "A1")).is_default());
+    assert_eq!(t.wb.styled_cells(s).count(), 0);
+    t.wb.restore(vec![(a(s, "A1"), snap)]);
+    assert_eq!(t.wb.style(a(s, "A1")), &bold_red);
+    // Copies carry the style; identical styles are shared.
+    let copy = t.wb.snapshot_shifted(a(s, "A1"), 1, 0);
+    t.wb.restore(vec![(a(s, "A2"), copy)]);
+    assert_eq!(t.wb.style(a(s, "A2")), &bold_red);
+    assert_eq!(t.wb.styled_cells(s).count(), 2);
 }
 
 /// Tiny deterministic PRNG so the property test needs no extra deps.

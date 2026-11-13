@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rust_xlsxwriter::{Format, Formula, Workbook as XlsxBook};
-use xl_engine::{Addr, CellInput, Value, Workbook, precise};
+use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook as XlsxBook};
+use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, Value, Workbook, precise};
 
 use crate::to_excel_width_px;
 
@@ -56,6 +56,74 @@ pub fn prefix_future_functions(src: &str) -> String {
     out
 }
 
+fn border_kind(b: &Border) -> FormatBorder {
+    match b.style {
+        LineStyle::None => FormatBorder::None,
+        LineStyle::Thin => FormatBorder::Thin,
+        LineStyle::Medium => FormatBorder::Medium,
+        LineStyle::Thick => FormatBorder::Thick,
+        LineStyle::Dashed => FormatBorder::Dashed,
+        LineStyle::Dotted => FormatBorder::Dotted,
+        LineStyle::Double => FormatBorder::Double,
+    }
+}
+
+fn build_format(code: Option<&str>, st: &Style) -> Format {
+    let mut f = Format::new();
+    if let Some(c) = code {
+        f = f.set_num_format(c);
+    }
+    if st.bold {
+        f = f.set_bold();
+    }
+    if st.italic {
+        f = f.set_italic();
+    }
+    if st.underline {
+        f = f.set_underline(FormatUnderline::Single);
+    }
+    if st.strike {
+        f = f.set_font_strikethrough();
+    }
+    if let Some(c) = st.color {
+        f = f.set_font_color(Color::RGB(c));
+    }
+    if let Some(c) = st.fill {
+        f = f.set_background_color(Color::RGB(c));
+    }
+    f = match st.align {
+        HAlign::General => f,
+        HAlign::Left => f.set_align(FormatAlign::Left),
+        HAlign::Center => f.set_align(FormatAlign::Center),
+        HAlign::Right => f.set_align(FormatAlign::Right),
+    };
+    if !st.top.is_none() {
+        f = f.set_border_top(border_kind(&st.top));
+        if let Some(c) = st.top.color {
+            f = f.set_border_top_color(Color::RGB(c));
+        }
+    }
+    if !st.bottom.is_none() {
+        f = f.set_border_bottom(border_kind(&st.bottom));
+        if let Some(c) = st.bottom.color {
+            f = f.set_border_bottom_color(Color::RGB(c));
+        }
+    }
+    if !st.left.is_none() {
+        f = f.set_border_left(border_kind(&st.left));
+        if let Some(c) = st.left.color {
+            f = f.set_border_left_color(Color::RGB(c));
+        }
+    }
+    if !st.right.is_none() {
+        f = f.set_border_right(border_kind(&st.right));
+        if let Some(c) = st.right.color {
+            f = f.set_border_right_color(Color::RGB(c));
+        }
+    }
+    f
+}
+
 fn result_text(v: &Value) -> String {
     match v {
         Value::Number(n) => precise(*n),
@@ -69,8 +137,13 @@ fn result_text(v: &Value) -> String {
 pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
     let err = |e: rust_xlsxwriter::XlsxError| e.to_string();
     let mut book = XlsxBook::new();
-    let mut formats: HashMap<String, Format> = HashMap::new();
-    let mut fmt = |code: Option<&str>| code.map(|c| formats.entry(c.to_string()).or_insert_with(|| Format::new().set_num_format(c)).clone());
+    let mut formats: HashMap<(Option<String>, Style), Format> = HashMap::new();
+    let mut fmt = |code: Option<&str>, st: &Style| -> Option<Format> {
+        if code.is_none() && st.is_default() {
+            return None;
+        }
+        Some(formats.entry((code.map(str::to_string), st.clone())).or_insert_with(|| build_format(code, st)).clone())
+    };
 
     for &id in wb.sheet_ids() {
         let ws = book.add_worksheet();
@@ -78,10 +151,14 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for (&col, &px) in wb.col_widths(id) {
             ws.set_column_width_pixels(col as u16, to_excel_width_px(px)).map_err(err)?;
         }
-        // Formatted empty cells keep their format.
-        for (cell, code) in wb.formatted_cells(id) {
-            if wb.cell(Addr::new(id, cell)).is_none()
-                && let Some(f) = fmt(Some(code))
+        // Empty cells that carry a format or style keep it.
+        let mut blanks: Vec<CellRef> = wb.formatted_cells(id).map(|(c, _)| c).chain(wb.styled_cells(id).map(|(c, _)| c)).collect();
+        blanks.sort_unstable();
+        blanks.dedup();
+        for cell in blanks {
+            let a = Addr::new(id, cell);
+            if wb.cell(a).is_none()
+                && let Some(f) = fmt(wb.format_code(a), wb.style(a))
             {
                 ws.write_blank(cell.row, cell.col as u16, &f).map_err(err)?;
             }
@@ -89,7 +166,7 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for (cell, c) in wb.store(id).iter() {
             let a = Addr::new(id, cell);
             let (row, col) = (cell.row, cell.col as u16);
-            let f = fmt(wb.format_code(a));
+            let f = fmt(wb.format_code(a), wb.style(a));
             match &c.input {
                 CellInput::Formula(_) | CellInput::Opaque(_) => {
                     let src = prefix_future_functions(&wb.formula_source(a).unwrap_or_default());

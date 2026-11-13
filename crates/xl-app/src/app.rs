@@ -7,7 +7,7 @@ use gpui::{
     Bounds, ClipboardItem, Context, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point, ScrollEvent, Subscription, Window, point, px,
 };
-use xl_engine::{Addr, CellRef, CellSnapshot, MAX_COLS, MAX_ROWS, Range, RecalcStats, SheetId, Value, Workbook, quote_sheet_name};
+use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS, Range, RecalcStats, Rgb, SheetId, Style, Value, Workbook, quote_sheet_name};
 
 use crate::theme::Theme;
 
@@ -95,6 +95,32 @@ struct View {
 
 type UndoEntry = Vec<(Addr, CellSnapshot)>;
 
+/// Which toolbar popover is open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Menu {
+    TextColor,
+    Fill,
+    Borders,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BorderPreset {
+    All,
+    Outside,
+    Bottom,
+    ThickBottom,
+    Top,
+    None,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Emphasis {
+    Bold,
+    Italic,
+    Underline,
+    Strike,
+}
+
 pub struct Spreadsheet {
     pub(crate) wb: Workbook,
     pub(crate) cur: SheetId,
@@ -121,6 +147,7 @@ pub struct Spreadsheet {
     pub(crate) renaming: Option<(SheetId, String)>,
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
+    pub(crate) menu: Option<Menu>,
     _appearance: Subscription,
 }
 
@@ -160,6 +187,7 @@ impl Spreadsheet {
             last_title: String::new(),
             renaming: None,
             confirm_delete: None,
+            menu: None,
             _appearance: appearance,
         };
         match path {
@@ -656,6 +684,98 @@ impl Spreadsheet {
         self.dirty = true;
     }
 
+    /// Change the style of every targeted cell as one undoable step.
+    /// `f` gets the cell's position within the selection.
+    fn modify_styles(&mut self, f: impl Fn(&mut Style, CellRef, Range)) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let sel = self.selection();
+        let targets = self.format_targets();
+        let undo = self.snapshots(targets.iter().copied());
+        for a in targets {
+            let mut st = self.wb.style(a).clone();
+            f(&mut st, a.cell, sel);
+            self.wb.set_style(a, &st);
+        }
+        self.push_undo(undo);
+        self.dirty = true;
+        self.menu = None;
+    }
+
+    /// Toggle bold/italic/underline/strikethrough, keyed off the active cell.
+    pub(crate) fn toggle_emphasis(&mut self, e: Emphasis) {
+        let cur = self.wb.style(self.at(self.active));
+        let on = !match e {
+            Emphasis::Bold => cur.bold,
+            Emphasis::Italic => cur.italic,
+            Emphasis::Underline => cur.underline,
+            Emphasis::Strike => cur.strike,
+        };
+        self.modify_styles(|st, _, _| match e {
+            Emphasis::Bold => st.bold = on,
+            Emphasis::Italic => st.italic = on,
+            Emphasis::Underline => st.underline = on,
+            Emphasis::Strike => st.strike = on,
+        });
+    }
+
+    pub(crate) fn set_text_color(&mut self, c: Option<Rgb>) {
+        self.modify_styles(|st, _, _| st.color = c);
+    }
+
+    pub(crate) fn set_fill(&mut self, c: Option<Rgb>) {
+        self.modify_styles(|st, _, _| st.fill = c);
+    }
+
+    /// Clicking the active alignment again returns to General.
+    pub(crate) fn set_align(&mut self, a: HAlign) {
+        let target = if self.wb.style(self.at(self.active)).align == a { HAlign::General } else { a };
+        self.modify_styles(|st, _, _| st.align = target);
+    }
+
+    pub(crate) fn apply_borders(&mut self, preset: BorderPreset) {
+        let thin = Border::THIN;
+        let thick = Border { style: xl_engine::LineStyle::Thick, color: None };
+        self.modify_styles(|st, c, sel| match preset {
+            BorderPreset::All => (st.top, st.bottom, st.left, st.right) = (thin, thin, thin, thin),
+            BorderPreset::Outside => {
+                if c.row == sel.start.row {
+                    st.top = thin;
+                }
+                if c.row == sel.end.row {
+                    st.bottom = thin;
+                }
+                if c.col == sel.start.col {
+                    st.left = thin;
+                }
+                if c.col == sel.end.col {
+                    st.right = thin;
+                }
+            }
+            BorderPreset::Bottom if c.row == sel.end.row => st.bottom = thin,
+            BorderPreset::ThickBottom if c.row == sel.end.row => st.bottom = thick,
+            BorderPreset::Top if c.row == sel.start.row => st.top = thin,
+            BorderPreset::None => (st.top, st.bottom, st.left, st.right) = (Border::default(), Border::default(), Border::default(), Border::default()),
+            _ => {}
+        });
+    }
+
+    /// Remove number formats and styles from the selection, keeping contents.
+    pub(crate) fn clear_formatting(&mut self) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let targets = self.format_targets();
+        let undo = self.snapshots(targets.iter().copied());
+        for a in targets {
+            self.wb.set_style(a, &Style::default());
+            self.wb.set_format(a, None);
+        }
+        self.push_undo(undo);
+        self.dirty = true;
+    }
+
     /// Add or remove decimal places, based on the active cell's format.
     pub(crate) fn bump_decimals(&mut self, delta: i32) {
         let a = self.at(self.active);
@@ -712,6 +832,18 @@ impl Spreadsheet {
             self.wb.set_format(Addr::new(s, CellRef::new(r - 1, 3)), Some("$#,##0.00"));
         }
         self.wb.set_col_width(s, 0, Some(140.0));
+        let at = |a1: &str| Addr::new(s, CellRef::parse(a1).unwrap());
+        self.wb.set_style(at("A1"), &Style { bold: true, ..Style::default() });
+        let header = Style { bold: true, fill: Some(0xDDEBF7), bottom: Border::THIN, ..Style::default() };
+        for c in ["A3", "B3", "C3", "D3"] {
+            let mut st = header.clone();
+            st.align = if c == "A3" { HAlign::General } else { HAlign::Right };
+            self.wb.set_style(at(c), &st);
+        }
+        let total = Style { bold: true, top: Border::THIN, bottom: Border { style: xl_engine::LineStyle::Double, color: None }, ..Style::default() };
+        self.wb.set_style(at("C10"), &total);
+        self.wb.set_style(at("D10"), &total);
+        self.wb.set_style(at("A14"), &Style { italic: true, color: Some(0x7F7F7F), ..Style::default() });
         self.active = CellRef::new(3, 1);
         self.anchor = self.active;
         self.dirty = false;
@@ -1000,7 +1132,12 @@ impl Spreadsheet {
                 self.anchor = self.active;
                 self.message = None;
                 self.confirm_delete = None;
+                self.menu = None;
             }
+            ("b", true) => self.toggle_emphasis(Emphasis::Bold),
+            ("i", true) => self.toggle_emphasis(Emphasis::Italic),
+            ("u", true) => self.toggle_emphasis(Emphasis::Underline),
+            ("5", true) if !shift => self.toggle_emphasis(Emphasis::Strike),
             ("c", true) => self.copy(cx),
             ("x", true) => {
                 self.copy(cx);

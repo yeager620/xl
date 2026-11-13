@@ -2,11 +2,45 @@
 
 use gpui::{
     AnyElement, Context, ExternalPaths, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, canvas, deferred, div, prelude::FluentBuilder, px, rgb,
 };
-use xl_engine::quote_sheet_name;
+use xl_engine::{HAlign, Rgb, quote_sheet_name};
 
-use crate::app::{EditMode, Spreadsheet};
+use crate::app::{BorderPreset, EditMode, Emphasis, Menu, Spreadsheet};
+
+/// Swatch palette: strong colors, then light tints.
+const PALETTE: [[Rgb; 8]; 2] = [
+    [0x000000, 0x7F7F7F, 0xC00000, 0xE26B0A, 0xBF8F00, 0x548235, 0x2F5597, 0x7030A0],
+    [0xFFFFFF, 0xD9D9D9, 0xF8CBAD, 0xFCE4D6, 0xFFF2CC, 0xE2EFDA, 0xDDEBF7, 0xE4DFEC],
+];
+
+/// A small icon of three text lines aligned left/center/right.
+fn align_icon(t: &Theme, a: HAlign) -> impl IntoElement {
+    let bar = |w: f32| div().h(px(1.5)).w(px(w)).bg(t.muted).rounded(px(1.));
+    let col = div().flex().flex_col().gap(px(2.5)).w(px(14.));
+    let col = match a {
+        HAlign::Left => col.items_start(),
+        HAlign::Center => col.items_center(),
+        _ => col.items_end(),
+    };
+    col.child(bar(14.)).child(bar(9.)).child(bar(12.))
+}
+
+fn icon_button(t: &Theme, id: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(26.))
+        .min_w(px(28.))
+        .px(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .when(active, |d| d.bg(t.header_active_bg).text_color(t.header_active_fg))
+        .when(!active, |d| d.text_color(t.muted).hover(|s| s.bg(t.header_bg)))
+}
 use crate::paint::paint_ops;
 use crate::refs::scan_refs;
 use crate::theme::Theme;
@@ -104,6 +138,7 @@ impl Spreadsheet {
             .child(div().w(px(10.)))
             .child(group)
             .child(decimals)
+            .child(self.render_style_controls(cx))
             .child(div().flex_1())
             .child(kbd(&t, "Ctrl+O", "Open"))
             .child(kbd(&t, "Ctrl+S", "Save"))
@@ -128,6 +163,154 @@ impl Spreadsheet {
                         cx.notify();
                     })),
             )
+    }
+
+    fn render_style_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let st = self.wb.style(self.at(self.active)).clone();
+        let sep = || div().w(px(1.)).h(px(18.)).bg(t.border).mx(px(3.));
+        let emph = |id: &'static str, label: &'static str, on: bool, e: Emphasis, cx: &mut Context<Self>| {
+            let base = icon_button(&t, id, on).font_weight(FontWeight::SEMIBOLD).child(label);
+            let base = match e {
+                Emphasis::Bold => base.font_weight(FontWeight::BOLD),
+                Emphasis::Italic => base.italic(),
+                Emphasis::Underline => base.underline(),
+                Emphasis::Strike => base.line_through(),
+            };
+            base.on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_emphasis(e);
+                cx.notify();
+            }))
+        };
+        let menu_button = |id: &'static str, m: Menu, content: AnyElement, cx: &mut Context<Self>| {
+            let open = self.menu == Some(m);
+            div()
+                .flex()
+                .flex_col()
+                .child(icon_button(&t, id, open).gap(px(3.)).child(content).child(div().text_size(px(9.)).child("▾")).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.menu = if this.menu == Some(m) { None } else { Some(m) };
+                        cx.notify();
+                    },
+                )))
+                .relative()
+                .when(open, |d| d.child(deferred(div().absolute().top(px(28.)).left_0().child(self.render_menu(m, cx))).with_priority(2)))
+        };
+        let text_color_icon = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(13.)).child("A"))
+            .child(div().w(px(14.)).h(px(3.)).rounded(px(1.)).bg(st.color.map_or(t.text, |c| rgb(c).into())))
+            .into_any_element();
+        let fill_icon = div()
+            .size(px(14.))
+            .rounded(px(3.))
+            .border_1()
+            .border_color(t.muted)
+            .when_some(st.fill, |d, f| d.bg(rgb(f)))
+            .into_any_element();
+        let border_icon = div().size(px(14.)).border_1().border_color(t.muted).child(div().mt(px(5.)).h(px(1.)).bg(t.muted)).into_any_element();
+        let aligns = [("align-left", HAlign::Left), ("align-center", HAlign::Center), ("align-right", HAlign::Right)];
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(1.))
+            .child(sep())
+            .child(emph("bold", "B", st.bold, Emphasis::Bold, cx))
+            .child(emph("italic", "I", st.italic, Emphasis::Italic, cx))
+            .child(emph("underline", "U", st.underline, Emphasis::Underline, cx))
+            .child(emph("strike", "S", st.strike, Emphasis::Strike, cx))
+            .child(sep())
+            .child(menu_button("text-color", Menu::TextColor, text_color_icon, cx))
+            .child(menu_button("fill-color", Menu::Fill, fill_icon, cx))
+            .child(sep())
+            .children(aligns.map(|(id, a)| {
+                icon_button(&t, id, st.align == a).child(align_icon(&t, a)).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_align(a);
+                    cx.notify();
+                }))
+            }))
+            .child(sep())
+            .child(menu_button("borders", Menu::Borders, border_icon, cx))
+    }
+
+    fn render_menu(&self, m: Menu, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let panel = div()
+            .id("menu-panel")
+            .occlude()
+            .min_w(px(196.))
+            .whitespace_nowrap()
+            .mt(px(4.))
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .rounded(px(8.))
+            .bg(t.bg)
+            .border_1()
+            .border_color(t.border)
+            .shadow_lg()
+            .text_size(px(12.))
+            .text_color(t.text);
+        let item = |id: &'static str, label: &'static str| {
+            div().id(id).px(px(8.)).py(px(5.)).rounded(px(5.)).cursor_pointer().hover(|s| s.bg(t.header_bg)).child(label)
+        };
+        match m {
+            Menu::TextColor | Menu::Fill => {
+                let is_fill = m == Menu::Fill;
+                let reset = item(if is_fill { "no-fill" } else { "auto-color" }, if is_fill { "No fill" } else { "Automatic" }).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if is_fill { this.set_fill(None) } else { this.set_text_color(None) }
+                        cx.notify();
+                    },
+                ));
+                let mut rows = Vec::new();
+                for (ri, row) in PALETTE.iter().enumerate() {
+                    let mut swatches = Vec::new();
+                    for (ci, &c) in row.iter().enumerate() {
+                        swatches.push(
+                            div()
+                                .id(("swatch", ri * 8 + ci))
+                                .size(px(20.))
+                                .rounded(px(4.))
+                                .bg(rgb(c))
+                                .border_1()
+                                .border_color(t.border)
+                                .cursor_pointer()
+                                .hover(|s| s.border_color(t.accent))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if is_fill { this.set_fill(Some(c)) } else { this.set_text_color(Some(c)) }
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    rows.push(div().flex().flex_row().gap(px(4.)).children(swatches));
+                }
+                panel.child(reset).children(rows).into_any_element()
+            }
+            Menu::Borders => {
+                let presets = [
+                    ("b-all", "All borders", BorderPreset::All),
+                    ("b-outside", "Outside borders", BorderPreset::Outside),
+                    ("b-bottom", "Bottom border", BorderPreset::Bottom),
+                    ("b-thick", "Thick bottom border", BorderPreset::ThickBottom),
+                    ("b-top", "Top border", BorderPreset::Top),
+                    ("b-none", "No borders", BorderPreset::None),
+                ];
+                panel
+                    .gap(px(0.))
+                    .children(presets.map(|(id, label, p)| {
+                        item(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                            this.apply_borders(p);
+                            cx.notify();
+                        }))
+                    }))
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_formula_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -435,5 +618,20 @@ impl Render for Spreadsheet {
             )
             .child(self.render_sheet_tabs(cx))
             .child(self.render_status_bar())
+            .relative()
+            .when(self.menu.is_some(), |d| {
+                // Transparent backdrop: a click anywhere outside the open menu closes it.
+                d.child(
+                    deferred(div().id("menu-backdrop").absolute().top_0().left_0().size_full().occlude().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                    .with_priority(1),
+                )
+            })
     }
 }

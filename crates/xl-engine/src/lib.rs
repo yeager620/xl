@@ -8,6 +8,7 @@ pub mod format;
 pub mod formula;
 pub mod input;
 pub mod store;
+pub mod style;
 pub mod value;
 pub mod workbook;
 
@@ -16,5 +17,6 @@ pub use eval::Func;
 pub use format::{FmtColor, Formatted, NumberFormat};
 pub use formula::{ParseError, quote_sheet_name};
 pub use store::{Cell, CellInput, CellStore};
+pub use style::{Border, HAlign, LineStyle, Rgb, Style};
 pub use value::{ErrorKind, Value, format_general};
 pub use workbook::{CellSnapshot, LoadedCell, RecalcStats, Workbook, precise, validate_sheet_name};
