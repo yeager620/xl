@@ -155,3 +155,13 @@ Cargo workspace: `crates/xl-engine`, `crates/xl-io`, `crates/xl-app`, `crates/xl
 - **Engine**: +25 functions (SUMIFS/COUNTIFS/AVERAGEIFS, XLOOKUP, SUMPRODUCT, IFS, MEDIAN, DATE/TIME family, EDATE/EOMONTH, TEXT, VALUE).
 
 **Next (M3):** cell styles (bold/italic, fill, borders, alignment) with xlsx round-trip, background recalc thread, interval-tree range index, aggregate caches for big SUM ranges, faster bulk load, draggable scrollbars, IME input, command palette.
+
+### Update (2026-11-13): M3 done
+
+- **Cell styles**: bold/italic/underline/strike, text & fill colors, alignment, per-edge borders. Toolbar with color/border popovers, Ctrl+B/I/U/5. Full xlsx round-trip incl. Excel theme colors + tints and the indexed palette (cross-checked with openpyxl).
+- **Text input through the platform IME**: dead keys, compose sequences and CJK input methods (with in-cell composition underline and candidate-window positioning).
+- **Command palette** (Ctrl+K / Ctrl+Shift+P): fuzzy search over ~45 commands, jump to a cell, start a formula with a function.
+- **Draggable scrollbars** (thumb drag + track click, hover feedback).
+- **Performance**: files open on a background thread; dedicated full-recalc pass (1M-cell CSV: 1.0 s -> 0.37 s); block-bucketed range index (edits under 100k rolling ranges ~9x faster).
+
+**Next (M4 – ship):** Flatpak / .deb / AppImage packaging, .desktop + MIME registration, app icon, autosave & crash recovery. Also on the list: background recalc for very long dependency chains, aggregate caches, wrap text / row heights, charts.

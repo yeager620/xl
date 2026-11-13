@@ -57,4 +57,27 @@ fn main() {
     println!("5k running totals load            {}", ms(t.elapsed()));
     let st = wb.set_input(at(M - 1, 0), "2").unwrap();
     println!("edit last row of running totals   {}  (dirty {}, evaluated {})", ms(st.elapsed), st.dirty, st.evaluated);
+
+    // 4. Rolling windows: 100k formulas each summing a 6-row window of column A.
+    //    Stresses the range index: each edit must find the few ranges that
+    //    contain the cell among 100k ranges in the same column.
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let at = |r: u32, c: u32| Addr::new(s, CellRef::new(r, c));
+    let mut items = Vec::new();
+    for r in 0..N {
+        items.push((at(r, 0), (r % 13).to_string()));
+        items.push((at(r, 1), format!("=SUM(A{}:A{})", r + 1, r + 6)));
+    }
+    wb.set_inputs(items);
+    let t = Instant::now();
+    let mut evaluated = 0;
+    for i in 0..1000u32 {
+        evaluated += wb.set_input(at(i * 97 % N, 0), &(i % 7).to_string()).unwrap().evaluated;
+    }
+    println!("1000 edits under 100k rolling sums {}  (evaluated {evaluated})", ms(t.elapsed()));
+    let t = Instant::now();
+    let paste: Vec<_> = (0..5000u32).map(|i| (at(i * 19, 0), "5".to_string())).collect();
+    let st = wb.set_inputs(paste);
+    println!("paste 5k cells under rolling sums  {}  (evaluated {})", ms(t.elapsed()), st.evaluated);
 }

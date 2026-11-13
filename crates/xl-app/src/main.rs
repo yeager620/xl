@@ -1,5 +1,7 @@
 mod app;
 mod chrome;
+mod ime;
+mod palette;
 mod paint;
 mod refs;
 #[cfg(test)]

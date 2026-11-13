@@ -49,6 +49,8 @@ pub struct Edit {
     pub cursor: usize,
     pub mode: EditMode,
     pub point: Option<PointRef>,
+    /// Input-method composition in progress (byte range in `text`).
+    pub marked: Option<std::ops::Range<usize>>,
 }
 
 impl Edit {
@@ -69,7 +71,27 @@ pub enum Drag {
     Select,
     Point,
     ResizeCol { col: u32, start_x: f64, start_w: f64 },
+    /// Dragging a scrollbar thumb; `grab` is the pointer offset within it.
+    Scroll { axis: Axis, grab: f64 },
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+/// A scrollbar thumb in window coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct Thumb {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Width of the strip along the grid edge that grabs the scrollbar.
+const SCROLLBAR_HIT: f64 = 12.0;
 
 pub enum Hit {
     Corner,
@@ -132,7 +154,9 @@ pub struct Spreadsheet {
     pub(crate) scroll_y: f64,
     pub(crate) viewport: Bounds<Pixels>,
     pub(crate) edit: Option<Edit>,
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
+    /// Scrollbar under the pointer (drawn wider).
+    pub(crate) scroll_hover: Option<Axis>,
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     clip: Option<Clip>,
@@ -148,6 +172,9 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// File being opened in the background.
+    pub(crate) loading: Option<String>,
+    pub(crate) palette: Option<crate::palette::Palette>,
     _appearance: Subscription,
 }
 
@@ -175,6 +202,7 @@ impl Spreadsheet {
             viewport: Bounds::default(),
             edit: None,
             drag: None,
+            scroll_hover: None,
             undo: Vec::new(),
             redo: Vec::new(),
             clip: None,
@@ -188,10 +216,12 @@ impl Spreadsheet {
             renaming: None,
             confirm_delete: None,
             menu: None,
+            loading: None,
+            palette: None,
             _appearance: appearance,
         };
         match path {
-            Some(p) => this.load(p),
+            Some(p) => this.load(p, cx),
             None => this.load_welcome(),
         }
         this
@@ -251,6 +281,70 @@ impl Spreadsheet {
 
     pub(crate) fn max_scroll_y(&self) -> f64 {
         (MAX_ROWS as f64 * ROW_H - self.grid_h()).max(0.0)
+    }
+
+    /// Scrollable content size: the used area plus one screen, at least as
+    /// far as the current scroll position.
+    fn content_size(&self) -> (f64, f64) {
+        let extent = self.wb.store(self.cur).extent().unwrap_or_default();
+        let (gw, gh) = (self.grid_w(), self.grid_h());
+        let h = ((extent.row.max(self.active.row) + 1) as f64 * ROW_H + gh).max(self.scroll_y + gh);
+        let w = (self.col_x(extent.col.max(self.active.col) + 1) + gw).max(self.scroll_x + gw);
+        (w, h)
+    }
+
+    pub(crate) fn thumb(&self, axis: Axis) -> Option<Thumb> {
+        let ox = f64::from(self.viewport.origin.x);
+        let oy = f64::from(self.viewport.origin.y);
+        let (vw, vh) = (f64::from(self.viewport.size.width), f64::from(self.viewport.size.height));
+        let (gx, gy, gw, gh) = (ox + HEADER_W, oy + HEADER_H, self.grid_w(), self.grid_h());
+        let (cw, ch) = self.content_size();
+        let wide = self.scroll_hover == Some(axis) || matches!(self.drag, Some(Drag::Scroll { axis: a, .. }) if a == axis);
+        let thickness = if wide { 9.0 } else { 5.0 };
+        match axis {
+            Axis::Vertical if gh > 40.0 => {
+                let th = (gh * gh / ch).max(28.0);
+                let ty = gy + (self.scroll_y / (ch - gh).max(1.0)) * (gh - th);
+                Some(Thumb { x: ox + vw - thickness - 3.0, y: ty.min(gy + gh - th), w: thickness, h: th })
+            }
+            Axis::Horizontal if gw > 40.0 => {
+                let tw = (gw * gw / cw).max(28.0);
+                let tx = gx + (self.scroll_x / (cw - gw).max(1.0)) * (gw - tw);
+                Some(Thumb { x: tx.min(gx + gw - tw), y: oy + vh - thickness - 3.0, w: tw, h: thickness })
+            }
+            _ => None,
+        }
+    }
+
+    /// Which scrollbar strip (if any) is under a window position.
+    fn scrollbar_at(&self, pos: Point<Pixels>) -> Option<Axis> {
+        let (x, y) = (f64::from(pos.x - self.viewport.origin.x), f64::from(pos.y - self.viewport.origin.y));
+        let (vw, vh) = (f64::from(self.viewport.size.width), f64::from(self.viewport.size.height));
+        if x >= vw - SCROLLBAR_HIT && x <= vw && y >= HEADER_H && y <= vh - SCROLLBAR_HIT {
+            Some(Axis::Vertical)
+        } else if y >= vh - SCROLLBAR_HIT && y <= vh && x >= HEADER_W && x <= vw - SCROLLBAR_HIT {
+            Some(Axis::Horizontal)
+        } else {
+            None
+        }
+    }
+
+    /// Scroll so the thumb's leading edge sits at window coordinate `edge`.
+    fn scroll_thumb_to(&mut self, axis: Axis, edge: f64) {
+        let Some(t) = self.thumb(axis) else { return };
+        let (cw, ch) = self.content_size();
+        match axis {
+            Axis::Vertical => {
+                let gy = f64::from(self.viewport.origin.y) + HEADER_H;
+                let track = (self.grid_h() - t.h).max(1.0);
+                self.scroll_y = (((edge - gy) / track).clamp(0.0, 1.0) * (ch - self.grid_h())).clamp(0.0, self.max_scroll_y());
+            }
+            Axis::Horizontal => {
+                let gx = f64::from(self.viewport.origin.x) + HEADER_W;
+                let track = (self.grid_w() - t.w).max(1.0);
+                self.scroll_x = (((edge - gx) / track).clamp(0.0, 1.0) * (cw - self.grid_w())).clamp(0.0, self.max_scroll_x());
+            }
+        }
     }
 
     fn ensure_visible(&mut self, c: CellRef) {
@@ -379,7 +473,7 @@ impl Spreadsheet {
         self.confirm_delete = None;
     }
 
-    fn cycle_sheet(&mut self, delta: i64) {
+    pub(crate) fn cycle_sheet(&mut self, delta: i64) {
         let ids = self.wb.sheet_ids();
         let i = ids.iter().position(|&s| s == self.cur).unwrap_or(0) as i64;
         let next = ids[(i + delta).rem_euclid(ids.len() as i64) as usize];
@@ -441,7 +535,7 @@ impl Spreadsheet {
         let at = self.at(self.active);
         let text = initial.unwrap_or_else(|| self.wb.input_text(at));
         let cursor = text.len();
-        self.edit = Some(Edit { at, text, cursor, mode, point: None });
+        self.edit = Some(Edit { at, text, cursor, mode, point: None, marked: None });
         self.message = None;
     }
 
@@ -514,7 +608,7 @@ impl Spreadsheet {
         self.dirty = true;
     }
 
-    fn undo_redo(&mut self, is_undo: bool) {
+    pub(crate) fn undo_redo(&mut self, is_undo: bool) {
         let entry = if is_undo { self.undo.pop() } else { self.redo.pop() };
         let Some(entry) = entry else { return };
         let inverse = self.snapshots(entry.iter().map(|(a, _)| *a));
@@ -535,7 +629,7 @@ impl Spreadsheet {
     }
 
     /// Delete clears contents but keeps formats, like Excel.
-    fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         let sel = self.selection();
         let cells: Vec<_> = self.wb.store(self.cur).iter_range(sel).map(|(c, _)| (self.at(c), String::new())).collect();
         self.apply_inputs(cells);
@@ -549,7 +643,7 @@ impl Spreadsheet {
         true
     }
 
-    fn copy(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn copy(&mut self, cx: &mut Context<Self>) {
         let sel = self.selection();
         if !self.guard_bulk(sel) {
             return;
@@ -569,7 +663,7 @@ impl Spreadsheet {
         self.message = Some((format!("Copied {sel}"), false));
     }
 
-    fn paste(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
         let origin = self.selection().start;
         let mut end = origin;
@@ -602,8 +696,13 @@ impl Spreadsheet {
         self.active = end;
     }
 
+    pub(crate) fn cut(&mut self, cx: &mut Context<Self>) {
+        self.copy(cx);
+        self.clear_selection();
+    }
+
     /// Ctrl+D / Ctrl+R: copy the first row/column of the selection across it.
-    fn fill(&mut self, down: bool) {
+    pub(crate) fn fill(&mut self, down: bool) {
         let sel = self.selection();
         if !self.guard_bulk(sel) {
             return;
@@ -849,8 +948,30 @@ impl Spreadsheet {
         self.dirty = false;
     }
 
-    pub(crate) fn load(&mut self, path: PathBuf) {
-        match xl_io::open(&path) {
+    /// Open a file on a background thread; the window stays responsive.
+    pub(crate) fn load(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.loading = Some(name.clone());
+        self.message = Some((format!("Opening {name}…"), false));
+        let task = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { xl_io::open(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_load(path, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_load(&mut self, path: PathBuf, result: Result<xl_io::Loaded, String>) {
+        self.loading = None;
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        match result {
             Ok(loaded) => {
                 self.wb = loaded.workbook;
                 self.cur = self.wb.sheet_ids()[0];
@@ -865,15 +986,15 @@ impl Spreadsheet {
                 self.scroll_y = 0.0;
                 self.edit = None;
                 self.renaming = None;
+                self.menu = None;
                 self.dirty = false;
-                let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                 self.message = Some(match loaded.warnings.first() {
                     Some(w) => (format!("Opened {name} with {} warning(s): {w}", loaded.warnings.len()), true),
                     None => (format!("Opened {name} ({} cells)", loaded.cells), false),
                 });
                 self.path = Some(path);
             }
-            Err(e) => self.message = Some((format!("Could not open {}: {e}", path.display()), true)),
+            Err(e) => self.message = Some((format!("Could not open {name}: {e}"), true)),
         }
     }
 
@@ -931,7 +1052,7 @@ impl Spreadsheet {
                 && let Some(path) = paths.into_iter().next()
             {
                 this.update(cx, |this, cx| {
-                    this.load(path);
+                    this.load(path, cx);
                     cx.notify();
                 })
                 .ok();
@@ -942,24 +1063,32 @@ impl Spreadsheet {
 
     pub(crate) fn on_drop_files(&mut self, paths: &ExternalPaths, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = paths.paths().iter().find(|p| xl_io::FileKind::of(p).is_some()) {
-            self.load(p.clone());
+            self.load(p.clone(), cx);
             cx.notify();
         }
     }
 
     // ------------------------------------------------------------------ input
 
-    pub(crate) fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
         let key = ks.key.as_str();
         let ctrl = m.control || m.platform;
-        let handled = if self.renaming.is_some() {
-            self.key_renaming(key, ks.key_char.as_deref(), ctrl)
+        let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
+        let handled = if palette_key {
+            if self.palette.take().is_none() {
+                self.open_palette();
+            }
+            true
+        } else if self.palette.is_some() {
+            self.key_palette(key, window, cx)
+        } else if self.renaming.is_some() {
+            self.key_renaming(key)
         } else if self.edit.is_some() {
-            self.key_editing(key, ks.key_char.as_deref(), ctrl, m.shift, m.alt)
+            self.key_editing(key, ctrl, m.shift, m.alt)
         } else {
-            self.key_navigating(key, ks.key_char.as_deref(), ctrl, m.shift, m.alt, cx)
+            self.key_navigating(key, ctrl, m.shift, cx)
         };
         if handled {
             cx.stop_propagation();
@@ -967,7 +1096,7 @@ impl Spreadsheet {
         }
     }
 
-    fn key_renaming(&mut self, key: &str, ch: Option<&str>, ctrl: bool) -> bool {
+    fn key_renaming(&mut self, key: &str) -> bool {
         let Some((_, name)) = self.renaming.as_mut() else { return false };
         match key {
             "enter" => self.finish_rename(true),
@@ -978,16 +1107,16 @@ impl Spreadsheet {
             "backspace" => {
                 name.pop();
             }
-            _ if ctrl => return false,
-            _ => match ch {
-                Some(s) if !s.chars().any(char::is_control) => name.push_str(s),
-                _ => return false,
-            },
+            // Characters arrive through the input handler (see ime.rs).
+            _ => return false,
         }
         true
     }
 
-    fn key_editing(&mut self, key: &str, ch: Option<&str>, ctrl: bool, shift: bool, alt: bool) -> bool {
+    fn key_editing(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if self.edit.as_ref().is_some_and(|e| e.marked.is_some()) {
+            return false;
+        }
         let pointing = self.edit.as_ref().is_some_and(|e| e.can_point());
         let mode = self.edit.as_ref().unwrap().mode;
         let arrow = match key {
@@ -1066,11 +1195,8 @@ impl Spreadsheet {
                 let e = self.edit.as_mut().unwrap();
                 e.cursor = e.text.len();
             }
-            _ if ctrl => return false,
-            _ => match ch {
-                Some(s) if !s.is_empty() && !s.chars().any(char::is_control) => self.insert_text(s),
-                _ => return false,
-            },
+            // Characters arrive through the input handler (see ime.rs).
+            _ => return false,
         }
         true
     }
@@ -1082,7 +1208,7 @@ impl Spreadsheet {
         e.cursor += s.len();
     }
 
-    fn key_navigating(&mut self, key: &str, ch: Option<&str>, ctrl: bool, shift: bool, alt: bool, cx: &mut Context<Self>) -> bool {
+    fn key_navigating(&mut self, key: &str, ctrl: bool, shift: bool, cx: &mut Context<Self>) -> bool {
         let page = self.visible_rows() as i64;
         // Excel's number-format shortcuts (Ctrl+Shift+1/3/4/5/`).
         if ctrl && shift {
@@ -1139,10 +1265,7 @@ impl Spreadsheet {
             ("u", true) => self.toggle_emphasis(Emphasis::Underline),
             ("5", true) if !shift => self.toggle_emphasis(Emphasis::Strike),
             ("c", true) => self.copy(cx),
-            ("x", true) => {
-                self.copy(cx);
-                self.clear_selection();
-            }
+            ("x", true) => self.cut(cx),
             ("v", true) => self.paste(cx),
             ("z", true) if shift => self.undo_redo(false),
             ("z", true) => self.undo_redo(true),
@@ -1158,13 +1281,8 @@ impl Spreadsheet {
             ("o", true) => self.open(cx),
             ("n", true) if shift => self.add_sheet(),
             ("q", true) => cx.quit(),
-            (_, true) => return false,
-            _ => match ch {
-                Some(s) if !s.is_empty() && !s.chars().any(char::is_control) && !alt => {
-                    self.begin_edit(Some(s.to_string()), EditMode::Enter);
-                }
-                _ => return false,
-            },
+            // Typing starts an edit through the input handler (see ime.rs).
+            _ => return false,
         }
         true
     }
@@ -1173,6 +1291,22 @@ impl Spreadsheet {
         self.focus.focus(window, cx);
         if self.renaming.is_some() {
             self.finish_rename(true);
+        }
+        if let Some(axis) = self.scrollbar_at(ev.position)
+            && let Some(t) = self.thumb(axis)
+        {
+            let along = if axis == Axis::Vertical { f64::from(ev.position.y) } else { f64::from(ev.position.x) };
+            let (start, len) = if axis == Axis::Vertical { (t.y, t.h) } else { (t.x, t.w) };
+            let grab = if along >= start && along <= start + len {
+                along - start
+            } else {
+                // Clicking the track jumps the thumb there (centered on the pointer).
+                self.scroll_thumb_to(axis, along - len / 2.0);
+                len / 2.0
+            };
+            self.drag = Some(Drag::Scroll { axis, grab });
+            cx.notify();
+            return;
         }
         let Some(hit) = self.hit_test(ev.position) else { return };
         let shift = ev.modifiers.shift;
@@ -1229,12 +1363,21 @@ impl Spreadsheet {
     }
 
     pub(crate) fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let hover = if self.drag.is_none() { self.scrollbar_at(ev.position) } else { self.scroll_hover };
+        if hover != self.scroll_hover {
+            self.scroll_hover = hover;
+            cx.notify();
+        }
         let Some(drag) = self.drag else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
             return;
         }
         match drag {
+            Drag::Scroll { axis, grab } => {
+                let along = if axis == Axis::Vertical { f64::from(ev.position.y) } else { f64::from(ev.position.x) };
+                self.scroll_thumb_to(axis, along - grab);
+            }
             Drag::ResizeCol { col, start_x, start_w } => {
                 let w = (start_w + f64::from(ev.position.x) - start_x).max(MIN_COL_W);
                 self.wb.set_col_width(self.cur, col, Some(w));
@@ -1275,7 +1418,7 @@ impl Spreadsheet {
         cx.notify();
     }
 
-    fn autofit(&mut self, col: u32, window: &mut Window) {
+    pub(crate) fn autofit(&mut self, col: u32, window: &mut Window) {
         let r = Range::new(CellRef::new(0, col), CellRef::new(MAX_ROWS - 1, col));
         let mut w: f64 = MIN_COL_W;
         let f = crate::paint::cell_font();

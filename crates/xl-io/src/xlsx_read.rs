@@ -177,14 +177,13 @@ fn color_of(e: &BytesStart, theme: &[Rgb]) -> Option<Rgb> {
         u32::from_str_radix(hex, 16).ok()?
     } else if let Some(t) = attr(e, "theme").and_then(|v| v.parse::<usize>().ok()) {
         *theme.get(t)?
-    } else if let Some(i) = attr(e, "indexed").and_then(|v| v.parse::<usize>().ok()) {
+    } else {
+        let i = attr(e, "indexed").and_then(|v| v.parse::<usize>().ok())?;
         match i {
             64 => return None, // system foreground
             65 => 0xFFFFFF,    // system background
             _ => *INDEXED_COLORS.get(i)?,
         }
-    } else {
-        return None;
     };
     let tint: f64 = attr(e, "tint").and_then(|v| v.parse().ok()).unwrap_or(0.0);
     Some(apply_tint(base, tint))

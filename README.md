@@ -28,7 +28,7 @@ cargo run --release -p xl-bench  # recalc benchmarks
 |---|---|
 | `crates/xl-engine` | Headless core: multi-sheet workbook, formula parser, 77 functions, Excel number formats, dates, dependency graph, incremental recalc |
 | `crates/xl-io` | xlsx read (streaming) / write, CSV/TSV |
-| `crates/xl-app` | The GPUI desktop app (`xl` binary): grid, formula bar, sheet tabs, format toolbar |
+| `crates/xl-app` | The GPUI desktop app (`xl` binary): grid, formula bar, sheet tabs, format & style toolbar, command palette, IME input |
 | `crates/xl-bench` | Recalc benchmarks |
 | `assets/fonts` | Bundled Inter (SIL OFL) |
 
@@ -49,3 +49,5 @@ cargo run --release -p xl-bench  # recalc benchmarks
 | Ctrl+PageUp / PageDown | Previous / next sheet (also works mid-formula to point at another sheet) |
 | Ctrl+Shift+N | New sheet; double-click a tab to rename it |
 | Ctrl+Shift+1 / 3 / 4 / 5 / ` | Number / date / currency / percent / General format |
+| Ctrl+B / I / U / 5 | Bold / italic / underline / strikethrough |
+| Ctrl+K or Ctrl+Shift+P | Command palette: every command, `B12` to jump, `xlo` to start `=XLOOKUP(` |

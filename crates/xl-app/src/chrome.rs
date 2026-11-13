@@ -530,12 +530,14 @@ impl Spreadsheet {
     fn render_status_bar(&self) -> impl IntoElement {
         let t = self.theme;
         let mode = match &self.edit {
+            None if self.loading.is_some() => "Loading",
             None if self.renaming.is_some() => "Rename",
             None => "Ready",
             Some(e) if e.can_point() && e.mode == EditMode::Enter => "Point",
             Some(e) if e.mode == EditMode::Enter => "Enter",
             Some(_) => "Edit",
         };
+        let mode = if self.palette.is_some() { "Command" } else { mode };
         let recalc = self.last_stats.map(|s| {
             let us = s.elapsed.as_secs_f64() * 1e6;
             let time = if us < 1000.0 { format!("{us:.0} µs") } else { format!("{:.1} ms", us / 1000.0) };
@@ -583,6 +585,8 @@ impl Render for Spreadsheet {
                 }
             },
             move |bounds, (), window, cx| {
+                let focus = this.read(cx).focus.clone();
+                window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, this.clone()), cx);
                 let ops = this.read(cx).build_frame(bounds, window);
                 paint_ops(ops, window, cx);
             },
@@ -619,19 +623,23 @@ impl Render for Spreadsheet {
             .child(self.render_sheet_tabs(cx))
             .child(self.render_status_bar())
             .relative()
-            .when(self.menu.is_some(), |d| {
-                // Transparent backdrop: a click anywhere outside the open menu closes it.
+            .when(self.menu.is_some() || self.palette.is_some(), |d| {
+                // Transparent backdrop: a click anywhere outside the open menu or palette closes it.
                 d.child(
                     deferred(div().id("menu-backdrop").absolute().top_0().left_0().size_full().occlude().on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.menu = None;
+                            this.palette = None;
                             cx.stop_propagation();
                             cx.notify();
                         }),
                     ))
                     .with_priority(1),
                 )
+            })
+            .when(self.palette.is_some(), |d| {
+                d.child(deferred(div().absolute().top(px(90.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
             })
     }
 }

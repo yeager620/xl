@@ -314,6 +314,27 @@ fn styles_follow_snapshots_and_copies() {
     assert_eq!(t.wb.styled_cells(s).count(), 2);
 }
 
+#[test]
+fn range_dependencies_across_index_blocks() {
+    let mut t = T::new();
+    // Crosses the 1024-row block boundary; tall (100k rows); whole column.
+    t.set("B1", "=SUM(A1000:A1100)");
+    t.set("B2", "=SUM(A1:A100000)");
+    t.set("B3", "=COUNT(A:A)");
+    t.set("A1024", "1");
+    t.set("A1025", "2");
+    t.set("A99999", "4");
+    assert_eq!(t.v("B1"), n(3.0));
+    assert_eq!(t.v("B2"), n(7.0));
+    assert_eq!(t.v("B3"), n(3.0));
+    // Replacing a formula removes its old range from the index.
+    t.set("B1", "=SUM(A5000:A5001)");
+    let stats = t.wb.set_input(a(t.s, "A1024"), "10").unwrap();
+    assert_eq!(stats.evaluated, 2, "only B2 and B3 still depend on A1024");
+    t.set("A5001", "8");
+    assert_eq!(t.v("B1"), n(8.0));
+}
+
 /// Tiny deterministic PRNG so the property test needs no extra deps.
 struct Lcg(u64);
 impl Lcg {

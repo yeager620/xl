@@ -142,8 +142,73 @@ static DEFAULT_STYLE: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Styl
 /// Ranges wider than this many columns go in a linear "wide" list.
 const NARROW_COLS: u32 = 64;
 
-/// (first row, last row, dependent) for ranges covering one column.
-type ColumnBands = Vec<(u32, u32, Addr)>;
+/// (first row, last row, dependent) for a range covering one column.
+type Band = (u32, u32, Addr);
+
+const BLOCK_ROWS: u32 = 1024;
+/// Ranges spanning more blocks than this go in the column's `tall` list.
+const MAX_BLOCKS: u32 = 16;
+
+/// Ranges touching one column, bucketed by 1024-row block so a lookup only
+/// scans ranges near the changed row.
+#[derive(Default)]
+struct ColumnBands {
+    blocks: FxHashMap<u32, Vec<Band>>,
+    tall: Vec<Band>,
+}
+
+impl ColumnBands {
+    fn blocks_of(r0: u32, r1: u32) -> Option<std::ops::RangeInclusive<u32>> {
+        let (b0, b1) = (r0 / BLOCK_ROWS, r1 / BLOCK_ROWS);
+        (b1 - b0 < MAX_BLOCKS).then_some(b0..=b1)
+    }
+
+    fn add(&mut self, band: Band) {
+        match Self::blocks_of(band.0, band.1) {
+            Some(blocks) => blocks.for_each(|b| self.blocks.entry(b).or_default().push(band)),
+            None => self.tall.push(band),
+        }
+    }
+
+    fn remove(&mut self, band: Band) {
+        let take = |v: &mut Vec<Band>| {
+            if let Some(i) = v.iter().position(|e| *e == band) {
+                v.swap_remove(i);
+            }
+        };
+        match Self::blocks_of(band.0, band.1) {
+            Some(blocks) => {
+                for b in blocks {
+                    if let Some(v) = self.blocks.get_mut(&b) {
+                        take(v);
+                        if v.is_empty() {
+                            self.blocks.remove(&b);
+                        }
+                    }
+                }
+            }
+            None => take(&mut self.tall),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.tall.is_empty()
+    }
+
+    fn query(&self, row: u32, f: &mut impl FnMut(Addr)) {
+        let hits = |v: &Vec<Band>, f: &mut dyn FnMut(Addr)| {
+            for &(r0, r1, dep) in v {
+                if row >= r0 && row <= r1 {
+                    f(dep);
+                }
+            }
+        };
+        if let Some(v) = self.blocks.get(&(row / BLOCK_ROWS)) {
+            hits(v, f);
+        }
+        hits(&self.tall, f);
+    }
+}
 
 #[derive(Default)]
 struct RangeIndex {
@@ -157,7 +222,7 @@ impl RangeIndex {
             self.wide.push((sheet, r, dep));
         } else {
             for c in r.start.col..=r.end.col {
-                self.by_col.entry((sheet, c)).or_default().push((r.start.row, r.end.row, dep));
+                self.by_col.entry((sheet, c)).or_default().add((r.start.row, r.end.row, dep));
             }
         }
     }
@@ -169,11 +234,9 @@ impl RangeIndex {
             }
         } else {
             for c in r.start.col..=r.end.col {
-                if let Some(v) = self.by_col.get_mut(&(sheet, c)) {
-                    if let Some(i) = v.iter().position(|e| *e == (r.start.row, r.end.row, dep)) {
-                        v.swap_remove(i);
-                    }
-                    if v.is_empty() {
+                if let Some(bands) = self.by_col.get_mut(&(sheet, c)) {
+                    bands.remove((r.start.row, r.end.row, dep));
+                    if bands.is_empty() {
                         self.by_col.remove(&(sheet, c));
                     }
                 }
@@ -182,12 +245,8 @@ impl RangeIndex {
     }
 
     fn query(&self, a: Addr, f: &mut impl FnMut(Addr)) {
-        if let Some(v) = self.by_col.get(&(a.sheet, a.cell.col)) {
-            for &(r0, r1, dep) in v {
-                if a.cell.row >= r0 && a.cell.row <= r1 {
-                    f(dep);
-                }
-            }
+        if let Some(bands) = self.by_col.get(&(a.sheet, a.cell.col)) {
+            bands.query(a.cell.row, f);
         }
         for (s, r, dep) in &self.wide {
             if *s == a.sheet && r.contains(a.cell) {

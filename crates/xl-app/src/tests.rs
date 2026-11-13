@@ -263,8 +263,10 @@ fn save_and_reopen_xlsx(cx: &mut TestAppContext) {
         s.save_to(path.clone());
         assert!(!s.dirty);
     });
-    view.update(cx, |s, _| s.load(path.clone()));
+    view.update(cx, |s, cx| s.load(path.clone(), cx));
+    view.read_with(cx, |s, _| assert!(s.loading.is_some(), "loading happens in the background"));
     cx.run_until_parked();
+    view.read_with(cx, |s, _| assert!(s.loading.is_none()));
     assert_eq!(active(&view, cx), "A1", "opening a file starts at A1");
     view.read_with(cx, |s, _| {
         let names: Vec<&str> = s.wb.sheet_ids().iter().map(|&i| s.wb.sheet_name(i)).collect();
@@ -325,4 +327,91 @@ fn colors_alignment_and_borders(cx: &mut TestAppContext) {
     assert_eq!(style(&view, cx, "J1").fill, Some(0xFFF2CC));
     view.update(cx, |s, _| s.clear_formatting());
     assert!(style(&view, cx, "J1").is_default());
+}
+
+#[gpui::test]
+fn input_method_composition(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let (view, cx) = setup(cx);
+    go(&view, cx, "F1");
+    // A CJK input method composes "にほん" then commits "日本".
+    view.update_in(cx, |s, window, cx| {
+        s.replace_and_mark_text_in_range(None, "にほん", Some(3..3), window, cx);
+        assert_eq!(s.edit.as_ref().unwrap().text, "にほん");
+        assert_eq!(s.marked_text_range(window, cx), Some(0..3));
+        s.replace_text_in_range(None, "日本", window, cx);
+        assert_eq!(s.edit.as_ref().unwrap().marked, None);
+    });
+    // Arrow keys belong to the composition while one is active, so commit first.
+    cx.simulate_input("語");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F1"), Value::text("日本語"));
+    // A dead-key sequence arrives as one composed character.
+    go(&view, cx, "F2");
+    view.update_in(cx, |s, window, cx| {
+        s.replace_and_mark_text_in_range(None, "´", None, window, cx);
+        s.replace_text_in_range(None, "é", window, cx);
+    });
+    cx.simulate_input("t");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F2"), Value::text("ét"));
+    // While composing, Enter goes to the input method, not to commit the cell.
+    go(&view, cx, "F3");
+    view.update_in(cx, |s, window, cx| s.replace_and_mark_text_in_range(None, "ka", None, window, cx));
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.edit.is_some(), "edit stays open during composition"));
+}
+
+#[gpui::test]
+fn dragging_the_scrollbar_scrolls(cx: &mut TestAppContext) {
+    use crate::app::Axis;
+    use gpui::{Modifiers, MouseButton, point, px};
+    let (view, cx) = setup(cx);
+    // Give the sheet enough rows that the thumb has room to travel.
+    view.update(cx, |s, _| {
+        let a = s.at(CellRef::parse("A5000").unwrap());
+        s.wb.set_input(a, "far").unwrap();
+    });
+    cx.run_until_parked();
+    let thumb = view.read_with(cx, |s, _| s.thumb(Axis::Vertical).unwrap());
+    let grab = point(px((thumb.x + thumb.w / 2.0) as f32), px((thumb.y + 5.0) as f32));
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(grab.x, grab.y + px(200.)), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(point(grab.x, grab.y + px(200.)), MouseButton::Left, Modifiers::none());
+    let (scrolled, after) = view.read_with(cx, |s, _| (s.scroll_y, s.thumb(Axis::Vertical).unwrap()));
+    assert!(scrolled > 1000.0, "dragged 200px down the track, scroll_y = {scrolled}");
+    assert!((after.y - (thumb.y + 200.0)).abs() < 2.0, "thumb follows the pointer: {} vs {}", after.y, thumb.y + 200.0);
+    assert_eq!(active(&view, cx), "B4", "dragging the scrollbar doesn't move the selection");
+}
+
+#[gpui::test]
+fn command_palette_runs_commands_jumps_and_inserts_functions(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    // Run a command by fuzzy name.
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("bold");
+    cx.simulate_keystrokes("enter");
+    assert!(style(&view, cx, "B4").bold);
+    view.read_with(cx, |s, _| assert!(s.palette.is_none()));
+    // Jump to a cell.
+    cx.simulate_keystrokes("ctrl-shift-p");
+    cx.simulate_input("H200");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(active(&view, cx), "H200");
+    // Start a formula with a function.
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("xlook");
+    view.read_with(cx, |s, _| {
+        let items = s.palette.as_ref().unwrap().items();
+        assert_eq!(items.first(), Some(&crate::palette::Item::Function(xl_engine::Func::XLookup)));
+    });
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.edit.as_ref().unwrap().text, "=XLOOKUP("));
+    cx.simulate_keystrokes("escape");
+    // Escape closes without running anything; typing doesn't leak into cells.
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("zzz");
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(s.palette.is_none() && s.edit.is_none()));
+    assert_eq!(val(&view, cx, "H200"), Value::Empty);
 }

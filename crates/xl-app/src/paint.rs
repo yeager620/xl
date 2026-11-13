@@ -8,7 +8,7 @@ use gpui::{
 use xl_engine::style::luminance;
 use xl_engine::{CellRef, FmtColor, HAlign, LineStyle, MAX_COLS, Range, Rgb, Style, Value, col_name};
 
-use crate::app::{CELL_FONT, CELL_PAD, HEADER_FONT, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
+use crate::app::{Axis, CELL_FONT, CELL_PAD, Drag, HEADER_FONT, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
 use crate::refs::{RefSpan, scan_refs};
 use crate::theme::Theme;
 
@@ -199,7 +199,7 @@ impl Spreadsheet {
                     ops.push(Op::Quad(fill(b(x, y - 1.0, w, ROW_H + 1.0), rgb(f)), grid_clip));
                 }
                 if st.has_borders() {
-                    let line = |b: &xl_engine::Border| if b.color.is_some() { rgb(b.color.unwrap()) } else { t.text };
+                    let line = |b: &xl_engine::Border| b.color.map_or(t.text, rgb);
                     let mut edge = |bd: &xl_engine::Border, bx: f64, by: f64, bw: f64, bh: f64| {
                         if bd.style == LineStyle::None {
                             return;
@@ -357,24 +357,28 @@ impl Spreadsheet {
             let eb = b(f64::from(ab.origin.x) - 1.0, f64::from(ab.origin.y) - 1.0, w, ROW_H + 1.0);
             ops.push(Op::Quad(border_quad(eb, 2.0, t.accent, t.editor_bg, BorderStyle::Solid, 2.0), grid_clip));
             let caret_x = f64::from(ab.origin.x) + CELL_PAD + f64::from(line.x_for_index(shift(e.cursor)));
+            if let Some(m) = &e.marked {
+                // Underline the input-method composition.
+                let x0 = f64::from(ab.origin.x) + CELL_PAD + f64::from(line.x_for_index(shift(m.start)));
+                let x1 = f64::from(ab.origin.x) + CELL_PAD + f64::from(line.x_for_index(shift(m.end)));
+                ops.push(Op::Quad(fill(b(x0, f64::from(ab.origin.y) + ROW_H - 5.0, x1 - x0, 1.5), t.accent), grid_clip));
+            }
             let origin = point(px((f64::from(ab.origin.x) + CELL_PAD) as f32), ab.origin.y);
             ops.push(Op::Text { line: Box::new(line), origin, clip: grid_clip, line_height: lh });
             ops.push(Op::Quad(fill(b(caret_x, f64::from(ab.origin.y) + 4.0, 1.5, ROW_H - 8.0), t.accent), grid_clip));
         }
 
         // Scrollbars (overlay).
-        let extent = store.extent().unwrap_or(CellRef::new(0, 0));
-        let content_h = ((extent.row.max(self.active.row) + 1) as f64 * ROW_H + gh).max(self.scroll_y + gh);
-        let content_w = (self.col_x(extent.col.max(self.active.col) + 1) + gw).max(self.scroll_x + gw);
-        if gh > 40.0 {
-            let th = (gh * gh / content_h).max(28.0);
-            let ty = gy + (self.scroll_y / (content_h - gh).max(1.0)) * (gh - th);
-            ops.push(Op::Quad(quad(b(ox + vw - 8.0, ty.min(gy + gh - th), 5.0, th), Corners::all(px(2.5)), t.scrollbar, Edges::default(), t.scrollbar, BorderStyle::Solid), all));
-        }
-        if gw > 40.0 {
-            let tw = (gw * gw / content_w).max(28.0);
-            let tx = gx + (self.scroll_x / (content_w - gw).max(1.0)) * (gw - tw);
-            ops.push(Op::Quad(quad(b(tx.min(gx + gw - tw), oy + vh - 8.0, tw, 5.0), Corners::all(px(2.5)), t.scrollbar, Edges::default(), t.scrollbar, BorderStyle::Solid), all));
+        for axis in [Axis::Vertical, Axis::Horizontal] {
+            if let Some(th) = self.thumb(axis) {
+                let active = self.scroll_hover == Some(axis) || matches!(self.drag, Some(Drag::Scroll { axis: a, .. }) if a == axis);
+                let mut color = t.scrollbar;
+                if active {
+                    color.a = (color.a * 1.8).min(1.0);
+                }
+                let r = (th.w.min(th.h) / 2.0) as f32;
+                ops.push(Op::Quad(quad(b(th.x, th.y, th.w, th.h), Corners::all(px(r)), color, Edges::default(), color, BorderStyle::Solid), all));
+            }
         }
         ops
     }
