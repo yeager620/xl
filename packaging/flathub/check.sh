@@ -37,7 +37,7 @@ local = re.sub(
 open(f"{out}/io.github.yeager620.xl.yml", "w").write(local)
 shutil.copy("packaging/flathub/cargo-sources.json", out)
 PY
-flatpak run org.flatpak.Builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
+flatpak run org.flatpak.Builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --mirror-screenshots-url=https://dl.flathub.org/media/ \
   --repo="$OUT/repo" --install "$OUT/build" "$OUT/io.github.yeager620.xl.yml"
 
 echo "== 4/4 Flathub linter"
