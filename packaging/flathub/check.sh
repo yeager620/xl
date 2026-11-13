@@ -15,7 +15,9 @@ GEN_COMMIT=9d86d336a39b9af38b86f114b6ce5820fe260f91
 GEN="$OUT/flatpak-cargo-generator.py"
 echo "== 1/4 Offline crate sources"
 [ -f "$GEN" ] || curl -fsSL -o "$GEN" "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$GEN_COMMIT/cargo/flatpak-cargo-generator.py"
-uv run -q --script "$GEN" Cargo.lock -o packaging/flathub/cargo-sources.json
+if [ ! -f packaging/flathub/cargo-sources.json ] || [ Cargo.lock -nt packaging/flathub/cargo-sources.json ]; then
+  uv run -q --script "$GEN" Cargo.lock -o packaging/flathub/cargo-sources.json
+fi
 echo "   $(python3 -c 'import json;print(len(json.load(open("packaging/flathub/cargo-sources.json"))))') sources"
 
 echo "== 2/4 Flathub builder and linter"
@@ -35,7 +37,7 @@ local = re.sub(
 open(f"{out}/io.github.yeager620.xl.yml", "w").write(local)
 shutil.copy("packaging/flathub/cargo-sources.json", out)
 PY
-flatpak run org.flatpak.Builder --user --install-deps-from=flathub --force-clean \
+flatpak run org.flatpak.Builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
   --repo="$OUT/repo" --install "$OUT/build" "$OUT/io.github.yeager620.xl.yml"
 
 echo "== 4/4 Flathub linter"
