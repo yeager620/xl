@@ -1,0 +1,9 @@
+[package]
+name = "xl-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rustc-hash.workspace = true
+smallvec.workspace = true

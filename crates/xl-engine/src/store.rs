@@ -1,0 +1,121 @@
+//! Columnar sparse cell storage: one ordered map per column, so range scans
+//! (e.g. `SUM(A:A)`) only touch cells that actually exist.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::address::{CellRef, Range};
+use crate::parser::Expr;
+use crate::value::Value;
+
+#[derive(Clone, Debug)]
+pub enum CellInput {
+    Value(Value),
+    Formula { src: Arc<str>, expr: Arc<Expr> },
+}
+
+#[derive(Clone, Debug)]
+pub struct Cell {
+    pub input: CellInput,
+    pub value: Value,
+}
+
+impl Cell {
+    pub fn is_formula(&self) -> bool {
+        matches!(self.input, CellInput::Formula { .. })
+    }
+}
+
+static EMPTY: Value = Value::Empty;
+
+#[derive(Default, Clone)]
+pub struct CellStore {
+    cols: Vec<BTreeMap<u32, Cell>>,
+    len: usize,
+}
+
+impl CellStore {
+    pub fn get(&self, c: CellRef) -> Option<&Cell> {
+        self.cols.get(c.col as usize)?.get(&c.row)
+    }
+
+    pub fn get_mut(&mut self, c: CellRef) -> Option<&mut Cell> {
+        self.cols.get_mut(c.col as usize)?.get_mut(&c.row)
+    }
+
+    pub fn value(&self, c: CellRef) -> &Value {
+        self.get(c).map_or(&EMPTY, |cell| &cell.value)
+    }
+
+    pub fn insert(&mut self, c: CellRef, cell: Cell) -> Option<Cell> {
+        let col = c.col as usize;
+        if self.cols.len() <= col {
+            self.cols.resize_with(col + 1, BTreeMap::new);
+        }
+        let old = self.cols[col].insert(c.row, cell);
+        if old.is_none() {
+            self.len += 1;
+        }
+        old
+    }
+
+    pub fn remove(&mut self, c: CellRef) -> Option<Cell> {
+        let old = self.cols.get_mut(c.col as usize)?.remove(&c.row);
+        if old.is_some() {
+            self.len -= 1;
+        }
+        old
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Non-empty cells within a range, column by column.
+    pub fn iter_range(&self, r: Range) -> impl Iterator<Item = (CellRef, &Cell)> + '_ {
+        let last = (r.end.col as usize + 1).min(self.cols.len());
+        let first = (r.start.col as usize).min(last);
+        self.cols[first..last].iter().enumerate().flat_map(move |(i, col)| {
+            let c = (first + i) as u32;
+            col.range(r.start.row..=r.end.row).map(move |(&row, cell)| (CellRef::new(row, c), cell))
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (CellRef, &Cell)> + '_ {
+        self.cols
+            .iter()
+            .enumerate()
+            .flat_map(|(c, col)| col.iter().map(move |(&row, cell)| (CellRef::new(row, c as u32), cell)))
+    }
+
+    /// Next non-empty row in `col` strictly after (or before) `row`.
+    pub fn next_filled_in_col(&self, col: u32, row: u32, forward: bool) -> Option<u32> {
+        let m = self.cols.get(col as usize)?;
+        if forward {
+            m.range(row.saturating_add(1)..).next().map(|(&r, _)| r)
+        } else {
+            m.range(..row).next_back().map(|(&r, _)| r)
+        }
+    }
+
+    pub fn col_count(&self) -> u32 {
+        self.cols.len() as u32
+    }
+
+    /// (max row, max col) of any non-empty cell.
+    pub fn extent(&self) -> Option<CellRef> {
+        let mut max_row = None::<u32>;
+        let mut max_col = 0;
+        for (c, col) in self.cols.iter().enumerate() {
+            if let Some((&r, _)) = col.last_key_value() {
+                max_row = Some(max_row.map_or(r, |m| m.max(r)));
+                max_col = c as u32;
+            }
+        }
+        max_row.map(|r| CellRef::new(r, max_col))
+    }
+}

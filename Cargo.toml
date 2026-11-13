@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/xl-engine", "crates/xl-app", "crates/xl-bench"]
+exclude = ["vendor"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+xl-engine = { path = "crates/xl-engine" }
+rustc-hash = "2"
+smallvec = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Mirror the patches Zed's workspace applies to GPUI's dependency tree
+# (vendor/zed/Cargo.toml). Run scripts/fetch-gpui.sh first.
+[patch.crates-io]
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
