@@ -44,10 +44,19 @@ fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
     }
 }
 
+/// Keep clicks on interactive toolbar content from reaching the title bar:
+/// otherwise a mouse-down arms "drag to move", and the slightest wobble during
+/// the click hands the pointer to the compositor (swallowing the click), and
+/// two quick clicks on different buttons count as a title-bar double-click.
+fn no_drag<E: InteractiveElement>(e: E) -> E {
+    e.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_mouse_move(|_, _, cx| cx.stop_propagation())
+}
+
 /// GNOME-style round window button.
 fn window_button(t: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(|| id.to_string())
         .flex()
         .items_center()
         .justify_center()
@@ -74,6 +83,7 @@ fn align_icon(t: &Theme, a: HAlign) -> impl IntoElement {
 fn icon_button(t: &Theme, id: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(|| id.to_string())
         .flex()
         .items_center()
         .justify_center()
@@ -125,14 +135,17 @@ impl Spreadsheet {
         let controls = window.window_controls();
         let maximized = window.is_maximized();
         let stroke = t.text;
-        div()
+        no_drag(div())
             .flex()
             .flex_row()
             .items_center()
             .gap(px(12.))
             .ml(px(8.))
             .when(controls.minimize, |d| {
-                d.child(window_button(&t, "win-min").child(div().w(px(9.)).h(px(1.5)).bg(stroke)).on_click(|_, window, _| window.minimize_window()))
+                d.child(window_button(&t, "win-min").child(div().w(px(9.)).h(px(1.5)).bg(stroke)).on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.minimize_window();
+                }))
             })
             .when(controls.maximize, |d| {
                 let icon = if maximized {
@@ -145,13 +158,19 @@ impl Spreadsheet {
                 } else {
                     div().size(px(9.)).border(px(1.5)).border_color(stroke)
                 };
-                d.child(window_button(&t, "win-max").child(icon).on_click(|_, window, _| window.zoom_window()))
+                d.child(window_button(&t, "win-max").child(icon).on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.zoom_window();
+                }))
             })
             .child(
                 window_button(&t, "win-close")
                     .text_size(px(15.))
                     .child("×")
-                    .on_click(cx.listener(|_, _, window, _| window.remove_window())),
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        cx.stop_propagation();
+                        window.remove_window();
+                    })),
             )
     }
 
@@ -167,7 +186,7 @@ impl Spreadsheet {
             ("fmt-date", "Date", Some("m/d/yyyy"), &["Date", "Time"]),
         ];
         let n = formats.len();
-        let group = div().flex().flex_row().items_center().rounded(px(6.)).border_1().border_color(t.border).children(formats.into_iter().enumerate().map(
+        let group = no_drag(div()).flex().flex_row().items_center().rounded(px(6.)).border_1().border_color(t.border).children(formats.into_iter().enumerate().map(
             |(i, (id, label, code, kinds))| {
                 segment(&t, id, label, kinds.contains(&fmt), i == 0, i == n - 1).on_click(cx.listener(move |this, _, _, cx| {
                     this.apply_format(code);
@@ -175,7 +194,7 @@ impl Spreadsheet {
                 }))
             },
         ));
-        let decimals = div()
+        let decimals = no_drag(div())
             .flex()
             .flex_row()
             .items_center()
@@ -258,8 +277,7 @@ impl Spreadsheet {
             .child(kbd(&t, "Ctrl+O", "Open"))
             .child(kbd(&t, "Ctrl+S", "Save"))
             .child(
-                div()
-                    .id("theme-toggle")
+                no_drag(div().id("theme-toggle"))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -328,7 +346,7 @@ impl Spreadsheet {
             .into_any_element();
         let border_icon = div().size(px(14.)).border_1().border_color(t.muted).child(div().mt(px(5.)).h(px(1.)).bg(t.muted)).into_any_element();
         let aligns = [("align-left", HAlign::Left), ("align-center", HAlign::Center), ("align-right", HAlign::Right)];
-        div()
+        no_drag(div())
             .flex()
             .flex_row()
             .items_center()

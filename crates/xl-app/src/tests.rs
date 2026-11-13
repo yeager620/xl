@@ -415,3 +415,33 @@ fn command_palette_runs_commands_jumps_and_inserts_functions(cx: &mut TestAppCon
     view.read_with(cx, |s, _| assert!(s.palette.is_none() && s.edit.is_none()));
     assert_eq!(val(&view, cx, "H200"), Value::Empty);
 }
+
+/// Regression: with our own title bar, pressing a toolbar or window button
+/// armed "drag to move"; a 1px wobble during the click started a compositor
+/// move (swallowing the click). The test window's start_window_move/zoom
+/// panic, so any such move fails this test.
+#[gpui::test]
+fn clicking_title_bar_buttons_never_starts_a_window_move(cx: &mut TestAppContext) {
+    use gpui::{Decorations, Modifiers, MouseButton, Tiling, point, px};
+    let (view, cx) = setup(cx);
+    let handle = cx.update(|window, _| window.window_handle());
+    // Maximized: tiled on every side.
+    cx.simulate_window_decorations_change(handle, Decorations::Client { tiling: Tiling::tiled() });
+    cx.run_until_parked();
+    for selector in ["win-min", "win-max", "win-close"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} is shown with client decorations");
+    }
+    // A wobbly click on Bold toggles bold and doesn't move the window.
+    let bold = cx.debug_bounds("bold").unwrap().center();
+    cx.simulate_mouse_down(bold, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(bold.x + px(1.), bold.y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(point(bold.x + px(1.), bold.y), MouseButton::Left, Modifiers::none());
+    assert!(style(&view, cx, "B4").bold);
+    // Pressing and wobbling on a window button doesn't arm a move either
+    // (released off the button so the button's own action doesn't fire).
+    let max = cx.debug_bounds("win-max").unwrap().center();
+    cx.simulate_mouse_down(max, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(max.x + px(1.), max.y + px(1.)), MouseButton::Left, Modifiers::none());
+    view.read_with(cx, |s, _| assert!(!s.should_move));
+    cx.simulate_mouse_up(point(px(300.), px(500.)), MouseButton::Left, Modifiers::none());
+}
