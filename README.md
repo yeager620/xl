@@ -46,7 +46,7 @@ xl), the app icon and AppStream metadata.
 |---|---|---|
 | `make deb` | `target/packages/xl_<version>_<arch>.deb` | Needs only `dpkg-deb`. Install with `sudo apt install ./target/packages/xl_*.deb`. |
 | `make appimage` | `target/packages/xl-<version>-<arch>.AppImage` | Downloads appimagetool 1.9.1 into `target/tools/` on first run. |
-| `make flatpak` | `target/packages/xl.flatpak` | Needs `flatpak-builder` (`sudo apt install flatpak-builder`) and `uv`; downloads the Freedesktop 25.08 runtime on first run. |
+| `make flatpak` | installs `io.github.yeager620.xl` for your user | Builds the Flathub manifest from this checkout and runs Flathub's linter (`packaging/flathub/check.sh`). Uses `uv` and per-user Flatpak installs; first run downloads ~2 GB of runtimes. |
 
 Built packages link against the build machine's glibc, so they run on that
 distro release and newer. Official releases are built in an Ubuntu 22.04

@@ -3,7 +3,7 @@
 #   make install              install for the current user (~/.local)
 #   sudo make install PREFIX=/usr/local
 #   make uninstall [PREFIX=...]
-#   make deb | appimage | flatpak
+#   make deb | appimage | flatpak (builds and lints the Flathub manifest locally)
 
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
@@ -55,7 +55,7 @@ appimage:
 	./packaging/build-appimage.sh
 
 flatpak:
-	./packaging/build-flatpak.sh
+	./packaging/flathub/check.sh
 
 clean-packages:
 	rm -rf target/icons target/packages target/appdir

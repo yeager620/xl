@@ -1,0 +1,37 @@
+# Flathub manifest for xl. Submitted to github.com/flathub; the xl source is
+# pinned to a release tag below, GPUI to the Zed commit in
+# scripts/fetch-gpui.sh, and crates come from cargo-sources.json (generated
+# from Cargo.lock by packaging/flathub/check.sh).
+id: io.github.yeager620.xl
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: xl
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # No filesystem permissions: opening and saving go through the file-chooser portal.
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/xl/cargo
+    CARGO_NET_OFFLINE: 'true'
+modules:
+  - name: xl
+    buildsystem: simple
+    build-commands:
+      - make install PREFIX=/app
+    sources:
+      - type: git
+        url: https://github.com/yeager620/xl.git
+        tag: v0.1.1
+        commit: RELEASE_COMMIT
+      - type: archive
+        url: https://github.com/zed-industries/zed/archive/dc93abce2fa6c0bf349d425310db4884aa953467.tar.gz
+        sha256: 2ca1f2e9d120e1531bf92115c35c1349d5eab1c14e7fba8c092be681892a9b8b
+        dest: vendor/zed
+      - cargo-sources.json
