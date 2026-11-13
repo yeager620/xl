@@ -5,13 +5,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::address::{CellRef, Range};
-use crate::parser::Expr;
+use crate::formula::Expr;
 use crate::value::Value;
 
 #[derive(Clone, Debug)]
 pub enum CellInput {
     Value(Value),
-    Formula { src: Arc<str>, expr: Arc<Expr> },
+    Formula(Arc<Expr>),
+    /// A formula from a file that we can't evaluate (unsupported syntax or
+    /// functions). Kept verbatim with the value cached in the file.
+    Opaque(Arc<str>),
 }
 
 #[derive(Clone, Debug)]
@@ -22,7 +25,7 @@ pub struct Cell {
 
 impl Cell {
     pub fn is_formula(&self) -> bool {
-        matches!(self.input, CellInput::Formula { .. })
+        matches!(self.input, CellInput::Formula(_))
     }
 }
 

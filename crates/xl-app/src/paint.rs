@@ -1,0 +1,301 @@
+//! Grid painting: builds a list of quads and shaped text for the visible
+//! window of cells, then paints it.
+
+use gpui::{
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Font, FontWeight, Hsla, PaintQuad, Pixels, Point, ShapedLine, SharedString, TextAlign,
+    TextRun, Window, fill, font, point, px, quad, size,
+};
+use xl_engine::{CellRef, FmtColor, MAX_COLS, Range, Value, col_name};
+
+use crate::app::{CELL_FONT, CELL_PAD, HEADER_FONT, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
+use crate::refs::{RefSpan, scan_refs};
+use crate::theme::Theme;
+
+pub enum Op {
+    Quad(PaintQuad, Bounds<Pixels>),
+    Text { line: Box<ShapedLine>, origin: Point<Pixels>, clip: Bounds<Pixels>, line_height: Pixels },
+}
+
+pub fn paint_ops(ops: Vec<Op>, window: &mut Window, cx: &mut App) {
+    for op in ops {
+        match op {
+            Op::Quad(q, clip) => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| w.paint_quad(q)),
+            Op::Text { line, origin, clip, line_height } => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| {
+                line.paint(origin, line_height, TextAlign::Left, None, w, cx).ok();
+            }),
+        }
+    }
+}
+
+pub fn cell_font() -> Font {
+    font("Inter")
+}
+
+pub fn shape(window: &mut Window, text: impl Into<SharedString>, f: Font, color: Hsla, size_px: f32) -> ShapedLine {
+    let text: SharedString = text.into();
+    let run = TextRun { len: text.len(), font: f, color, background_color: None, underline: None, strikethrough: None };
+    window.text_system().shape_line(text, px(size_px), &[run], None)
+}
+
+fn shape_runs(window: &mut Window, text: SharedString, runs: Vec<TextRun>, size_px: f32) -> ShapedLine {
+    window.text_system().shape_line(text, px(size_px), &runs, None)
+}
+
+fn b(x: f64, y: f64, w: f64, h: f64) -> Bounds<Pixels> {
+    Bounds::new(point(px(x as f32), px(y as f32)), size(px(w.max(0.0) as f32), px(h.max(0.0) as f32)))
+}
+
+fn border_quad(bounds: Bounds<Pixels>, width: f32, color: Hsla, bg: Hsla, style: BorderStyle, radius: f32) -> PaintQuad {
+    quad(bounds, Corners::all(px(radius)), bg, Edges::all(px(width)), color, style)
+}
+
+fn fmt_color(t: &Theme, c: FmtColor) -> Hsla {
+    let hex = match (c, t.dark) {
+        (FmtColor::Red, _) => return t.error,
+        (FmtColor::Black, _) | (FmtColor::White, _) => return t.text,
+        (FmtColor::Green, false) => 0x15803D,
+        (FmtColor::Green, true) => 0x4ADE80,
+        (FmtColor::Blue, false) => 0x1D4ED8,
+        (FmtColor::Blue, true) => 0x60A5FA,
+        (FmtColor::Yellow, false) => 0xA16207,
+        (FmtColor::Yellow, true) => 0xFACC15,
+        (FmtColor::Magenta, false) => 0xBE185D,
+        (FmtColor::Magenta, true) => 0xF472B6,
+        (FmtColor::Cyan, false) => 0x0E7490,
+        (FmtColor::Cyan, true) => 0x22D3EE,
+    };
+    gpui::rgb(hex).into()
+}
+
+impl Spreadsheet {
+    /// References in the formula being edited that point at the shown sheet.
+    fn visible_refs(&self) -> Vec<RefSpan> {
+        let Some(e) = &self.edit else { return Vec::new() };
+        scan_refs(&e.text)
+            .into_iter()
+            .filter(|r| match &r.sheet {
+                None => self.cur == e.at.sheet,
+                Some(name) => self.wb.sheet_name(self.cur).eq_ignore_ascii_case(name),
+            })
+            .collect()
+    }
+
+    pub fn build_frame(&self, bounds: Bounds<Pixels>, window: &mut Window) -> Vec<Op> {
+        let t = self.theme;
+        let mut ops = Vec::with_capacity(2048);
+        let ox = f64::from(bounds.origin.x);
+        let oy = f64::from(bounds.origin.y);
+        let (vw, vh) = (f64::from(bounds.size.width), f64::from(bounds.size.height));
+        let gx = ox + HEADER_W;
+        let gy = oy + HEADER_H;
+        let (gw, gh) = (vw - HEADER_W, vh - HEADER_H);
+        let all = bounds;
+        let grid_clip = b(gx, gy, gw, gh);
+        let col_hdr_clip = b(gx, oy, gw, HEADER_H);
+        let row_hdr_clip = b(ox, gy, HEADER_W, gh);
+        let store = self.wb.store(self.cur);
+        let sel = self.selection();
+        // The in-cell editor shows only on the sheet that owns the edit.
+        let editing = self.edit.as_ref().filter(|e| e.at.sheet == self.cur);
+
+        ops.push(Op::Quad(fill(all, t.bg), all));
+
+        let first_row = self.row_at(self.scroll_y);
+        let last_row = self.row_at(self.scroll_y + gh);
+        let first_col = self.col_at(self.scroll_x);
+        let mut cols: Vec<(u32, f64, f64)> = Vec::new();
+        {
+            let mut c = first_col;
+            let mut x = gx + self.col_x(c) - self.scroll_x;
+            while x < ox + vw && c < MAX_COLS {
+                let w = self.col_w(c);
+                cols.push((c, x, w));
+                x += w;
+                c += 1;
+            }
+        }
+        let row_y = |r: u32| gy + r as f64 * ROW_H - self.scroll_y;
+        let screen_x = |c: u32| gx + self.col_x(c) - self.scroll_x;
+        let rect_of = |r: Range| -> Bounds<Pixels> {
+            let x0 = screen_x(r.start.col).max(gx - 10.0);
+            let x1 = (screen_x(r.end.col) + self.col_w(r.end.col)).min(gx + gw + 10.0);
+            let y0 = row_y(r.start.row).max(gy - 10.0);
+            let y1 = row_y(r.end.row + 1).min(gy + gh + 10.0);
+            b(x0, y0, x1 - x0, y1 - y0)
+        };
+
+        // Headers.
+        ops.push(Op::Quad(fill(b(ox, oy, vw, HEADER_H), t.header_bg), all));
+        ops.push(Op::Quad(fill(b(ox, oy, HEADER_W, vh), t.header_bg), all));
+        let sel_x0 = screen_x(sel.start.col).max(gx);
+        let sel_x1 = (screen_x(sel.end.col) + self.col_w(sel.end.col)).min(gx + gw);
+        if sel_x1 > sel_x0 {
+            ops.push(Op::Quad(fill(b(sel_x0, oy, sel_x1 - sel_x0, HEADER_H), t.header_active_bg), col_hdr_clip));
+            ops.push(Op::Quad(fill(b(sel_x0, oy + HEADER_H - 2.0, sel_x1 - sel_x0, 2.0), t.accent), col_hdr_clip));
+        }
+        let sel_y0 = row_y(sel.start.row).max(gy);
+        let sel_y1 = row_y(sel.end.row + 1).min(gy + gh);
+        if sel_y1 > sel_y0 {
+            ops.push(Op::Quad(fill(b(ox, sel_y0, HEADER_W, sel_y1 - sel_y0), t.header_active_bg), row_hdr_clip));
+            ops.push(Op::Quad(fill(b(ox + HEADER_W - 2.0, sel_y0, 2.0, sel_y1 - sel_y0), t.accent), row_hdr_clip));
+        }
+
+        // Gridlines.
+        for &(_, x, w) in &cols {
+            ops.push(Op::Quad(fill(b(x + w - 1.0, gy, 1.0, gh), t.grid), grid_clip));
+            ops.push(Op::Quad(fill(b(x + w - 1.0, oy + 5.0, 1.0, HEADER_H - 10.0), t.border), col_hdr_clip));
+        }
+        for r in first_row..=last_row {
+            let y = row_y(r + 1) - 1.0;
+            ops.push(Op::Quad(fill(b(gx, y, gw, 1.0), t.grid), grid_clip));
+            ops.push(Op::Quad(fill(b(ox, y, HEADER_W, 1.0), t.grid), row_hdr_clip));
+        }
+        ops.push(Op::Quad(fill(b(ox, oy + HEADER_H - 1.0, vw, 1.0), t.border), all));
+        ops.push(Op::Quad(fill(b(ox + HEADER_W - 1.0, oy, 1.0, vh), t.border), all));
+
+        // Selection fill (the active cell stays clear).
+        if sel.start != sel.end {
+            ops.push(Op::Quad(fill(rect_of(sel), t.selection), grid_clip));
+            ops.push(Op::Quad(fill(rect_of(Range::single(self.active)), t.bg), grid_clip));
+        }
+
+        // Reference highlights while writing a formula.
+        let refs = self.visible_refs();
+        for r in &refs {
+            let color = t.ref_colors[r.color % t.ref_colors.len()];
+            let mut soft = color;
+            soft.a = 0.08;
+            let pointed = self.edit.as_ref().and_then(|e| e.point.as_ref()).is_some_and(|p| p.span == r.span);
+            let style = if pointed { BorderStyle::Dashed } else { BorderStyle::Solid };
+            ops.push(Op::Quad(border_quad(rect_of(r.range), 1.5, color, soft, style, 1.0), grid_clip));
+        }
+
+        // Cell text.
+        let f = cell_font();
+        let lh = px(ROW_H as f32);
+        for r in first_row..=last_row {
+            let y = row_y(r);
+            for (i, &(c, x, w)) in cols.iter().enumerate() {
+                let cell = CellRef::new(r, c);
+                if editing.is_some() && cell == self.active {
+                    continue;
+                }
+                let v = store.value(cell);
+                if v.is_empty() {
+                    continue;
+                }
+                let shown = self.wb.display(self.at(cell));
+                let color = match (v, shown.color) {
+                    (Value::Error(_), _) => t.error,
+                    (_, Some(fc)) => fmt_color(&t, fc),
+                    _ => t.text,
+                };
+                let mut line = shape(window, shown.text, f.clone(), color, CELL_FONT);
+                let tw = f64::from(line.width);
+                let avail = w - 2.0 * CELL_PAD;
+                let (tx, clip_w) = match v {
+                    Value::Number(_) => {
+                        if tw > avail {
+                            line = shape(window, "#".repeat((avail / 8.0).max(1.0) as usize), f.clone(), color, CELL_FONT);
+                        }
+                        (x + w - CELL_PAD - f64::from(line.width), w)
+                    }
+                    Value::Bool(_) | Value::Error(_) => (x + (w - tw) / 2.0, w),
+                    _ => {
+                        // Text overflows into empty neighbours, like Excel.
+                        let mut cw = w;
+                        if tw > avail {
+                            for &(c2, _, w2) in &cols[i + 1..] {
+                                let n = CellRef::new(r, c2);
+                                if !store.value(n).is_empty() || (editing.is_some() && n == self.active) {
+                                    break;
+                                }
+                                cw += w2;
+                                if cw - 2.0 * CELL_PAD >= tw {
+                                    break;
+                                }
+                            }
+                        }
+                        (x + CELL_PAD, cw)
+                    }
+                };
+                let clip = b(x, y, clip_w - 1.0, ROW_H).intersect(&grid_clip);
+                ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px(y as f32)), clip, line_height: lh });
+            }
+        }
+
+        // Selection outline, active cell, fill handle.
+        if sel.start != sel.end {
+            ops.push(Op::Quad(border_quad(rect_of(sel), 1.0, t.accent, gpui::transparent_black(), BorderStyle::Solid, 0.0), grid_clip));
+        }
+        let ab = rect_of(Range::single(self.active));
+        if editing.is_none() {
+            let outer = b(f64::from(ab.origin.x) - 1.0, f64::from(ab.origin.y) - 1.0, f64::from(ab.size.width) + 1.0, f64::from(ab.size.height) + 1.0);
+            ops.push(Op::Quad(border_quad(outer, 2.0, t.accent, gpui::transparent_black(), BorderStyle::Solid, 2.0), grid_clip));
+            let sb = rect_of(sel);
+            let hx = f64::from(sb.origin.x + sb.size.width) - 4.0;
+            let hy = f64::from(sb.origin.y + sb.size.height) - 4.0;
+            ops.push(Op::Quad(border_quad(b(hx, hy, 7.0, 7.0), 1.5, t.bg, t.accent, BorderStyle::Solid, 1.5), grid_clip));
+        }
+
+        // Header labels.
+        let hf = Font { weight: FontWeight::MEDIUM, ..cell_font() };
+        for &(c, x, w) in &cols {
+            let active = c >= sel.start.col && c <= sel.end.col;
+            let line = shape(window, col_name(c), hf.clone(), if active { t.header_active_fg } else { t.header_fg }, HEADER_FONT);
+            let tx = x + (w - f64::from(line.width)) / 2.0;
+            ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px(oy as f32)), clip: col_hdr_clip, line_height: px(HEADER_H as f32) });
+        }
+        for r in first_row..=last_row {
+            let active = r >= sel.start.row && r <= sel.end.row;
+            let line = shape(window, (r + 1).to_string(), hf.clone(), if active { t.header_active_fg } else { t.header_fg }, HEADER_FONT);
+            let tx = ox + (HEADER_W - f64::from(line.width)) / 2.0;
+            ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px(row_y(r) as f32)), clip: row_hdr_clip, line_height: lh });
+        }
+
+        // In-cell editor.
+        if let Some(e) = editing {
+            let display = e.text.replace('\u{2028}', "↵");
+            let all_refs = scan_refs(&e.text);
+            let shift = |i: usize| e.text[..i].replace('\u{2028}', "↵").len();
+            let base = TextRun { len: 0, font: f.clone(), color: t.text, background_color: None, underline: None, strikethrough: None };
+            let mut runs = Vec::new();
+            let mut pos = 0;
+            for r in &all_refs {
+                let (s, en) = (shift(r.span.start), shift(r.span.end));
+                if s > pos {
+                    runs.push(TextRun { len: s - pos, ..base.clone() });
+                }
+                runs.push(TextRun { len: en - s, color: t.ref_colors[r.color % t.ref_colors.len()], ..base.clone() });
+                pos = en;
+            }
+            if display.len() > pos {
+                runs.push(TextRun { len: display.len() - pos, ..base.clone() });
+            }
+            let line = shape_runs(window, display.into(), runs, CELL_FONT);
+            let w = (f64::from(line.width) + 2.0 * CELL_PAD + 4.0).max(f64::from(ab.size.width) + 1.0);
+            let eb = b(f64::from(ab.origin.x) - 1.0, f64::from(ab.origin.y) - 1.0, w, ROW_H + 1.0);
+            ops.push(Op::Quad(border_quad(eb, 2.0, t.accent, t.editor_bg, BorderStyle::Solid, 2.0), grid_clip));
+            let caret_x = f64::from(ab.origin.x) + CELL_PAD + f64::from(line.x_for_index(shift(e.cursor)));
+            let origin = point(px((f64::from(ab.origin.x) + CELL_PAD) as f32), ab.origin.y);
+            ops.push(Op::Text { line: Box::new(line), origin, clip: grid_clip, line_height: lh });
+            ops.push(Op::Quad(fill(b(caret_x, f64::from(ab.origin.y) + 4.0, 1.5, ROW_H - 8.0), t.accent), grid_clip));
+        }
+
+        // Scrollbars (overlay).
+        let extent = store.extent().unwrap_or(CellRef::new(0, 0));
+        let content_h = ((extent.row.max(self.active.row) + 1) as f64 * ROW_H + gh).max(self.scroll_y + gh);
+        let content_w = (self.col_x(extent.col.max(self.active.col) + 1) + gw).max(self.scroll_x + gw);
+        if gh > 40.0 {
+            let th = (gh * gh / content_h).max(28.0);
+            let ty = gy + (self.scroll_y / (content_h - gh).max(1.0)) * (gh - th);
+            ops.push(Op::Quad(quad(b(ox + vw - 8.0, ty.min(gy + gh - th), 5.0, th), Corners::all(px(2.5)), t.scrollbar, Edges::default(), t.scrollbar, BorderStyle::Solid), all));
+        }
+        if gw > 40.0 {
+            let tw = (gw * gw / content_w).max(28.0);
+            let tx = gx + (self.scroll_x / (content_w - gw).max(1.0)) * (gw - tw);
+            ops.push(Op::Quad(quad(b(tx.min(gx + gw - tw), oy + vh - 8.0, tw, 5.0), Corners::all(px(2.5)), t.scrollbar, Edges::default(), t.scrollbar, BorderStyle::Solid), all));
+        }
+        ops
+    }
+}

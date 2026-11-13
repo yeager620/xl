@@ -1,0 +1,200 @@
+use std::io::Write;
+use std::path::PathBuf;
+
+use xl_engine::datetime::serial_from_date;
+use xl_engine::{Addr, CellRef, ErrorKind, SheetId, Value, Workbook};
+
+fn tmp(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("xl-io-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
+fn a(s: SheetId, a1: &str) -> Addr {
+    Addr::new(s, CellRef::parse(a1).unwrap())
+}
+
+#[test]
+fn xlsx_roundtrip_preserves_everything_we_model() {
+    let mut wb = Workbook::new();
+    let s1 = wb.sheet_ids()[0];
+    wb.rename_sheet(s1, "Summary").unwrap();
+    let data = wb.add_sheet(Some("Q4 Data")).unwrap();
+    let inputs = [
+        (data, "A1", "Item"),
+        (data, "B1", "Amount"),
+        (data, "A2", "Fish & Chips <large>"),
+        (data, "B2", "$12.50"),
+        (data, "A3", "Café \"Crème\""),
+        (data, "B3", "$7"),
+        (data, "C2", "2026-11-13"),
+        (data, "C3", "15%"),
+        (data, "D2", "TRUE"),
+        (data, "D3", "#N/A"),
+        (data, "E2", "'0042"),
+        (s1, "A1", "='Q4 Data'!B2+'Q4 Data'!B3"),
+        (s1, "A2", "=CONCAT('Q4 Data'!A2,\"!\")"),
+        (s1, "A3", "=XLOOKUP(\"Item\",'Q4 Data'!A1:A3,'Q4 Data'!B1:B3,\"none\")"),
+        (s1, "A4", "=TEXT('Q4 Data'!C2,\"mmm d\")"),
+        (s1, "A5", "=IFS(A1>10,\"big\",TRUE,\"small\")"),
+    ];
+    for (s, cell, raw) in inputs {
+        wb.set_input(a(s, cell), raw).unwrap();
+    }
+    wb.set_format(a(s1, "B1"), Some("0.000")); // formatted but empty
+    wb.set_col_width(data, 0, Some(250.0));
+
+    let path = tmp("roundtrip.xlsx");
+    xl_io::save(&wb, &path, s1).unwrap();
+    let loaded = xl_io::open(&path).unwrap();
+    let back = loaded.workbook;
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    let names: Vec<&str> = back.sheet_ids().iter().map(|&id| back.sheet_name(id)).collect();
+    assert_eq!(names, ["Summary", "Q4 Data"]);
+    let (b1, bd) = (back.sheet_ids()[0], back.sheet_ids()[1]);
+    for (s, cell, _) in inputs {
+        let (orig, new) = (a(s, cell), a(if s == s1 { b1 } else { bd }, cell));
+        assert_eq!(back.input_text(new), wb.input_text(orig), "input of {cell}");
+        assert_eq!(back.value(new), wb.value(orig), "value of {cell}");
+        assert_eq!(back.format_code(new), wb.format_code(orig), "format of {cell}");
+        assert_eq!(back.display(new), wb.display(orig), "display of {cell}");
+    }
+    assert_eq!(*back.value(a(b1, "A1")), Value::Number(19.5));
+    assert_eq!(*back.value(a(b1, "A3")), Value::text("Amount"));
+    assert_eq!(*back.value(a(b1, "A4")), Value::text("Nov 13"));
+    assert_eq!(back.format_code(a(b1, "B1")), Some("0.000"));
+    assert_eq!(back.col_width(bd, 0), Some(250.0));
+    assert_eq!(*back.value(a(bd, "D3")), Value::Error(ErrorKind::NA));
+}
+
+/// Build an xlsx the way Excel lays it out, independent of our writer.
+fn write_excel_style_xlsx(path: &PathBuf) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut z = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut put = |name: &str, body: &str| {
+        z.start_file(name, opts).unwrap();
+        z.write_all(body.as_bytes()).unwrap();
+    };
+    put("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#);
+    put(
+        "xl/workbook.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sales" sheetId="1" r:id="rId1"/><sheet name="Lookup" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+    );
+    put(
+        "xl/_rels/workbook.xml.rels",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml"/>
+</Relationships>"#,
+    );
+    put(
+        "xl/sharedStrings.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">
+<si><t>Region</t></si>
+<si><r><rPr><b/></rPr><t>Rich </t></r><r><t xml:space="preserve">text &amp; more</t></r><rPh><t>IGNORED</t></rPh></si>
+<si><t>East</t></si>
+<si><t>West &#x2192; &lt;b&gt;</t></si>
+</sst>"#,
+    );
+    put(
+        "xl/styles.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/></numFmts>
+<cellStyleXfs count="1"><xf numFmtId="0"/></cellStyleXfs>
+<cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="14" applyNumberFormat="1"/><xf numFmtId="10" applyNumberFormat="1"/></cellXfs>
+</styleSheet>"#,
+    );
+    put(
+        "xl/worksheets/sheet1.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cols><col min="1" max="1" width="20.7109375" customWidth="1"/><col min="2" max="16384" width="9.140625"/></cols>
+<sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="inlineStr"><is><t>Inline</t></is></c></row>
+<row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" s="1"><v>1200.5</v></c><c r="C2" s="2"><v>46339</v></c><c r="D2"><f t="shared" ref="D2:D4" si="0">B2*2</f><v>2401</v></c></row>
+<row r="3"><c t="s"><v>3</v></c><c s="1"><v>300</v></c><c s="2"><v>46340</v></c><c><f t="shared" si="0"/><v>600</v></c></row>
+<row r="4"><c r="A4" t="b"><v>1</v></c><c r="B4" t="e"><v>#DIV/0!</v></c><c r="D4"><f t="shared" si="0"/><v>0</v></c>
+<c r="E4"><f>_xlfn.LAMBDA(x,x*3)(B2)</f><v>3601.5</v></c><c r="F4" t="str"><f>_xlfn.CONCAT(A2,"-",A3)</f><v>East-West</v></c></row>
+<row r="5"><c r="B5" s="3"><v>0.256</v></c><c r="C5"><f>SUM(B2:B3)+Lookup!A1</f><v>1510.5</v></c><c r="D5" s="1"/></row>
+</sheetData></worksheet>"#,
+    );
+    put(
+        "xl/worksheets/sheet2.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#,
+    );
+    z.finish().unwrap();
+}
+
+#[test]
+fn reads_excel_style_xlsx() {
+    let path = tmp("excel_style.xlsx");
+    write_excel_style_xlsx(&path);
+    let loaded = xl_io::open(&path).unwrap();
+    let wb = &loaded.workbook;
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    let s = wb.sheet_id("Sales").unwrap();
+    let v = |c: &str| wb.value(a(s, c)).clone();
+    let shown = |c: &str| wb.display(a(s, c)).text;
+
+    // Shared strings: rich runs concatenated, phonetic runs skipped, entities decoded.
+    assert_eq!(v("A1"), Value::text("Region"));
+    assert_eq!(v("B1"), Value::text("Rich text & more"));
+    assert_eq!(v("A3"), Value::text("West → <b>"), "cell without r= attribute follows its row");
+    assert_eq!(v("C1"), Value::text("Inline"));
+    // Number formats: custom, built-in date, built-in percent.
+    assert_eq!(shown("B2"), "$1,200.50");
+    assert_eq!(shown("C2"), "11/13/2026");
+    assert_eq!(v("C3"), Value::Number(serial_from_date(2026, 11, 14)));
+    assert_eq!(shown("B5"), "25.60%");
+    assert_eq!(wb.format_code(a(s, "D5")), Some("\"$\"#,##0.00"), "formatted empty cell");
+    // Shared formulas expand with shifted references and recalc.
+    assert_eq!(wb.input_text(a(s, "D3")), "=B3*2");
+    assert_eq!(wb.input_text(a(s, "D4")), "=B4*2");
+    assert_eq!(v("D3"), Value::Number(600.0));
+    assert_eq!(v("D4"), Value::Error(ErrorKind::Div0), "recalculated, not the stale cached 0");
+    // Booleans and errors.
+    assert_eq!(v("A4"), Value::Bool(true));
+    assert_eq!(v("B4"), Value::Error(ErrorKind::Div0));
+    // Unsupported function keeps the cached value; supported _xlfn functions run.
+    assert_eq!(v("E4"), Value::Number(3601.5));
+    assert_eq!(v("F4"), Value::text("East-West → <b>"));
+    // Cross-sheet reference.
+    assert_eq!(v("C5"), Value::Number(1510.5));
+    // Column widths: custom only.
+    assert_eq!(wb.col_width(s, 0), Some(xl_io::from_excel_width(20.7109375)));
+    assert_eq!(wb.col_width(s, 1), None);
+}
+
+#[test]
+fn csv_roundtrip_detects_types() {
+    let path = tmp("people.csv");
+    std::fs::write(&path, "\u{feff}Name,Joined,Score,Rate\nAda,2026-01-05,91,12.5%\n\"Lovelace, A\",1/2/2025,\"1,204\",3%\n").unwrap();
+    let loaded = xl_io::open(&path).unwrap();
+    let wb = &loaded.workbook;
+    let s = wb.sheet_ids()[0];
+    assert_eq!(wb.sheet_name(s), "people");
+    assert_eq!(*wb.value(a(s, "A1")), Value::text("Name"), "BOM stripped");
+    assert_eq!(*wb.value(a(s, "B2")), Value::Number(serial_from_date(2026, 1, 5)));
+    assert_eq!(wb.display(a(s, "C3")).text, "1,204");
+    assert_eq!(*wb.value(a(s, "A3")), Value::text("Lovelace, A"));
+    let out = tmp("people_out.csv");
+    xl_io::save(wb, &out, s).unwrap();
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(text, "Name,Joined,Score,Rate\nAda,2026-01-05,91,12.50%\n\"Lovelace, A\",1/2/2025,\"1,204\",3%\n");
+}
+
+#[test]
+fn rejects_non_xlsx() {
+    let path = tmp("fake.xlsx");
+    std::fs::write(&path, "not a zip").unwrap();
+    assert!(xl_io::open(&path).is_err());
+    assert!(xl_io::open(&tmp("missing.xlsx")).is_err());
+}

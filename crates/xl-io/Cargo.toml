@@ -1,0 +1,15 @@
+[package]
+name = "xl-io"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+xl-engine.workspace = true
+csv = "1"
+quick-xml = "0.42"
+rust_xlsxwriter = "0.102"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+zip = { version = "9", default-features = false, features = ["deflate"] }

@@ -6,8 +6,24 @@ use std::fmt;
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
 
-/// A zero-based cell coordinate.
+/// Stable sheet identifier (never reused within a workbook).
+pub type SheetId = u32;
+
+/// A cell on a specific sheet.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Addr {
+    pub sheet: SheetId,
+    pub cell: CellRef,
+}
+
+impl Addr {
+    pub const fn new(sheet: SheetId, cell: CellRef) -> Self {
+        Self { sheet, cell }
+    }
+}
+
+/// A zero-based cell coordinate.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CellRef {
     pub row: u32,
     pub col: u32,

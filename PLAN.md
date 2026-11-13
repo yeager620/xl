@@ -146,3 +146,12 @@ Cargo workspace: `crates/xl-engine`, `crates/xl-io`, `crates/xl-app`, `crates/xl
 **Benchmarks (release):** edit with 2 dependents in a 200k-cell sheet ~2 ms; unchanged re-entry ~1 µs (early cutoff); 100k-long chain ~31 ms; edit at the bottom of 5k running totals ~0.1 ms.
 
 **Known gaps / next:** initial bulk recalc is slower than it should be (200k formulas ≈ 0.8 s; needs a dedicated topo pass instead of the hash-heavy incremental path); recalc runs on the UI thread; range index is a linear scan per column; no IME/compose input yet; scrollbars are not draggable; xlsx I/O, number formats and multi-sheet are M2.
+
+### Update (2026-11-13): M2 done
+
+- **Multi-sheet workbooks**: tabs (add, rename, delete with confirm, Ctrl+PageUp/Down), per-sheet selection and scroll, cross-sheet references (`Data!A1`, `'Q4 Data'!A:A`) stored by sheet id so renames never break formulas; deleting a sheet turns references into `#REF!`. Point mode works across sheets.
+- **Number formats**: Excel format-code engine (sections, `[Red]` colors, thousands/scaling, percent, scientific, dates/times incl. `[h]` and fractional seconds, `@` text). Typed input auto-formats (`$1,200`, `15%`, `2026-11-13`, `2:30 PM`). Toolbar + Ctrl+Shift shortcuts, decimal +/-. Formats survive copy/paste/fill/undo.
+- **xlsx**: streaming reader (shared strings incl. rich text, styles/numFmts, shared formulas, inline strings, column widths, cached values) and writer (formulas with cached results, `_xlfn.` prefixes, formats, widths). Formulas we can't evaluate yet keep the file's cached value instead of becoming `#NAME?`. Cross-checked against openpyxl both ways.
+- **Engine**: +25 functions (SUMIFS/COUNTIFS/AVERAGEIFS, XLOOKUP, SUMPRODUCT, IFS, MEDIAN, DATE/TIME family, EDATE/EOMONTH, TEXT, VALUE).
+
+**Next (M3):** cell styles (bold/italic, fill, borders, alignment) with xlsx round-trip, background recalc thread, interval-tree range index, aggregate caches for big SUM ranges, faster bulk load, draggable scrollbars, IME input, command palette.

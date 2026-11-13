@@ -1,5 +1,9 @@
+mod app;
+mod chrome;
+mod paint;
 mod refs;
-mod sheet_view;
+#[cfg(test)]
+mod tests;
 mod theme;
 
 use std::borrow::Cow;
@@ -7,7 +11,7 @@ use std::path::PathBuf;
 
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
-use crate::sheet_view::Spreadsheet;
+use crate::app::Spreadsheet;
 
 fn main() {
     let path = std::env::args().nth(1).map(PathBuf::from);

@@ -1,23 +1,45 @@
 //! Excel formula lexer + Pratt parser, and a printer that can shift relative
-//! references (used for fill-down / copy-paste).
+//! references (fill-down / copy-paste). References may be qualified with a
+//! sheet (`Sheet2!A1`, `'My Sheet'!A1:B5`); qualified references store the
+//! sheet's stable id, so renaming a sheet never breaks a formula.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::address::{A1, CellRef, MAX_ROWS, Range, col_name, parse_a1, parse_col};
-use crate::functions::Func;
+use crate::address::{A1, CellRef, MAX_ROWS, Range, SheetId, col_name, parse_a1, parse_col};
+use crate::eval::Func;
 use crate::value::ErrorKind;
+
+/// Sheet name <-> id resolution used while parsing and printing.
+pub trait SheetNames {
+    fn sheet_id(&self, name: &str) -> Option<SheetId>;
+    fn sheet_name(&self, id: SheetId) -> Option<&str>;
+}
+
+/// Resolver with no sheets (formulas without sheet-qualified refs).
+pub struct NoSheets;
+
+impl SheetNames for NoSheets {
+    fn sheet_id(&self, _: &str) -> Option<SheetId> {
+        None
+    }
+    fn sheet_name(&self, _: SheetId) -> Option<&str> {
+        None
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct RefAddr {
+    /// None = the sheet containing the formula.
+    pub sheet: Option<SheetId>,
     pub cell: CellRef,
     pub col_abs: bool,
     pub row_abs: bool,
 }
 
-impl From<A1> for RefAddr {
-    fn from(a: A1) -> Self {
-        Self { cell: a.cell, col_abs: a.col_abs, row_abs: a.row_abs }
+impl RefAddr {
+    fn new(a: A1, sheet: Option<SheetId>) -> Self {
+        Self { sheet, cell: a.cell, col_abs: a.col_abs, row_abs: a.row_abs }
     }
 }
 
@@ -85,6 +107,7 @@ pub enum Expr {
     Bool(bool),
     Error(ErrorKind),
     Ref(RefAddr),
+    /// The sheet of a range is the first endpoint's sheet.
     Range(RefAddr, RefAddr, RangeKind),
     Neg(Box<Expr>),
     Plus(Box<Expr>),
@@ -96,18 +119,22 @@ pub enum Expr {
 }
 
 impl Expr {
-    pub fn range(&self) -> Option<Range> {
+    /// The referenced range (and its explicit sheet, if any).
+    pub fn reference(&self) -> Option<(Option<SheetId>, Range)> {
         match self {
-            Expr::Ref(r) => Some(Range::single(r.cell)),
-            Expr::Range(a, b, _) => Some(Range::new(a.cell, b.cell)),
+            Expr::Ref(r) => Some((r.sheet, Range::single(r.cell))),
+            Expr::Range(a, b, _) => Some((a.sheet, Range::new(a.cell, b.cell))),
             _ => None,
         }
     }
 
-    /// Visit every cell/range reference in the expression.
-    pub fn visit_refs(&self, f: &mut impl FnMut(Range)) {
+    /// Visit every reference in the expression.
+    pub fn visit_refs(&self, f: &mut impl FnMut(Option<SheetId>, Range)) {
         match self {
-            Expr::Ref(_) | Expr::Range(..) => f(self.range().unwrap()),
+            Expr::Ref(_) | Expr::Range(..) => {
+                let (s, r) = self.reference().unwrap();
+                f(s, r)
+            }
             Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_refs(f),
             Expr::Binary(_, a, b) => {
                 a.visit_refs(f);
@@ -118,20 +145,30 @@ impl Expr {
         }
     }
 
-    pub fn is_volatile(&self) -> bool {
+    fn any(&self, pred: &impl Fn(&Expr) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
         match self {
-            Expr::Call(func, args) => func.is_volatile() || args.iter().any(Expr::is_volatile),
-            Expr::UnknownFunc(_, args) => args.iter().any(Expr::is_volatile),
-            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.is_volatile(),
-            Expr::Binary(_, a, b) => a.is_volatile() || b.is_volatile(),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.any(pred),
+            Expr::Binary(_, a, b) => a.any(pred) || b.any(pred),
+            Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().any(|a| a.any(pred)),
             _ => false,
         }
     }
 
-    /// Print as formula source (without leading `=`), shifting relative refs.
-    pub fn to_source_shifted(&self, dr: i64, dc: i64) -> String {
+    pub fn is_volatile(&self) -> bool {
+        self.any(&|e| matches!(e, Expr::Call(f, _) if f.is_volatile()))
+    }
+
+    pub fn has_unknown_func(&self) -> bool {
+        self.any(&|e| matches!(e, Expr::UnknownFunc(..)))
+    }
+
+    /// Print as formula source (without `=`), shifting relative refs by (dr, dc).
+    pub fn to_source(&self, dr: i64, dc: i64, names: &dyn SheetNames) -> String {
         let mut s = String::new();
-        write_expr(self, dr, dc, &mut s);
+        write_expr(self, dr, dc, names, &mut s);
         s
     }
 }
@@ -148,13 +185,13 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Parse a formula body (the text after `=`).
-pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
+pub fn parse_formula(src: &str, names: &dyn SheetNames) -> Result<Expr, ParseError> {
     let tokens = lex(src)?;
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser { tokens, pos: 0, names };
     let e = p.expr(0)?;
     match p.peek() {
         None => Ok(e),
-        Some(t) => Err(ParseError(format!("unexpected {t:?}"))),
+        Some(t) => Err(ParseError(format!("unexpected {}", t.describe()))),
     }
 }
 
@@ -163,6 +200,7 @@ enum Tok {
     Num(f64),
     Str(String),
     Ident(String),
+    Sheet(String),
     Err(ErrorKind),
     Op(BinOp),
     Minus,
@@ -172,6 +210,26 @@ enum Tok {
     RParen,
     Comma,
     Colon,
+}
+
+impl Tok {
+    fn describe(&self) -> String {
+        match self {
+            Tok::Num(n) => format!("number {n}"),
+            Tok::Str(s) => format!("text \"{s}\""),
+            Tok::Ident(s) => format!("'{s}'"),
+            Tok::Sheet(s) => format!("sheet '{s}'"),
+            Tok::Err(e) => e.to_string(),
+            Tok::Op(op) => format!("'{}'", op.as_str()),
+            Tok::Minus => "'-'".into(),
+            Tok::PlusSign => "'+'".into(),
+            Tok::Percent => "'%'".into(),
+            Tok::LParen => "'('".into(),
+            Tok::RParen => "')'".into(),
+            Tok::Comma => "','".into(),
+            Tok::Colon => "':'".into(),
+        }
+    }
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
@@ -209,7 +267,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 let mut s = String::new();
                 loop {
                     if i >= b.len() {
-                        return Err(ParseError("unterminated string".into()));
+                        return Err(ParseError("unterminated text (missing \")".into()));
                     }
                     if b[i] == b'"' {
                         if b.get(i + 1) == Some(&b'"') {
@@ -226,6 +284,33 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 }
                 out.push(Tok::Str(s));
             }
+            b'\'' => {
+                // Quoted sheet name: 'My Sheet'!A1 (quotes doubled inside).
+                i += 1;
+                let mut s = String::new();
+                loop {
+                    if i >= b.len() {
+                        return Err(ParseError("unterminated sheet name (missing ')".into()));
+                    }
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            s.push('\'');
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    let ch = src[i..].chars().next().unwrap();
+                    s.push(ch);
+                    i += ch.len_utf8();
+                }
+                if b.get(i) != Some(&b'!') {
+                    return Err(ParseError(format!("expected ! after '{s}'")));
+                }
+                i += 1;
+                out.push(Tok::Sheet(s));
+            }
             b'#' => {
                 let s = i;
                 i += 1;
@@ -238,12 +323,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 let e = ErrorKind::parse(&src[s..i]).ok_or_else(|| ParseError(format!("unknown error {}", &src[s..i])))?;
                 out.push(Tok::Err(e));
             }
-            c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
+            c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' || c >= 0x80 => {
                 let s = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'.' | b'$')) {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'.' | b'$') || b[i] >= 0x80) {
                     i += 1;
                 }
-                out.push(Tok::Ident(src[s..i].to_string()));
+                let id = &src[s..i];
+                if b.get(i) == Some(&b'!') {
+                    i += 1;
+                    out.push(Tok::Sheet(id.to_string()));
+                } else {
+                    out.push(Tok::Ident(id.to_string()));
+                }
             }
             b'+' => {
                 out.push(Tok::PlusSign);
@@ -316,12 +407,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
     Ok(out)
 }
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<Tok>,
     pos: usize,
+    names: &'a dyn SheetNames,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.pos)
     }
@@ -335,7 +427,8 @@ impl Parser {
     fn expect(&mut self, t: Tok) -> Result<(), ParseError> {
         match self.next() {
             Some(x) if x == t => Ok(()),
-            other => Err(ParseError(format!("expected {t:?}, found {other:?}"))),
+            Some(other) => Err(ParseError(format!("expected {}, found {}", t.describe(), other.describe()))),
+            None => Err(ParseError(format!("expected {} before end of formula", t.describe()))),
         }
     }
 
@@ -379,16 +472,51 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 Ok(Expr::Paren(Box::new(e)))
             }
+            Some(Tok::Sheet(name)) => {
+                let id = self.names.sheet_id(&name).ok_or_else(|| ParseError(format!("no sheet named '{name}'")))?;
+                match self.next() {
+                    Some(Tok::Ident(r)) => self.reference(r, Some(id)).ok_or_else(|| ParseError(format!("bad reference {name}!{}", self.tokens[self.pos - 1].describe())))?,
+                    _ => Err(ParseError(format!("expected a cell reference after {name}!"))),
+                }
+            }
             Some(Tok::Ident(id)) => self.ident(id),
-            other => Err(ParseError(format!("unexpected {}", match other {
-                Some(t) => format!("{t:?}"),
-                None => "end of formula".into(),
-            }))),
+            Some(t) => Err(ParseError(format!("unexpected {}", t.describe()))),
+            None => Err(ParseError("formula ends too early".into())),
         }
     }
 
+    /// Try to parse a cell / range / column-range reference starting with `id`.
+    fn reference(&mut self, id: String, sheet: Option<SheetId>) -> Option<Result<Expr, ParseError>> {
+        if let Some(a) = parse_a1(&id) {
+            if self.peek() == Some(&Tok::Colon) {
+                self.pos += 1;
+                return Some(match self.next() {
+                    Some(Tok::Ident(id2)) => match parse_a1(&id2) {
+                        Some(b) => Ok(Expr::Range(RefAddr::new(a, sheet), RefAddr::new(b, sheet), RangeKind::Cells)),
+                        None => Err(ParseError(format!("bad range end {id2}"))),
+                    },
+                    other => Err(ParseError(format!("bad range end {}", other.map_or("(none)".into(), |t| t.describe())))),
+                });
+            }
+            return Some(Ok(Expr::Ref(RefAddr::new(a, sheet))));
+        }
+        if let Some((c1, abs1)) = parse_col_abs(&id)
+            && self.peek() == Some(&Tok::Colon)
+        {
+            self.pos += 1;
+            if let Some(Tok::Ident(id2)) = self.next()
+                && let Some((c2, abs2)) = parse_col_abs(&id2)
+            {
+                let a = RefAddr { sheet, cell: CellRef::new(0, c1), col_abs: abs1, row_abs: true };
+                let b = RefAddr { sheet, cell: CellRef::new(MAX_ROWS - 1, c2), col_abs: abs2, row_abs: true };
+                return Some(Ok(Expr::Range(a, b, RangeKind::Columns)));
+            }
+            return Some(Err(ParseError(format!("bad column range after {id}:"))));
+        }
+        None
+    }
+
     fn ident(&mut self, id: String) -> Result<Expr, ParseError> {
-        // Function call
         if self.peek() == Some(&Tok::LParen) {
             self.pos += 1;
             let mut args = Vec::new();
@@ -398,44 +526,22 @@ impl Parser {
                     match self.next() {
                         Some(Tok::Comma) => continue,
                         Some(Tok::RParen) => break,
-                        other => return Err(ParseError(format!("expected , or ) found {other:?}"))),
+                        Some(t) => return Err(ParseError(format!("expected , or ) but found {}", t.describe()))),
+                        None => return Err(ParseError("missing )".into())),
                     }
                 }
             } else {
                 self.pos += 1;
             }
-            return Ok(match Func::from_name(&id) {
+            // Newer functions are stored with a prefix in xlsx files.
+            let name = id.strip_prefix("_xlfn.").or_else(|| id.strip_prefix("_xlws.")).unwrap_or(&id);
+            return Ok(match Func::from_name(name) {
                 Some(f) => Expr::Call(f, args),
-                None => Expr::UnknownFunc(id.to_ascii_uppercase().into(), args),
+                None => Expr::UnknownFunc(name.to_ascii_uppercase().into(), args),
             });
         }
-        // Cell reference or range
-        if let Some(a) = parse_a1(&id) {
-            if self.peek() == Some(&Tok::Colon) {
-                self.pos += 1;
-                match self.next() {
-                    Some(Tok::Ident(id2)) => {
-                        let b = parse_a1(&id2).ok_or_else(|| ParseError(format!("bad range end {id2}")))?;
-                        return Ok(Expr::Range(a.into(), b.into(), RangeKind::Cells));
-                    }
-                    other => return Err(ParseError(format!("bad range end {other:?}"))),
-                }
-            }
-            return Ok(Expr::Ref(a.into()));
-        }
-        // Whole-column range A:C / $A:$C
-        if let Some(c1) = parse_col_abs(&id)
-            && self.peek() == Some(&Tok::Colon)
-        {
-            self.pos += 1;
-            if let Some(Tok::Ident(id2)) = self.next()
-                && let Some(c2) = parse_col_abs(&id2)
-            {
-                let a = RefAddr { cell: CellRef::new(0, c1.0), col_abs: c1.1, row_abs: true };
-                let b = RefAddr { cell: CellRef::new(MAX_ROWS - 1, c2.0), col_abs: c2.1, row_abs: true };
-                return Ok(Expr::Range(a, b, RangeKind::Columns));
-            }
-            return Err(ParseError(format!("bad column range after {id}:")));
+        if let Some(r) = self.reference(id.clone(), None) {
+            return r;
         }
         match id.to_ascii_uppercase().as_str() {
             "TRUE" => Ok(Expr::Bool(true)),
@@ -459,6 +565,31 @@ fn shift_ref(r: &RefAddr, dr: i64, dc: i64) -> Option<RefAddr> {
     Some(RefAddr { cell, ..*r })
 }
 
+/// Quote a sheet name for use in a formula if needed.
+pub fn quote_sheet_name(name: &str) -> String {
+    let plain = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && parse_a1(name).is_none()
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE");
+    if plain { name.to_string() } else { format!("'{}'", name.replace('\'', "''")) }
+}
+
+/// Returns false if the sheet no longer exists.
+fn write_sheet(sheet: Option<SheetId>, names: &dyn SheetNames, out: &mut String) -> bool {
+    match sheet {
+        None => true,
+        Some(id) => match names.sheet_name(id) {
+            Some(n) => {
+                out.push_str(&quote_sheet_name(n));
+                out.push('!');
+                true
+            }
+            None => false,
+        },
+    }
+}
+
 fn write_ref(r: &RefAddr, out: &mut String) {
     let _ = write!(
         out,
@@ -470,11 +601,19 @@ fn write_ref(r: &RefAddr, out: &mut String) {
     );
 }
 
-fn write_expr(e: &Expr, dr: i64, dc: i64, out: &mut String) {
+fn write_number(n: f64, out: &mut String) {
+    // Shortest round-trip representation, but avoid long exponent-free forms.
+    let a = n.abs();
+    if a != 0.0 && !(1e-9..1e15).contains(&a) {
+        let _ = write!(out, "{n:E}");
+    } else {
+        let _ = write!(out, "{n}");
+    }
+}
+
+fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut String) {
     match e {
-        Expr::Number(n) => {
-            let _ = write!(out, "{n}");
-        }
+        Expr::Number(n) => write_number(*n, out),
         Expr::Text(s) => {
             out.push('"');
             out.push_str(&s.replace('"', "\"\""));
@@ -482,55 +621,67 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, out: &mut String) {
         }
         Expr::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
         Expr::Error(err) => out.push_str(err.as_str()),
-        Expr::Ref(r) => match shift_ref(r, dr, dc) {
-            Some(r) => write_ref(&r, out),
-            None => out.push_str("#REF!"),
-        },
+        Expr::Ref(r) => {
+            let mark = out.len();
+            match shift_ref(r, dr, dc) {
+                Some(r) if write_sheet(r.sheet, names, out) => write_ref(&r, out),
+                _ => {
+                    out.truncate(mark);
+                    out.push_str("#REF!")
+                }
+            }
+        }
         Expr::Range(a, b, kind) => {
             let (sa, sb) = match kind {
                 RangeKind::Cells => (shift_ref(a, dr, dc), shift_ref(b, dr, dc)),
                 RangeKind::Columns => (shift_ref(a, 0, dc), shift_ref(b, 0, dc)),
             };
-            match (sa, sb, kind) {
-                (Some(a), Some(b), RangeKind::Cells) => {
-                    write_ref(&a, out);
-                    out.push(':');
-                    write_ref(&b, out);
+            let mark = out.len();
+            match (sa, sb) {
+                (Some(a), Some(b)) if write_sheet(a.sheet, names, out) => match kind {
+                    RangeKind::Cells => {
+                        write_ref(&a, out);
+                        out.push(':');
+                        write_ref(&b, out);
+                    }
+                    RangeKind::Columns => {
+                        let _ = write!(
+                            out,
+                            "{}{}:{}{}",
+                            if a.col_abs { "$" } else { "" },
+                            col_name(a.cell.col),
+                            if b.col_abs { "$" } else { "" },
+                            col_name(b.cell.col)
+                        );
+                    }
+                },
+                _ => {
+                    out.truncate(mark);
+                    out.push_str("#REF!")
                 }
-                (Some(a), Some(b), RangeKind::Columns) => {
-                    let _ = write!(
-                        out,
-                        "{}{}:{}{}",
-                        if a.col_abs { "$" } else { "" },
-                        col_name(a.cell.col),
-                        if b.col_abs { "$" } else { "" },
-                        col_name(b.cell.col)
-                    );
-                }
-                _ => out.push_str("#REF!"),
             }
         }
         Expr::Neg(x) => {
             out.push('-');
-            write_expr(x, dr, dc, out);
+            write_expr(x, dr, dc, names, out);
         }
         Expr::Plus(x) => {
             out.push('+');
-            write_expr(x, dr, dc, out);
+            write_expr(x, dr, dc, names, out);
         }
         Expr::Percent(x) => {
-            write_expr(x, dr, dc, out);
+            write_expr(x, dr, dc, names, out);
             out.push('%');
         }
         Expr::Paren(x) => {
             out.push('(');
-            write_expr(x, dr, dc, out);
+            write_expr(x, dr, dc, names, out);
             out.push(')');
         }
         Expr::Binary(op, a, b) => {
-            write_expr(a, dr, dc, out);
+            write_expr(a, dr, dc, names, out);
             out.push_str(op.as_str());
-            write_expr(b, dr, dc, out);
+            write_expr(b, dr, dc, names, out);
         }
         Expr::Call(_, args) | Expr::UnknownFunc(_, args) => {
             let name = match e {
@@ -544,7 +695,7 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                write_expr(a, dr, dc, out);
+                write_expr(a, dr, dc, names, out);
             }
             out.push(')');
         }
@@ -555,8 +706,23 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, out: &mut String) {
 mod tests {
     use super::*;
 
+    struct Names(Vec<(SheetId, &'static str)>);
+    impl SheetNames for Names {
+        fn sheet_id(&self, name: &str) -> Option<SheetId> {
+            self.0.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)).map(|(i, _)| *i)
+        }
+        fn sheet_name(&self, id: SheetId) -> Option<&str> {
+            self.0.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
+        }
+    }
+
+    fn names() -> Names {
+        Names(vec![(0, "Sheet1"), (1, "Data"), (2, "My Sheet"), (3, "it's")])
+    }
+
     fn roundtrip(s: &str) -> String {
-        parse_formula(s).unwrap().to_source_shifted(0, 0)
+        let n = names();
+        parse_formula(s, &n).unwrap().to_source(0, 0, &n)
     }
 
     #[test]
@@ -567,31 +733,53 @@ mod tests {
         assert_eq!(roundtrip("\"a\"\"b\"&A1"), "\"a\"\"b\"&A1");
         assert_eq!(roundtrip("sum(a:a)"), "SUM(A:A)");
         assert_eq!(roundtrip("A1<>B1"), "A1<>B1");
+        assert_eq!(roundtrip("_xlfn.CONCAT(A1,B1)"), "CONCAT(A1,B1)");
+        assert_eq!(roundtrip("0.1+1E-12"), "0.1+1E-12");
+    }
+
+    #[test]
+    fn sheet_references() {
+        assert_eq!(roundtrip("Data!A1+data!B2"), "Data!A1+Data!B2");
+        assert_eq!(roundtrip("'My Sheet'!A1:B3"), "'My Sheet'!A1:B3");
+        assert_eq!(roundtrip("SUM('it''s'!C:C)"), "SUM('it''s'!C:C)");
+        assert_eq!(roundtrip("'Data'!A1"), "Data!A1");
+        let n = names();
+        assert!(parse_formula("Nope!A1", &n).is_err());
+        let e = parse_formula("Data!A1", &n).unwrap();
+        assert_eq!(e.reference().unwrap().0, Some(1));
+    }
+
+    #[test]
+    fn renamed_and_deleted_sheets() {
+        let e = parse_formula("Data!A1*2", &names()).unwrap();
+        let renamed = Names(vec![(1, "Q4 Data")]);
+        assert_eq!(e.to_source(0, 0, &renamed), "'Q4 Data'!A1*2");
+        assert_eq!(e.to_source(0, 0, &NoSheets), "#REF!*2");
     }
 
     #[test]
     fn precedence() {
-        // -2^2 = 4 in Excel: negation binds tighter than ^
-        let e = parse_formula("-2^2").unwrap();
-        assert!(matches!(e, Expr::Binary(BinOp::Pow, ..)));
-        let e = parse_formula("1+2*3").unwrap();
-        assert!(matches!(e, Expr::Binary(BinOp::Add, ..)));
-        let e = parse_formula("1&2=3").unwrap();
-        assert!(matches!(e, Expr::Binary(BinOp::Eq, ..)));
+        let n = NoSheets;
+        assert!(matches!(parse_formula("-2^2", &n).unwrap(), Expr::Binary(BinOp::Pow, ..)));
+        assert!(matches!(parse_formula("1+2*3", &n).unwrap(), Expr::Binary(BinOp::Add, ..)));
+        assert!(matches!(parse_formula("1&2=3", &n).unwrap(), Expr::Binary(BinOp::Eq, ..)));
     }
 
     #[test]
     fn shifting() {
-        let e = parse_formula("A1+$B$1+C$1+$D1+SUM(A1:A3)").unwrap();
-        assert_eq!(e.to_source_shifted(2, 1), "B3+$B$1+D$1+$D3+SUM(B3:B5)");
-        let e = parse_formula("A1").unwrap();
-        assert_eq!(e.to_source_shifted(-1, 0), "#REF!");
+        let n = names();
+        let e = parse_formula("A1+$B$1+C$1+$D1+SUM(A1:A3)+Data!A1", &n).unwrap();
+        assert_eq!(e.to_source(2, 1, &n), "B3+$B$1+D$1+$D3+SUM(B3:B5)+Data!B3");
+        let e = parse_formula("A1", &n).unwrap();
+        assert_eq!(e.to_source(-1, 0, &n), "#REF!");
     }
 
     #[test]
     fn errors() {
-        assert!(parse_formula("1+").is_err());
-        assert!(parse_formula("SUM(1,2").is_err());
-        assert!(parse_formula("\"abc").is_err());
+        let n = NoSheets;
+        assert!(parse_formula("1+", &n).is_err());
+        assert!(parse_formula("SUM(1,2", &n).is_err());
+        assert!(parse_formula("\"abc", &n).is_err());
+        assert!(parse_formula("Table1[Col]", &n).is_err());
     }
 }
