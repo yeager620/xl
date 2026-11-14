@@ -171,3 +171,23 @@ Cargo workspace: `crates/xl-engine`, `crates/xl-io`, `crates/xl-app`, `crates/xl
 Done: unsaved-changes dialog on close/quit/open; 30 s autosave of a recovery copy and restore-after-crash; app icon (SVG + rendered hicolor PNGs); desktop entry with xlsx/csv associations; AppStream metadata; `make install` / `uninstall`; `.deb` built and inspected.
 
 Written but not yet run here: AppImage (needs appimagetool download), Flatpak (needs flatpak-builder). Open items: a homepage URL for AppStream/Flathub; release builds on an older distro for glibc compatibility; Flatpak SDK Rust version vs. our pinned 1.98.1.
+
+## M5 — Excel feature parity (started 2026-11-13)
+
+Checklist (tick as each lands with tests):
+- [ ] Engine groundwork: formula's own cell in eval context; reference-returning functions (OFFSET/INDIRECT/INDEX) and names resolve as ranges
+- [ ] ~49 high-use functions + one-line descriptions for every function (agent, worktree)
+- [ ] Insert/delete rows & columns with formula adjustment (+ formats, styles, widths, later features), undo/redo, context menu, Ctrl+Shift+= / Ctrl+-
+- [ ] Row heights (drag + autofit), hidden rows/cols, merged cells, wrap text, vertical alignment, font size/family; freeze panes (paned painter); xlsx read/write for all
+- [ ] Named ranges (parser, eval, deps), typeable name box (jump / define)
+- [ ] xlsx: detect unsupported parts (charts, drawings, comments, pivots, validation, VBA, …) and warn before overwriting
+- [ ] Find & replace (find bar), sort (A→Z, Z→A, custom), AutoFilter (header dropdowns, value lists) + xlsx
+- [ ] Fill handle drag + series (numbers, dates, months/weekdays, "Item 1"), double-click fill; paste special (values/formats/formulas/transpose); cut = move with reference updates
+- [ ] Formula autocomplete (functions + names) and argument hints
+- [ ] Conditional formatting (cell rules, text, top/bottom, above average, duplicates, formula, color scales, data bars) + xlsx
+- [ ] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
+- [ ] Tables (Format as Table, banding, structured refs) + xlsx
+- [ ] Pivot tables (field panel, sum/count/avg/min/max, refresh)
+- [ ] Sparklines (line/column/win-loss) + xlsx
+- [ ] Goal Seek; Solver (min/max/target, constraints)
+- [ ] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx
