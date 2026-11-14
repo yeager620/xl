@@ -377,20 +377,6 @@ pub(crate) fn chart_ops(sheet: &Spreadsheet, chart: &Chart, data: &ChartData, (x
     ops
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tidy_ticks() {
-        assert_eq!(nice_ticks(0.0, 87.0, 5), (0.0, 100.0, 20.0));
-        assert_eq!(nice_ticks(-3.0, 12.0, 5), (-5.0, 15.0, 5.0));
-        assert_eq!(nice_ticks(0.0, 0.0, 5), (0.0, 1.0, 0.2));
-        assert_eq!(label(12_500.0), "12.5K");
-        assert_eq!(label(0.3), "0.3");
-    }
-}
-
 /// A sparkline inside a cell's rectangle.
 pub(crate) fn sparkline_ops(sheet: &Spreadsheet, kind: xl_engine::chart::SparkKind, values: &[Option<f64>], color: Option<u32>, (x, y, w, h): (f64, f64, f64, f64), clip: Bounds<Pixels>) -> Vec<Op> {
     use xl_engine::chart::SparkKind;
@@ -452,4 +438,18 @@ pub(crate) fn sparkline_ops(sheet: &Spreadsheet, kind: xl_engine::chart::SparkKi
         }
     }
     ops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tidy_ticks() {
+        assert_eq!(nice_ticks(0.0, 87.0, 5), (0.0, 100.0, 20.0));
+        assert_eq!(nice_ticks(-3.0, 12.0, 5), (-5.0, 15.0, 5.0));
+        assert_eq!(nice_ticks(0.0, 0.0, 5), (0.0, 1.0, 0.2));
+        assert_eq!(label(12_500.0), "12.5K");
+        assert_eq!(label(0.3), "0.3");
+    }
 }
