@@ -146,6 +146,8 @@ impl UndoEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     NameBox,
+    Find,
+    Replace,
 }
 
 /// What a right-click menu is about.
@@ -211,7 +213,9 @@ pub struct Spreadsheet {
     /// Sheet tab being renamed, with the text typed so far.
     pub(crate) renaming: Option<(SheetId, String)>,
     /// The focused text field and its contents.
-    pub(crate) field: Option<(Field, String)>,
+    pub(crate) field: Option<Field>,
+    pub(crate) name_text: String,
+    pub(crate) find: crate::find::FindState,
     /// Parts of the opened xlsx that xl can't keep ("charts", …).
     pub(crate) unsupported: Vec<&'static str>,
     /// Asking whether to overwrite a file and drop those parts.
@@ -280,6 +284,8 @@ impl Spreadsheet {
             last_title: String::new(),
             renaming: None,
             field: None,
+            name_text: String::new(),
+            find: Default::default(),
             unsupported: Vec::new(),
             lossy_prompt: false,
             confirm_delete: None,
@@ -774,7 +780,7 @@ impl Spreadsheet {
     }
 
     /// Apply raw inputs (with auto-formatting) as one undoable step.
-    fn apply_inputs(&mut self, changes: Vec<(Addr, String)>) {
+    pub(crate) fn apply_inputs(&mut self, changes: Vec<(Addr, String)>) {
         if changes.is_empty() {
             return;
         }
@@ -1527,6 +1533,8 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
+        } else if matches!(self.field, Some(Field::Find | Field::Replace)) {
+            self.key_find(key, m.shift)
         } else if self.field.is_some() {
             self.key_field(key)
         } else if self.edit.is_some() {
@@ -1541,18 +1549,18 @@ impl Spreadsheet {
     }
 
     fn key_field(&mut self, key: &str) -> bool {
-        let Some((kind, text)) = self.field.as_mut() else { return false };
+        if self.field != Some(Field::NameBox) {
+            return false;
+        }
         match key {
             "enter" => {
-                let (kind, text) = (*kind, std::mem::take(text));
+                let text = std::mem::take(&mut self.name_text);
                 self.field = None;
-                match kind {
-                    Field::NameBox => self.name_box_go(&text),
-                }
+                self.name_box_go(&text);
             }
             "escape" => self.field = None,
             "backspace" => {
-                text.pop();
+                self.name_text.pop();
             }
             _ => return false,
         }
@@ -1564,7 +1572,8 @@ impl Spreadsheet {
         if self.edit.is_some() && !self.commit_edit() {
             return;
         }
-        self.field = Some((Field::NameBox, String::new()));
+        self.name_text.clear();
+        self.field = Some(Field::NameBox);
     }
 
     /// Name box Enter: jump to a cell, range or defined name, or define a
@@ -1763,6 +1772,8 @@ impl Spreadsheet {
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
             ("g", true) => self.focus_name_box(),
+            ("f", true) => self.open_find(false),
+            ("h", true) => self.open_find(true),
             ("b", true) => self.toggle_emphasis(Emphasis::Bold),
             ("i", true) => self.toggle_emphasis(Emphasis::Italic),
             ("u", true) => self.toggle_emphasis(Emphasis::Underline),

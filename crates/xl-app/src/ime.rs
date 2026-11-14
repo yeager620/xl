@@ -42,8 +42,11 @@ impl Spreadsheet {
         if let Some(p) = &self.palette {
             return &p.query;
         }
-        if let Some((_, text)) = &self.field {
-            return text;
+        match self.field {
+            Some(crate::app::Field::NameBox) => return &self.name_text,
+            Some(crate::app::Field::Find) => return &self.find.query,
+            Some(crate::app::Field::Replace) => return &self.find.replacement,
+            None => {}
         }
         match (&self.renaming, &self.edit) {
             (Some((_, name)), _) => name,
@@ -102,8 +105,12 @@ impl EntityInputHandler for Spreadsheet {
             cx.notify();
             return;
         }
-        if let Some((_, field)) = self.field.as_mut() {
-            field.push_str(text);
+        if let Some(field) = self.field {
+            match field {
+                crate::app::Field::NameBox => self.name_text.push_str(text),
+                crate::app::Field::Find => self.find.query.push_str(text),
+                crate::app::Field::Replace => self.find.replacement.push_str(text),
+            }
             cx.notify();
             return;
         }

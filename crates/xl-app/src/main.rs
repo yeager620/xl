@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod chrome;
+mod find;
 mod ime;
 mod lifecycle;
 mod palette;

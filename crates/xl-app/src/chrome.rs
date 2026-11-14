@@ -77,7 +77,7 @@ fn no_drag<E: InteractiveElement>(e: E) -> E {
     e.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_mouse_move(|_, _, cx| cx.stop_propagation())
 }
 
-fn icon(name: &'static str, color: Hsla) -> impl IntoElement {
+pub(crate) fn icon(name: &'static str, color: Hsla) -> impl IntoElement {
     svg().path(format!("icons/{name}.svg")).size(px(ICON)).flex_none().text_color(color)
 }
 
@@ -111,7 +111,7 @@ impl Render for Tip {
     }
 }
 
-fn tip(t: Theme, text: &'static str, keys: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+pub(crate) fn tip(t: Theme, text: &'static str, keys: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_, cx| cx.new(|_| Tip { text: text.into(), keys: (!keys.is_empty()).then(|| keys.into()), theme: t }).into()
 }
 
@@ -626,7 +626,7 @@ impl Spreadsheet {
     fn render_formula_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let sel = self.selection();
-        let typing = self.field.as_ref().filter(|(f, _)| *f == Field::NameBox).map(|(_, t)| t.clone());
+        let typing = (self.field == Some(Field::NameBox)).then(|| self.name_text.clone());
         let name_box = match (&typing, &self.edit) {
             (Some(t), _) => t.clone(),
             (None, Some(e)) if e.at.sheet != self.cur => format!("{}!{}", quote_sheet_name(self.wb.sheet_name(e.at.sheet)), e.at.cell),
@@ -915,6 +915,7 @@ impl Render for Spreadsheet {
             .text_size(px(14.))
             .child(self.render_toolbar(window, cx))
             .child(self.render_formula_bar(cx))
+            .when(self.find.open, |d| d.child(self.render_find_bar(cx)))
             .children(self.render_recovery_bar(cx))
             .child(
                 div()

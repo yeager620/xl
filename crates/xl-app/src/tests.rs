@@ -772,3 +772,41 @@ fn saving_over_a_file_with_unkept_parts_asks_first(cx: &mut TestAppContext) {
     view.read_with(cx, |s, _| assert!(!s.dirty && s.unsupported.is_empty() && !s.lossy_prompt));
     std::fs::remove_file(&path).ok();
 }
+
+#[gpui::test]
+fn find_and_replace(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "A1");
+    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_input("ta");
+    // "Tax rate" (C8), "Tax" (C9), "Total" (D3 header, C10)... in row order.
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("D3").unwrap(), "Total in the header row comes first"));
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("C7").unwrap(), "Subtotal"));
+    cx.simulate_keystrokes("shift-enter");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("D3").unwrap()));
+    // Typing goes to the find field, not the grid.
+    assert_eq!(val(&view, cx, "A1"), Value::text("Welcome to xl"));
+    // Replace "Tax" with "VAT" everywhere (case-insensitive), as one undo step.
+    view.update(cx, |s, _| {
+        s.find.query = "tax".into();
+        s.open_find(true);
+    });
+    cx.simulate_input("VAT");
+    view.update(cx, |s, _| s.replace_all());
+    assert_eq!(val(&view, cx, "C8"), Value::text("VAT rate"));
+    assert_eq!(val(&view, cx, "C9"), Value::text("VAT"));
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(!s.find.open && s.field.is_none()));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "C8"), Value::text("Tax rate"));
+    assert_eq!(val(&view, cx, "C9"), Value::text("Tax"));
+    // Formulas are searched by their text: find "B4" lands on D4 (=B4*C4).
+    view.update(cx, |s, _| {
+        s.find.query = "b4".into();
+        s.select(CellRef::parse("A1").unwrap(), false);
+        s.find_next(true);
+        assert_eq!(s.active, CellRef::parse("D4").unwrap());
+    });
+}
