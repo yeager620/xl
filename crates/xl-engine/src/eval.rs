@@ -55,6 +55,16 @@ funcs! {
     EDate => "EDATE", EOMonth => "EOMONTH",
     Now => "NOW", Today => "TODAY", Rand => "RAND", RandBetween => "RANDBETWEEN",
     Offset => "OFFSET", Indirect => "INDIRECT", Row => "ROW", Column => "COLUMN", Rows => "ROWS", Columns => "COLUMNS",
+    Substitute => "SUBSTITUTE", Find => "FIND", Search => "SEARCH", Replace => "REPLACE", TextJoin => "TEXTJOIN",
+    Proper => "PROPER", TextBefore => "TEXTBEFORE", TextAfter => "TEXTAFTER", Char => "CHAR", Code => "CODE",
+    Stdev => "STDEV", StdevS => "STDEV.S", StdevP => "STDEV.P", Var => "VAR", VarS => "VAR.S", VarP => "VAR.P",
+    Percentile => "PERCENTILE", PercentileInc => "PERCENTILE.INC", Quartile => "QUARTILE", QuartileInc => "QUARTILE.INC",
+    Rank => "RANK", RankEq => "RANK.EQ", Large => "LARGE", Small => "SMALL", Correl => "CORREL",
+    Mode => "MODE", ModeSngl => "MODE.SNGL", MaxIfs => "MAXIFS", MinIfs => "MINIFS",
+    Pmt => "PMT", Pv => "PV", Fv => "FV", Nper => "NPER", Rate => "RATE", Npv => "NPV", Irr => "IRR",
+    Days => "DAYS", DateDif => "DATEDIF", NetworkDays => "NETWORKDAYS", Workday => "WORKDAY", WeekNum => "WEEKNUM",
+    Choose => "CHOOSE", XMatch => "XMATCH", Switch => "SWITCH",
+    Ceiling => "CEILING", Floor => "FLOOR", Trunc => "TRUNC", SumSq => "SUMSQ",
 }
 
 impl Func {
@@ -109,6 +119,169 @@ impl Func {
             Indirect => "(ref_text, [a1])",
             Row | Column => "([reference])",
             Rows | Columns => "(array)",
+            Substitute => "(text, old_text, new_text, [instance_num])",
+            Find | Search => "(find_text, within_text, [start_num])",
+            Replace => "(old_text, start_num, num_chars, new_text)",
+            TextJoin => "(delimiter, ignore_empty, text1, [text2], …)",
+            Proper | Code => "(text)",
+            TextBefore | TextAfter => "(text, delimiter, [instance_num])",
+            Char => "(number)",
+            Stdev | StdevS | StdevP | Var | VarS | VarP | Mode | ModeSngl | SumSq => "(number1, [number2], …)",
+            Percentile | PercentileInc => "(array, k)",
+            Quartile | QuartileInc => "(array, quart)",
+            Rank | RankEq => "(number, ref, [order])",
+            Large | Small => "(array, k)",
+            Correl => "(array1, array2)",
+            MaxIfs | MinIfs => "(range, criteria_range1, criteria1, …)",
+            Pmt => "(rate, nper, pv, [fv], [type])",
+            Pv => "(rate, nper, pmt, [fv], [type])",
+            Fv => "(rate, nper, pmt, [pv], [type])",
+            Nper => "(rate, pmt, pv, [fv], [type])",
+            Rate => "(nper, pmt, pv, [fv], [type], [guess])",
+            Npv => "(rate, value1, [value2], …)",
+            Irr => "(values, [guess])",
+            Days => "(end_date, start_date)",
+            DateDif => "(start_date, end_date, unit)",
+            NetworkDays => "(start_date, end_date, [holidays])",
+            Workday => "(start_date, days, [holidays])",
+            WeekNum => "(serial_number, [return_type])",
+            Choose => "(index_num, value1, [value2], …)",
+            XMatch => "(lookup_value, lookup_array, [match_mode], [search_mode])",
+            Switch => "(expression, value1, result1, …, [default])",
+            Ceiling | Floor => "(number, significance)",
+            Trunc => "(number, [num_digits])",
+        }
+    }
+
+    /// One-line, plain-English description shown in autocomplete.
+    pub fn description(self) -> &'static str {
+        use Func::*;
+        match self {
+            Sum => "Adds numbers",
+            Product => "Multiplies numbers",
+            Average => "Returns the average (arithmetic mean) of numbers",
+            Min => "Returns the smallest number",
+            Max => "Returns the largest number",
+            Median => "Returns the middle value of a set of numbers",
+            Count => "Counts cells that contain numbers",
+            CountA => "Counts cells that are not empty",
+            CountBlank => "Counts empty cells in a range",
+            SumIf => "Adds the cells that meet a condition",
+            CountIf => "Counts the cells that meet a condition",
+            AverageIf => "Averages the cells that meet a condition",
+            SumIfs => "Adds the cells that meet multiple conditions",
+            CountIfs => "Counts the cells that meet multiple conditions",
+            AverageIfs => "Averages the cells that meet multiple conditions",
+            SumProduct => "Multiplies corresponding cells in ranges and adds the products",
+            Abs => "Returns the absolute value of a number",
+            Sqrt => "Returns the square root of a number",
+            Int => "Rounds a number down to the nearest integer",
+            Mod => "Returns the remainder after division",
+            Power => "Raises a number to a power",
+            Round => "Rounds a number to a given number of digits",
+            RoundUp => "Rounds a number away from zero",
+            RoundDown => "Rounds a number toward zero",
+            Pi => "Returns the value of pi",
+            Exp => "Returns e raised to a power",
+            Ln => "Returns the natural logarithm of a number",
+            Log10 => "Returns the base-10 logarithm of a number",
+            Log => "Returns the logarithm of a number to a given base",
+            Sign => "Returns the sign of a number: 1, 0 or -1",
+            If => "Returns one value if a condition is true and another if it is false",
+            Ifs => "Returns the value for the first condition that is true",
+            IfError => "Returns a fallback value if an expression is an error",
+            IfNa => "Returns a fallback value if an expression is #N/A",
+            And => "Returns TRUE if all arguments are true",
+            Or => "Returns TRUE if any argument is true",
+            Not => "Reverses a logical value",
+            True => "Returns the logical value TRUE",
+            False => "Returns the logical value FALSE",
+            Len => "Returns the number of characters in text",
+            Upper => "Converts text to uppercase",
+            Lower => "Converts text to lowercase",
+            Trim => "Removes extra spaces from text",
+            Left => "Returns characters from the start of text",
+            Right => "Returns characters from the end of text",
+            Mid => "Returns characters from the middle of text",
+            Concat => "Joins text from values and ranges",
+            Concatenate => "Joins several text values into one",
+            Rept => "Repeats text a given number of times",
+            Exact => "Checks whether two texts are exactly the same, including case",
+            Text => "Formats a value as text using a number format",
+            ValueFn => "Converts text that looks like a number into a number",
+            IsBlank => "Returns TRUE if the value is empty",
+            IsNumber => "Returns TRUE if the value is a number",
+            IsText => "Returns TRUE if the value is text",
+            IsError => "Returns TRUE if the value is any error",
+            IsNa => "Returns TRUE if the value is the #N/A error",
+            VLookup => "Looks up a value in the first column of a table and returns a value in the same row",
+            HLookup => "Looks up a value in the first row of a table and returns a value in the same column",
+            XLookup => "Looks up a value in one range and returns the matching item from another",
+            Match => "Returns the position of a value in a range",
+            Index => "Returns the value at a given row and column of a range",
+            Date => "Builds a date from year, month and day",
+            Time => "Builds a time from hours, minutes and seconds",
+            Year => "Returns the year of a date",
+            Month => "Returns the month of a date (1 to 12)",
+            Day => "Returns the day of the month of a date (1 to 31)",
+            Hour => "Returns the hour of a time (0 to 23)",
+            Minute => "Returns the minute of a time (0 to 59)",
+            Second => "Returns the second of a time (0 to 59)",
+            Weekday => "Returns the day of the week of a date as a number",
+            EDate => "Returns the date a given number of months before or after a date",
+            EOMonth => "Returns the last day of the month a given number of months away",
+            Now => "Returns the current date and time",
+            Today => "Returns the current date",
+            Rand => "Returns a random number between 0 and 1",
+            RandBetween => "Returns a random integer between two numbers",
+            Offset => "Returns a reference shifted from a starting reference",
+            Indirect => "Returns the reference named by a text string",
+            Row => "Returns the row number of a reference",
+            Column => "Returns the column number of a reference",
+            Rows => "Returns the number of rows in a range",
+            Columns => "Returns the number of columns in a range",
+            Substitute => "Replaces occurrences of old text with new text",
+            Find => "Finds text within text (case-sensitive) and returns its position",
+            Search => "Finds text within text (ignoring case, with wildcards) and returns its position",
+            Replace => "Replaces part of text at a given position with new text",
+            TextJoin => "Joins text from values and ranges with a delimiter",
+            Proper => "Capitalizes the first letter of each word",
+            TextBefore => "Returns the text before a delimiter",
+            TextAfter => "Returns the text after a delimiter",
+            Char => "Returns the character for a character code",
+            Code => "Returns the character code of the first character in text",
+            Stdev | StdevS => "Estimates standard deviation from a sample",
+            StdevP => "Returns the standard deviation of an entire population",
+            Var | VarS => "Estimates variance from a sample",
+            VarP => "Returns the variance of an entire population",
+            Percentile | PercentileInc => "Returns the k-th percentile of values, with k from 0 to 1",
+            Quartile | QuartileInc => "Returns a quartile of a set of values",
+            Rank | RankEq => "Returns the rank of a number in a list of numbers",
+            Large => "Returns the k-th largest value",
+            Small => "Returns the k-th smallest value",
+            Correl => "Returns the correlation coefficient of two ranges",
+            Mode | ModeSngl => "Returns the most frequently occurring number",
+            MaxIfs => "Returns the largest value among cells that meet multiple conditions",
+            MinIfs => "Returns the smallest value among cells that meet multiple conditions",
+            Pmt => "Returns the periodic payment for a loan",
+            Pv => "Returns the present value of an investment",
+            Fv => "Returns the future value of an investment",
+            Nper => "Returns the number of periods for an investment",
+            Rate => "Returns the interest rate per period of an annuity",
+            Npv => "Returns the net present value of periodic cash flows",
+            Irr => "Returns the internal rate of return of periodic cash flows",
+            Days => "Returns the number of days between two dates",
+            DateDif => "Returns the difference between two dates in years, months or days",
+            NetworkDays => "Returns the number of working days between two dates",
+            Workday => "Returns the date a given number of working days away",
+            WeekNum => "Returns the week number of a date in the year",
+            Choose => "Returns the value at a given position in a list of values",
+            XMatch => "Returns the position of a value in a range, with flexible matching",
+            Switch => "Compares a value against a list and returns the matching result",
+            Ceiling => "Rounds a number up to the nearest multiple of significance",
+            Floor => "Rounds a number down to the nearest multiple of significance",
+            Trunc => "Truncates a number to a given number of digits",
+            SumSq => "Returns the sum of the squares of numbers",
         }
     }
 }
@@ -563,6 +736,26 @@ fn lookup_approx(target: &Value, cells: impl Iterator<Item = (u32, Value)>, desc
 
 /// Shared implementation for SUMIFS / COUNTIFS / AVERAGEIFS.
 fn multi_criteria(cx: &Ctx, sum_range: Option<RangeRef>, pairs: &[(RangeRef, Criterion)]) -> EvalResult<(f64, u64)> {
+    let mut total = 0.0;
+    let count = scan_criteria(cx, sum_range, pairs, |v| {
+        match v {
+            Value::Number(n) => total += n,
+            Value::Error(e) => return Err(*e),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok((total, count))
+}
+
+/// Visit the cells of `value_range` whose criteria all match (passing each
+/// cell's value to `on_match`); returns how many positions matched.
+fn scan_criteria(
+    cx: &Ctx,
+    value_range: Option<RangeRef>,
+    pairs: &[(RangeRef, Criterion)],
+    mut on_match: impl FnMut(&Value) -> EvalResult<()>,
+) -> EvalResult<u64> {
     let (first, first_crit) = &pairs[0];
     let (rows, cols) = (first.range.rows(), first.range.cols());
     for (r, _) in pairs {
@@ -570,7 +763,7 @@ fn multi_criteria(cx: &Ctx, sum_range: Option<RangeRef>, pairs: &[(RangeRef, Cri
             return Err(ErrorKind::Value);
         }
     }
-    let (mut total, mut count) = (0.0, 0u64);
+    let mut count = 0u64;
     let mut visit = |off_r: u32, off_c: u32| -> EvalResult<()> {
         for (r, crit) in pairs {
             let c = CellRef::new(r.range.start.row + off_r, r.range.start.col + off_c);
@@ -579,13 +772,9 @@ fn multi_criteria(cx: &Ctx, sum_range: Option<RangeRef>, pairs: &[(RangeRef, Cri
             }
         }
         count += 1;
-        if let Some(sr) = sum_range {
+        if let Some(sr) = value_range {
             let c = CellRef::new(sr.range.start.row + off_r, sr.range.start.col + off_c);
-            match cx.value(sr.sheet, c) {
-                Value::Number(n) => total += n,
-                Value::Error(e) => return Err(*e),
-                _ => {}
-            }
+            on_match(cx.value(sr.sheet, c))?;
         }
         Ok(())
     };
@@ -608,7 +797,252 @@ fn multi_criteria(cx: &Ctx, sum_range: Option<RangeRef>, pairs: &[(RangeRef, Cri
             visit(c.row - first.range.start.row, c.col - first.range.start.col)?;
         }
     }
-    Ok((total, count))
+    Ok(count)
+}
+
+/// Parse `(range, criterion)` pairs for the *IFS functions.
+fn criteria_pairs(rest: &[Expr], cx: &Ctx) -> EvalResult<Vec<(RangeRef, Criterion)>> {
+    if rest.is_empty() || !rest.len().is_multiple_of(2) {
+        return Err(ErrorKind::Value);
+    }
+    rest.chunks(2)
+        .map(|pair| Ok((cx.resolve(&pair[0]).unwrap_or(Err(ErrorKind::Value))?, Criterion::new(eval(&pair[1], cx)))))
+        .collect()
+}
+
+/// Non-empty cells of a range in row-major order.
+fn cells_row_major<'c>(cx: &'c Ctx, rr: RangeRef) -> Vec<(CellRef, &'c Value)> {
+    let mut cells: Vec<(CellRef, &Value)> = cx.iter(rr).map(|(c, cell)| (c, &cell.value)).collect();
+    cells.sort_by_key(|(c, _)| (c.row, c.col));
+    cells
+}
+
+/// Numbers the way SUM sees them (see [`for_each_number`]), with ranges read
+/// row by row so order-sensitive functions (MODE, NPV, IRR) match Excel.
+fn collect_numbers(args: &[Expr], cx: &Ctx) -> EvalResult<Vec<f64>> {
+    let mut out = Vec::new();
+    for a in args {
+        if let Some(rr) = cx.resolve(a) {
+            for (_, v) in cells_row_major(cx, rr?) {
+                match v {
+                    Value::Number(n) => out.push(*n),
+                    Value::Error(e) => return Err(*e),
+                    _ => {}
+                }
+            }
+        } else {
+            match eval(a, cx) {
+                Value::Empty => {}
+                v => out.push(v.to_number()?),
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn variance(v: &[f64], sample: bool) -> EvalResult<f64> {
+    if v.len() < if sample { 2 } else { 1 } {
+        return Err(ErrorKind::Div0);
+    }
+    let n = v.len() as f64;
+    let mean = v.iter().sum::<f64>() / n;
+    let ss: f64 = v.iter().map(|x| (x - mean).powi(2)).sum();
+    Ok(ss / if sample { n - 1.0 } else { n })
+}
+
+/// Inclusive percentile with linear interpolation (PERCENTILE.INC).
+fn percentile_inc(mut v: Vec<f64>, k: f64) -> EvalResult<f64> {
+    if v.is_empty() || !(0.0..=1.0).contains(&k) {
+        return Err(ErrorKind::Num);
+    }
+    v.sort_by(f64::total_cmp);
+    let pos = k * (v.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let frac = pos - lo as f64;
+    Ok(match v.get(lo + 1) {
+        Some(hi) => v[lo] + frac * (hi - v[lo]),
+        None => v[lo],
+    })
+}
+
+/// Snap a quotient to the nearest integer when it's within floating-point noise.
+fn snap(q: f64) -> f64 {
+    if (q - q.round()).abs() < 1e-9 { q.round() } else { q }
+}
+
+/// Find a root of `f` near `guess`: Newton's method, falling back to
+/// bisection over a bracket found by scanning plausible rates (> -1).
+fn solve_rate(f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64, guess: f64) -> Option<f64> {
+    let mut r = guess;
+    for _ in 0..100 {
+        let (y, d) = (f(r), df(r));
+        if !y.is_finite() || !d.is_finite() || d == 0.0 {
+            break;
+        }
+        let next = r - y / d;
+        if !next.is_finite() || next <= -1.0 {
+            break;
+        }
+        if (next - r).abs() < 1e-12 * r.abs().max(1.0) {
+            return Some(next);
+        }
+        r = next;
+    }
+    const GRID: [f64; 20] = [-0.9999, -0.999, -0.99, -0.9, -0.7, -0.5, -0.3, -0.2, -0.1, -0.05, -0.01, 0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 10.0, 100.0];
+    let (mut lo, mut hi) = GRID.windows(2).find_map(|w| {
+        let (a, b) = (f(w[0]), f(w[1]));
+        (a.is_finite() && b.is_finite() && a.signum() != b.signum()).then_some((w[0], w[1]))
+    })?;
+    let mut flo = f(lo);
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let fm = f(mid);
+        if fm == 0.0 || (hi - lo).abs() < 1e-15 {
+            return Some(mid);
+        }
+        if fm.signum() == flo.signum() {
+            lo = mid;
+            flo = fm;
+        } else {
+            hi = mid;
+        }
+    }
+    Some((lo + hi) / 2.0)
+}
+
+/// Optional `type` argument of the annuity functions: 0 = end of period, 1 = beginning.
+fn pay_type(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<f64> {
+    Ok(if opt_num(args, i, cx, 0.0)? != 0.0 { 1.0 } else { 0.0 })
+}
+
+/// Serial date with the time of day dropped; #NUM! outside the valid range.
+fn date_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<i64> {
+    let n = num_arg(args, i, cx)?;
+    datetime_from_serial(n).ok_or(ErrorKind::Num)?;
+    Ok(n.floor() as i64)
+}
+
+/// 0 = Sunday … 6 = Saturday.
+fn weekday_of(serial: i64) -> i64 {
+    (serial + 6).rem_euclid(7)
+}
+
+fn holidays(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<std::collections::HashSet<i64>> {
+    let mut set = std::collections::HashSet::new();
+    if let Some(a) = args.get(i) {
+        for_each_number(std::slice::from_ref(a), cx, |n| {
+            set.insert(n.floor() as i64);
+        })?;
+    }
+    Ok(set)
+}
+
+/// One element of a SEARCH pattern.
+#[derive(Copy, Clone, PartialEq)]
+enum Tok {
+    Any,
+    One,
+    Lit(char),
+}
+
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Parse a SEARCH pattern: `*` and `?` are wildcards, `~` escapes the next char.
+fn search_pattern(pat: &str) -> Vec<Tok> {
+    let mut out = Vec::new();
+    let mut it = pat.chars();
+    while let Some(c) = it.next() {
+        out.push(match c {
+            '*' => Tok::Any,
+            '?' => Tok::One,
+            '~' => Tok::Lit(it.next().map_or('~', fold)),
+            c => Tok::Lit(fold(c)),
+        });
+    }
+    out
+}
+
+/// Whether the pattern matches some prefix of `t`.
+fn tokens_match_prefix(p: &[Tok], t: &[char]) -> bool {
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    loop {
+        if pi == p.len() {
+            return true;
+        }
+        if ti < t.len() && (p[pi] == Tok::One || p[pi] == Tok::Lit(t[ti])) {
+            pi += 1;
+            ti += 1;
+        } else if p[pi] == Tok::Any {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(sp) = star
+            && mark < t.len()
+        {
+            pi = sp + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+}
+
+/// CHAR/CODE use the Windows-1252 code page for 128–159.
+const CP1252_HIGH: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™',
+    'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+];
+
+/// Position (offset within `look`) of `target` per XLOOKUP/XMATCH match_mode
+/// (0 exact, -1 exact or next smaller, 1 exact or next larger, 2 wildcard).
+fn xlookup_find(cx: &Ctx, target: &Value, look: RangeRef, mode: i64, reverse: bool) -> EvalResult<Option<u32>> {
+    let vertical = look.range.cols() == 1;
+    if !vertical && look.range.rows() != 1 {
+        return Err(ErrorKind::Value);
+    }
+    let used = cx.clamp_used(look);
+    let mut keys: Vec<(u32, Value)> = used
+        .range
+        .iter()
+        .map(|c| (if vertical { c.row - look.range.start.row } else { c.col - look.range.start.col }, cx.value(look.sheet, c).clone()))
+        .collect();
+    if reverse {
+        keys.reverse();
+    }
+    Ok(match mode {
+        0 => lookup_exact(target, keys.into_iter(), false),
+        2 => lookup_exact(target, keys.into_iter(), true),
+        -1 | 1 => {
+            // Exact match, else next smaller (-1) / next larger (1); data need not be sorted.
+            let mut best: Option<(u32, Value)> = None;
+            let mut exact = None;
+            for (i, v) in keys {
+                if v.is_empty() || std::mem::discriminant(&v) != std::mem::discriminant(target) {
+                    continue;
+                }
+                match compare(&v, target) {
+                    Ordering::Equal => {
+                        exact = Some(i);
+                        break;
+                    }
+                    Ordering::Less if mode == -1 => {
+                        if best.as_ref().is_none_or(|(_, b)| compare(&v, b) == Ordering::Greater) {
+                            best = Some((i, v));
+                        }
+                    }
+                    Ordering::Greater if mode == 1 && best.as_ref().is_none_or(|(_, b)| compare(&v, b) == Ordering::Less) => {
+                        best = Some((i, v));
+                    }
+                    _ => {}
+                }
+            }
+            exact.or(best.map(|(i, _)| i))
+        }
+        _ => return Err(ErrorKind::Value),
+    })
 }
 
 fn date_parts(args: &[Expr], cx: &Ctx) -> EvalResult<crate::datetime::DateTime> {
@@ -986,51 +1420,7 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             let mode = opt_num(args, 4, cx, 0.0)? as i64;
             let reverse = opt_num(args, 5, cx, 1.0)? < 0.0;
             let vertical = look.range.cols() == 1;
-            if !vertical && look.range.rows() != 1 {
-                return Err(ErrorKind::Value);
-            }
-            let used = cx.clamp_used(look);
-            let mut keys: Vec<(u32, Value)> = used
-                .range
-                .iter()
-                .map(|c| (if vertical { c.row - look.range.start.row } else { c.col - look.range.start.col }, cx.value(look.sheet, c).clone()))
-                .collect();
-            if reverse {
-                keys.reverse();
-            }
-            let hit = match mode {
-                0 => lookup_exact(&target, keys.into_iter(), false),
-                2 => lookup_exact(&target, keys.into_iter(), true),
-                -1 | 1 => {
-                    // Exact match, else next smaller (-1) / next larger (1); data need not be sorted.
-                    let mut best: Option<(u32, Value)> = None;
-                    let mut exact = None;
-                    for (i, v) in keys {
-                        if v.is_empty() || std::mem::discriminant(&v) != std::mem::discriminant(&target) {
-                            continue;
-                        }
-                        match compare(&v, &target) {
-                            Ordering::Equal => {
-                                exact = Some(i);
-                                break;
-                            }
-                            Ordering::Less if mode == -1 => {
-                                if best.as_ref().is_none_or(|(_, b)| compare(&v, b) == Ordering::Greater) {
-                                    best = Some((i, v));
-                                }
-                            }
-                            Ordering::Greater if mode == 1
-                                && best.as_ref().is_none_or(|(_, b)| compare(&v, b) == Ordering::Less) => {
-                                    best = Some((i, v));
-                                }
-                            _ => {}
-                        }
-                    }
-                    exact.or(best.map(|(i, _)| i))
-                }
-                _ => return Err(ErrorKind::Value),
-            };
-            match hit {
+            match xlookup_find(cx, &target, look, mode, reverse)? {
                 Some(off) => {
                     let c = if vertical { CellRef::new(ret.range.start.row + off, ret.range.start.col) } else { CellRef::new(ret.range.start.row, ret.range.start.col + off) };
                     cx.value(ret.sheet, c).clone()
@@ -1138,6 +1528,557 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
                 return Err(ErrorKind::Num);
             }
             Value::Number(lo + (random() * (hi - lo + 1.0)).floor())
+        }
+
+        // ---- Text ----
+        Substitute => {
+            arg_count(args, 3, 4)?;
+            let (t, old, new) = (text_arg(args, 0, cx)?, text_arg(args, 1, cx)?, text_arg(args, 2, cx)?);
+            if old.is_empty() {
+                return Ok(Value::Text(t));
+            }
+            match args.get(3) {
+                None => Value::text(t.replace(&*old, &new)),
+                Some(_) => {
+                    let k = num_arg(args, 3, cx)?.trunc();
+                    if k < 1.0 {
+                        return Err(ErrorKind::Value);
+                    }
+                    match t.match_indices(&*old).nth(k as usize - 1) {
+                        Some((i, _)) => Value::text(format!("{}{}{}", &t[..i], new, &t[i + old.len()..])),
+                        None => Value::Text(t),
+                    }
+                }
+            }
+        }
+        Find | Search => {
+            arg_count(args, 2, 3)?;
+            let (needle, hay) = (text_arg(args, 0, cx)?, text_arg(args, 1, cx)?);
+            let start = opt_num(args, 2, cx, 1.0)?.trunc();
+            let hay: Vec<char> = hay.chars().collect();
+            if start < 1.0 || start > hay.len() as f64 + 1.0 {
+                return Err(ErrorKind::Value);
+            }
+            let start = start as usize - 1;
+            let pos = if f == Find {
+                let needle: Vec<char> = needle.chars().collect();
+                (start..=hay.len()).find(|&i| hay[i..].starts_with(&needle))
+            } else {
+                let pat = search_pattern(&needle);
+                let hay: Vec<char> = hay.iter().map(|&c| fold(c)).collect();
+                (start..=hay.len()).find(|&i| tokens_match_prefix(&pat, &hay[i..]))
+            };
+            Value::Number(pos.ok_or(ErrorKind::Value)? as f64 + 1.0)
+        }
+        Replace => {
+            arg_count(args, 4, 4)?;
+            let t = text_arg(args, 0, cx)?;
+            let (start, n) = (num_arg(args, 1, cx)?.trunc(), num_arg(args, 2, cx)?.trunc());
+            let new = text_arg(args, 3, cx)?;
+            if start < 1.0 || n < 0.0 {
+                return Err(ErrorKind::Value);
+            }
+            let skip = start as usize - 1;
+            let mut out: String = t.chars().take(skip).collect();
+            out.push_str(&new);
+            out.extend(t.chars().skip(skip.saturating_add(n as usize)));
+            Value::text(out)
+        }
+        TextJoin => {
+            if args.len() < 3 {
+                return Err(ErrorKind::Value);
+            }
+            let delim = text_arg(args, 0, cx)?;
+            let ignore_empty = eval(&args[1], cx).to_bool()?;
+            const MAX_LEN: usize = 32_767;
+            let mut parts: Vec<Arc<str>> = Vec::new();
+            let mut len = 0;
+            let mut push = |s: Arc<str>| -> EvalResult<()> {
+                if ignore_empty && s.is_empty() {
+                    return Ok(());
+                }
+                len += s.len() + delim.len();
+                if len > MAX_LEN + delim.len() {
+                    return Err(ErrorKind::Value);
+                }
+                parts.push(s);
+                Ok(())
+            };
+            for a in &args[2..] {
+                match cx.resolve(a) {
+                    Some(rr) => {
+                        let rr = rr?;
+                        // Blank cells only matter when kept and separated by a delimiter.
+                        let rr = if ignore_empty || delim.is_empty() { cx.clamp_used(rr) } else { rr };
+                        for c in rr.range.iter() {
+                            push(cx.value(rr.sheet, c).to_text()?)?;
+                        }
+                    }
+                    None => push(eval(a, cx).to_text()?)?,
+                }
+            }
+            Value::text(parts.join(&delim))
+        }
+        Proper => {
+            arg_count(args, 1, 1)?;
+            let t = text_arg(args, 0, cx)?;
+            let mut out = String::with_capacity(t.len());
+            let mut prev_letter = false;
+            for c in t.chars() {
+                if c.is_alphabetic() {
+                    if prev_letter { out.extend(c.to_lowercase()) } else { out.extend(c.to_uppercase()) }
+                    prev_letter = true;
+                } else {
+                    out.push(c);
+                    prev_letter = false;
+                }
+            }
+            Value::text(out)
+        }
+        TextBefore | TextAfter => {
+            arg_count(args, 2, 3)?;
+            let (t, d) = (text_arg(args, 0, cx)?, text_arg(args, 1, cx)?);
+            let k = opt_num(args, 2, cx, 1.0)?.trunc();
+            if k == 0.0 || k.abs() > t.chars().count().max(1) as f64 {
+                return Err(ErrorKind::Value);
+            }
+            let at = if d.is_empty() {
+                // An empty delimiter matches at the very start (or end, counting backwards).
+                if k > 0.0 { 0 } else { t.len() }
+            } else if k > 0.0 {
+                t.match_indices(&*d).nth(k as usize - 1).ok_or(ErrorKind::NA)?.0
+            } else {
+                t.rmatch_indices(&*d).nth((-k) as usize - 1).ok_or(ErrorKind::NA)?.0
+            };
+            Value::text(if f == TextBefore { &t[..at] } else { &t[at + d.len()..] })
+        }
+        Char => {
+            arg_count(args, 1, 1)?;
+            let n = num_arg(args, 0, cx)?.trunc();
+            if !(1.0..=255.0).contains(&n) {
+                return Err(ErrorKind::Value);
+            }
+            let n = n as u8;
+            let c = if (0x80..0xA0).contains(&n) { CP1252_HIGH[n as usize - 0x80] } else { char::from(n) };
+            Value::text(c.to_string())
+        }
+        Code => {
+            arg_count(args, 1, 1)?;
+            let t = text_arg(args, 0, cx)?;
+            let c = t.chars().next().ok_or(ErrorKind::Value)?;
+            let code = match CP1252_HIGH.iter().position(|&x| x == c) {
+                Some(i) => 0x80 + i as u32,
+                None if (c as u32) < 256 => c as u32,
+                None => '?' as u32, // not representable in the code page
+            };
+            Value::Number(code as f64)
+        }
+
+        // ---- Statistics ----
+        Stdev | StdevS | StdevP | Var | VarS | VarP => {
+            if args.is_empty() {
+                return Err(ErrorKind::Value);
+            }
+            let v = collect_numbers(args, cx)?;
+            let var = variance(&v, !matches!(f, StdevP | VarP))?;
+            Value::num(if matches!(f, Stdev | StdevS | StdevP) { var.sqrt() } else { var })
+        }
+        Percentile | PercentileInc | Quartile | QuartileInc => {
+            arg_count(args, 2, 2)?;
+            let v = collect_numbers(&args[..1], cx)?;
+            let k = num_arg(args, 1, cx)?;
+            let k = if matches!(f, Quartile | QuartileInc) {
+                let q = k.trunc();
+                if !(0.0..=4.0).contains(&q) {
+                    return Err(ErrorKind::Num);
+                }
+                q / 4.0
+            } else {
+                k
+            };
+            Value::num(percentile_inc(v, k)?)
+        }
+        Rank | RankEq => {
+            arg_count(args, 2, 3)?;
+            let x = num_arg(args, 0, cx)?;
+            let rr = range_arg(args, 1, cx)?;
+            let ascending = opt_num(args, 2, cx, 0.0)? != 0.0;
+            let (mut found, mut before) = (false, 0u64);
+            for (_, cell) in cx.iter(rr) {
+                if let Value::Number(n) = cell.value {
+                    found |= n == x;
+                    if (ascending && n < x) || (!ascending && n > x) {
+                        before += 1;
+                    }
+                }
+            }
+            if !found {
+                return Err(ErrorKind::NA);
+            }
+            Value::Number(before as f64 + 1.0)
+        }
+        Large | Small => {
+            arg_count(args, 2, 2)?;
+            let mut v = collect_numbers(&args[..1], cx)?;
+            let k = num_arg(args, 1, cx)?.ceil();
+            if k < 1.0 || k > v.len() as f64 {
+                return Err(ErrorKind::Num);
+            }
+            v.sort_by(f64::total_cmp);
+            let k = k as usize;
+            Value::num(if f == Small { v[k - 1] } else { v[v.len() - k] })
+        }
+        Correl => {
+            arg_count(args, 2, 2)?;
+            let (a, b) = (range_arg(args, 0, cx)?, range_arg(args, 1, cx)?);
+            if a.range.cell_count() != b.range.cell_count() {
+                return Err(ErrorKind::NA);
+            }
+            // Pair cells by position (row-major) when the shapes differ but sizes match.
+            let b_at = |c: CellRef| {
+                let i = (c.row - a.range.start.row) as u64 * a.range.cols() as u64 + (c.col - a.range.start.col) as u64;
+                let (r, k) = (i / b.range.cols() as u64, i % b.range.cols() as u64);
+                cx.value(b.sheet, CellRef::new(b.range.start.row + r as u32, b.range.start.col + k as u32))
+            };
+            let mut pairs = Vec::new();
+            for (c, cell) in cx.iter(a) {
+                match (&cell.value, b_at(c)) {
+                    (Value::Error(e), _) | (_, Value::Error(e)) => return Err(*e),
+                    (Value::Number(x), Value::Number(y)) => pairs.push((*x, *y)),
+                    _ => {}
+                }
+            }
+            let n = pairs.len() as f64;
+            if pairs.is_empty() {
+                return Err(ErrorKind::Div0);
+            }
+            let (mx, my) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+            let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+            for (x, y) in &pairs {
+                sxy += (x - mx) * (y - my);
+                sxx += (x - mx).powi(2);
+                syy += (y - my).powi(2);
+            }
+            if sxx == 0.0 || syy == 0.0 {
+                return Err(ErrorKind::Div0);
+            }
+            Value::num(sxy / (sxx * syy).sqrt())
+        }
+        Mode | ModeSngl => {
+            if args.is_empty() {
+                return Err(ErrorKind::Value);
+            }
+            let v = collect_numbers(args, cx)?;
+            let key = |x: f64| (x + 0.0).to_bits(); // +0.0 folds -0 into 0
+            let mut counts = std::collections::HashMap::new();
+            for &x in &v {
+                *counts.entry(key(x)).or_insert(0usize) += 1;
+            }
+            // Ties go to the value that appears first.
+            let mut best: Option<(f64, usize)> = None;
+            for &x in &v {
+                let count = counts[&key(x)];
+                if count > 1 && best.is_none_or(|(_, c)| count > c) {
+                    best = Some((x, count));
+                }
+            }
+            Value::Number(best.ok_or(ErrorKind::NA)?.0)
+        }
+        MaxIfs | MinIfs => {
+            if args.len() < 3 {
+                return Err(ErrorKind::Value);
+            }
+            let target = range_arg(args, 0, cx)?;
+            let pairs = criteria_pairs(&args[1..], cx)?;
+            if target.range.rows() != pairs[0].0.range.rows() || target.range.cols() != pairs[0].0.range.cols() {
+                return Err(ErrorKind::Value);
+            }
+            let mut acc: Option<f64> = None;
+            scan_criteria(cx, Some(target), &pairs, |v| {
+                match v {
+                    Value::Number(n) => acc = Some(acc.map_or(*n, |a| if f == MaxIfs { a.max(*n) } else { a.min(*n) })),
+                    Value::Error(e) => return Err(*e),
+                    _ => {}
+                }
+                Ok(())
+            })?;
+            Value::num(acc.unwrap_or(0.0))
+        }
+
+        // ---- Finance ----
+        Pmt => {
+            arg_count(args, 3, 5)?;
+            let (r, n, pv) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?, num_arg(args, 2, cx)?);
+            let (fv, t) = (opt_num(args, 3, cx, 0.0)?, pay_type(args, 4, cx)?);
+            if n == 0.0 {
+                return Err(ErrorKind::Num);
+            }
+            if r == 0.0 {
+                Value::num(-(pv + fv) / n)
+            } else {
+                let g = (1.0 + r).powf(n);
+                Value::num(-(r * (pv * g + fv)) / ((1.0 + r * t) * (g - 1.0)))
+            }
+        }
+        Pv => {
+            arg_count(args, 3, 5)?;
+            let (r, n, pmt) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?, num_arg(args, 2, cx)?);
+            let (fv, t) = (opt_num(args, 3, cx, 0.0)?, pay_type(args, 4, cx)?);
+            if r == 0.0 {
+                Value::num(-(fv + pmt * n))
+            } else {
+                let g = (1.0 + r).powf(n);
+                Value::num(-(fv + pmt * (1.0 + r * t) * (g - 1.0) / r) / g)
+            }
+        }
+        Fv => {
+            arg_count(args, 3, 5)?;
+            let (r, n, pmt) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?, num_arg(args, 2, cx)?);
+            let (pv, t) = (opt_num(args, 3, cx, 0.0)?, pay_type(args, 4, cx)?);
+            if r == 0.0 {
+                Value::num(-(pv + pmt * n))
+            } else {
+                let g = (1.0 + r).powf(n);
+                Value::num(-(pv * g + pmt * (1.0 + r * t) * (g - 1.0) / r))
+            }
+        }
+        Nper => {
+            arg_count(args, 3, 5)?;
+            let (r, pmt, pv) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?, num_arg(args, 2, cx)?);
+            let (fv, t) = (opt_num(args, 3, cx, 0.0)?, pay_type(args, 4, cx)?);
+            if r == 0.0 {
+                if pmt == 0.0 {
+                    return Err(ErrorKind::Num);
+                }
+                Value::num(-(pv + fv) / pmt)
+            } else {
+                let k = pmt * (1.0 + r * t);
+                let ratio = (k - fv * r) / (k + pv * r);
+                if ratio <= 0.0 || r <= -1.0 {
+                    return Err(ErrorKind::Num);
+                }
+                Value::num(ratio.ln() / (1.0 + r).ln())
+            }
+        }
+        Rate => {
+            arg_count(args, 3, 6)?;
+            let (n, pmt, pv) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?, num_arg(args, 2, cx)?);
+            let (fv, t, guess) = (opt_num(args, 3, cx, 0.0)?, pay_type(args, 4, cx)?, opt_num(args, 5, cx, 0.1)?);
+            if n <= 0.0 {
+                return Err(ErrorKind::Num);
+            }
+            // Balance after n periods; zero at the solution.
+            let f = |r: f64| {
+                if r.abs() < 1e-10 {
+                    return pv + pmt * n + fv;
+                }
+                let g = (1.0 + r).powf(n);
+                pv * g + pmt * (1.0 + r * t) * (g - 1.0) / r + fv
+            };
+            let df = |r: f64| {
+                if r.abs() < 1e-10 {
+                    // Derivative at 0 from the series expansion.
+                    return pv * n + pmt * (n * (n - 1.0) / 2.0 + t * n);
+                }
+                let g = (1.0 + r).powf(n);
+                let dg = n * (1.0 + r).powf(n - 1.0);
+                pv * dg + pmt * (t * (g - 1.0) / r + (1.0 + r * t) * (dg * r - (g - 1.0)) / (r * r))
+            };
+            let r = solve_rate(f, df, guess).ok_or(ErrorKind::Num)?;
+            if f(r).abs() > 1e-6 * (pv.abs() + (pmt * n).abs() + fv.abs()).max(1.0) {
+                return Err(ErrorKind::Num);
+            }
+            Value::num(r)
+        }
+        Npv => {
+            if args.len() < 2 {
+                return Err(ErrorKind::Value);
+            }
+            let r = num_arg(args, 0, cx)?;
+            if r == -1.0 {
+                return Err(ErrorKind::Div0);
+            }
+            let v = collect_numbers(&args[1..], cx)?;
+            Value::num(v.iter().enumerate().map(|(i, x)| x / (1.0 + r).powi(i as i32 + 1)).sum())
+        }
+        Irr => {
+            arg_count(args, 1, 2)?;
+            let v = collect_numbers(&args[..1], cx)?;
+            let guess = opt_num(args, 1, cx, 0.1)?;
+            if !v.iter().any(|&x| x > 0.0) || !v.iter().any(|&x| x < 0.0) {
+                return Err(ErrorKind::Num);
+            }
+            let f = |r: f64| v.iter().enumerate().map(|(i, x)| x / (1.0 + r).powi(i as i32)).sum::<f64>();
+            let df = |r: f64| v.iter().enumerate().map(|(i, x)| -(i as f64) * x / (1.0 + r).powi(i as i32 + 1)).sum::<f64>();
+            let r = solve_rate(f, df, guess).ok_or(ErrorKind::Num)?;
+            if f(r).abs() > 1e-6 * v.iter().map(|x| x.abs()).sum::<f64>() {
+                return Err(ErrorKind::Num);
+            }
+            Value::num(r)
+        }
+
+        // ---- Dates ----
+        Days => {
+            arg_count(args, 2, 2)?;
+            Value::Number((date_arg(args, 0, cx)? - date_arg(args, 1, cx)?) as f64)
+        }
+        DateDif => {
+            arg_count(args, 3, 3)?;
+            let (s, e) = (date_arg(args, 0, cx)?, date_arg(args, 1, cx)?);
+            let unit = text_arg(args, 2, cx)?.to_ascii_uppercase();
+            if s > e {
+                return Err(ErrorKind::Num);
+            }
+            let (a, b) = (datetime_from_serial(s as f64).ok_or(ErrorKind::Num)?, datetime_from_serial(e as f64).ok_or(ErrorKind::Num)?);
+            let months = (b.year - a.year) * 12 + b.month as i64 - a.month as i64 - i64::from(b.day < a.day);
+            Value::Number(match unit.as_str() {
+                "Y" => months.div_euclid(12),
+                "M" => months,
+                "D" => e - s,
+                "YM" => months.rem_euclid(12),
+                // Excel computes MD against the start day in the month before the end
+                // (which can be negative, e.g. Jan 31 → Mar 1 gives -2).
+                "MD" if b.day >= a.day => (b.day - a.day) as i64,
+                "MD" => e - serial_from_parts(b.year, b.month as i64 - 1, a.day as i64) as i64,
+                "YD" => {
+                    let mut anchor = serial_from_parts(b.year, a.month as i64, a.day as i64) as i64;
+                    if anchor > e {
+                        anchor = serial_from_parts(b.year - 1, a.month as i64, a.day as i64) as i64;
+                    }
+                    e - anchor
+                }
+                _ => return Err(ErrorKind::Num),
+            } as f64)
+        }
+        NetworkDays => {
+            arg_count(args, 2, 3)?;
+            let (s, e) = (date_arg(args, 0, cx)?, date_arg(args, 1, cx)?);
+            let hol = holidays(args, 2, cx)?;
+            let (lo, hi) = (s.min(e), s.max(e));
+            let count = (lo..=hi).filter(|&d| !matches!(weekday_of(d), 0 | 6) && !hol.contains(&d)).count() as f64;
+            Value::Number(if e < s { -count } else { count })
+        }
+        Workday => {
+            arg_count(args, 2, 3)?;
+            let mut d = date_arg(args, 0, cx)?;
+            let days = num_arg(args, 1, cx)?.trunc();
+            if days.abs() > 1e6 {
+                return Err(ErrorKind::Num);
+            }
+            let hol = holidays(args, 2, cx)?;
+            let step = if days < 0.0 { -1 } else { 1 };
+            let mut left = days.abs() as i64;
+            while left > 0 {
+                d += step;
+                if !matches!(weekday_of(d), 0 | 6) && !hol.contains(&d) {
+                    left -= 1;
+                }
+            }
+            datetime_from_serial(d as f64).ok_or(ErrorKind::Num)?;
+            Value::Number(d as f64)
+        }
+        WeekNum => {
+            arg_count(args, 1, 2)?;
+            let s = date_arg(args, 0, cx)?;
+            let kind = opt_num(args, 1, cx, 1.0)?.trunc() as i64;
+            let year_start = |y: i64| serial_from_parts(y, 1, 1) as i64;
+            let week = if kind == 21 {
+                // ISO 8601: the week belongs to the year containing its Thursday.
+                let iso_wd = (weekday_of(s) + 6) % 7 + 1; // Monday = 1 … Sunday = 7
+                let thursday = s - iso_wd + 4;
+                let y = datetime_from_serial(thursday as f64).ok_or(ErrorKind::Num)?.year;
+                (thursday - year_start(y)) / 7 + 1
+            } else {
+                let first_day = match kind {
+                    1 | 17 => 0,
+                    2 | 11 => 1,
+                    12..=16 => kind - 10,
+                    _ => return Err(ErrorKind::Num),
+                };
+                let jan1 = year_start(datetime_from_serial(s as f64).ok_or(ErrorKind::Num)?.year);
+                let offset = (weekday_of(jan1) - first_day).rem_euclid(7);
+                (s - jan1 + offset) / 7 + 1
+            };
+            Value::Number(week as f64)
+        }
+
+        // ---- Lookup & logic ----
+        Choose => {
+            if args.len() < 2 {
+                return Err(ErrorKind::Value);
+            }
+            let i = num_arg(args, 0, cx)?.trunc();
+            if i < 1.0 || i >= args.len() as f64 {
+                return Err(ErrorKind::Value);
+            }
+            eval(&args[i as usize], cx)
+        }
+        XMatch => {
+            arg_count(args, 2, 4)?;
+            let target = eval(&args[0], cx);
+            if let Value::Error(e) = target {
+                return Err(e);
+            }
+            let look = range_arg(args, 1, cx)?;
+            let mode = opt_num(args, 2, cx, 0.0)?.trunc() as i64;
+            // Binary search modes (±2) give the same answer on sorted data.
+            let reverse = match opt_num(args, 3, cx, 1.0)?.trunc() as i64 {
+                1 | 2 => false,
+                -1 | -2 => true,
+                _ => return Err(ErrorKind::Value),
+            };
+            let off = xlookup_find(cx, &target, look, mode, reverse)?.ok_or(ErrorKind::NA)?;
+            Value::Number(off as f64 + 1.0)
+        }
+        Switch => {
+            if args.len() < 3 {
+                return Err(ErrorKind::Value);
+            }
+            let v = eval(&args[0], cx);
+            if let Value::Error(e) = v {
+                return Err(e);
+            }
+            let rest = &args[1..];
+            for [value, result] in rest.as_chunks::<2>().0 {
+                let candidate = eval(value, cx);
+                if let Value::Error(e) = candidate {
+                    return Err(e);
+                }
+                if std::mem::discriminant(&candidate) == std::mem::discriminant(&v) && compare(&v, &candidate) == Ordering::Equal {
+                    return Ok(eval(result, cx));
+                }
+            }
+            match rest.len() % 2 {
+                1 => eval(&rest[rest.len() - 1], cx),
+                _ => Value::Error(ErrorKind::NA),
+            }
+        }
+
+        // ---- Math ----
+        Ceiling | Floor => {
+            arg_count(args, 2, 2)?;
+            let (n, sig) = (num_arg(args, 0, cx)?, num_arg(args, 1, cx)?);
+            if n == 0.0 {
+                return Ok(Value::Number(0.0));
+            }
+            if sig == 0.0 {
+                return if f == Ceiling { Ok(Value::Number(0.0)) } else { Err(ErrorKind::Div0) };
+            }
+            if n > 0.0 && sig < 0.0 {
+                return Err(ErrorKind::Num);
+            }
+            let q = snap(n / sig);
+            Value::num(if f == Ceiling { q.ceil() } else { q.floor() } * sig)
+        }
+        Trunc => {
+            arg_count(args, 1, 2)?;
+            let n = num_arg(args, 0, cx)?;
+            round_to(n, opt_num(args, 1, cx, 0.0)?, f64::trunc)
+        }
+        SumSq => {
+            let mut t = 0.0;
+            for_each_number(args, cx, |n| t += n * n)?;
+            Value::num(t)
         }
     })
 }
