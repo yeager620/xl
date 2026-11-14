@@ -10,6 +10,7 @@ pub mod format;
 pub mod formula;
 pub mod input;
 pub mod pivot;
+pub mod solver;
 pub mod store;
 pub mod style;
 pub mod value;
