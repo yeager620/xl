@@ -314,6 +314,28 @@ fn write_chart(ws: &mut Worksheet, wb: &Workbook, home: xl_engine::SheetId, char
     Ok(())
 }
 
+/// Runs of consecutive lines at each outline level, outer levels first:
+/// grouping each run once per level reproduces the levels.
+fn outline_runs(levels: &std::collections::BTreeMap<u32, u8>) -> Vec<(u32, u32)> {
+    let deepest = levels.values().copied().max().unwrap_or(0);
+    let mut out = Vec::new();
+    for level in 1..=deepest {
+        let mut run: Option<(u32, u32)> = None;
+        for (&i, _) in levels.iter().filter(|(_, l)| **l >= level) {
+            run = match run {
+                Some((a, b)) if i == b + 1 => Some((a, i)),
+                Some(r) => {
+                    out.push(r);
+                    Some((i, i))
+                }
+                None => Some((i, i)),
+            };
+        }
+        out.extend(run);
+    }
+    out
+}
+
 fn result_text(v: &Value) -> String {
     match v {
         Value::Number(n) => precise(*n),
@@ -366,6 +388,12 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         }
         for &col in &layout.hidden_cols {
             ws.set_column_hidden(col as u16).map_err(err)?;
+        }
+        for (a, b) in outline_runs(&layout.row_levels) {
+            ws.group_rows(a, b).map_err(err)?;
+        }
+        for (a, b) in outline_runs(&layout.col_levels) {
+            ws.group_columns(a as u16, b as u16).map_err(err)?;
         }
         if layout.freeze != (0, 0) {
             ws.set_freeze_panes(layout.freeze.0, layout.freeze.1 as u16).map_err(err)?;

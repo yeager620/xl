@@ -190,4 +190,4 @@ Checklist (tick as each lands with tests):
 - [ ] Pivot tables (field panel, sum/count/avg/min/max, refresh)
 - [ ] Sparklines (line/column/win-loss) + xlsx
 - [ ] Goal Seek; Solver (min/max/target, constraints)
-- [ ] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx
+- [x] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx

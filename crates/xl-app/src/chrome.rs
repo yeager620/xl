@@ -628,6 +628,8 @@ impl Spreadsheet {
                 items.push(Some((format!("Insert {rows} below"), "", |s, _, _| s.insert_rows(true))));
                 items.push(Some((format!("Delete {rows}"), "Ctrl+-", |s, _, _| s.delete_rows())));
                 items.push(None);
+                items.push(Some(("Group".into(), "Alt+Shift+Right", |s, _, _| s.group(false))));
+                items.push(Some(("Ungroup".into(), "Alt+Shift+Left", |s, _, _| s.group(true))));
                 items.push(Some(("Hide".into(), "", |s, _, _| s.set_hidden(true, true))));
                 items.push(Some(("Unhide".into(), "", |s, _, _| s.set_hidden(true, false))));
                 items.push(Some(("Fit row height".into(), "", |s, w, _| s.autofit_row(s.active.row, w))));
@@ -637,6 +639,8 @@ impl Spreadsheet {
                 items.push(Some((format!("Insert {cols} right"), "", |s, _, _| s.insert_cols(true))));
                 items.push(Some((format!("Delete {cols}"), "Ctrl+-", |s, _, _| s.delete_cols())));
                 items.push(None);
+                items.push(Some(("Group".into(), "Alt+Shift+Right", |s, _, _| s.group(false))));
+                items.push(Some(("Ungroup".into(), "Alt+Shift+Left", |s, _, _| s.group(true))));
                 items.push(Some(("Hide".into(), "", |s, _, _| s.set_hidden(false, true))));
                 items.push(Some(("Unhide".into(), "", |s, _, _| s.set_hidden(false, false))));
                 items.push(Some(("Autofit column width".into(), "", |s, w, _| s.autofit(s.active.col, w))));

@@ -16,6 +16,8 @@ pub const DEF_COL_W: f64 = 100.0;
 pub const MIN_ROW_H: f64 = 8.0;
 const MIN_COL_W: f64 = 28.0;
 pub const HEADER_W: f64 = 46.0;
+/// Width of one outline level in the grouping gutter.
+pub const OUTLINE_STEP: f64 = 14.0;
 pub const HEADER_H: f64 = 22.0;
 pub const CELL_PAD: f64 = 6.0;
 pub const CELL_FONT: f32 = 14.0;
@@ -391,6 +393,23 @@ impl Spreadsheet {
     // the top-left of the cell area; frozen rows/columns stay put and the rest
     // scrolls by (scroll_x, scroll_y).
 
+    /// Width of the row-header strip, plus the outline gutter when rows are grouped.
+    pub(crate) fn hw(&self) -> f64 {
+        HEADER_W + self.outline_levels().0 as f64 * OUTLINE_STEP
+    }
+
+    /// Height of the column-header strip, plus the outline gutter when columns are grouped.
+    pub(crate) fn hh(&self) -> f64 {
+        HEADER_H + self.outline_levels().1 as f64 * OUTLINE_STEP
+    }
+
+    /// Deepest row and column outline levels on this sheet (0 = no groups).
+    pub(crate) fn outline_levels(&self) -> (u8, u8) {
+        let l = self.wb.layout(self.cur);
+        let deepest = |m: &std::collections::BTreeMap<u32, u8>| m.values().copied().max().map_or(0, |d| d + 1);
+        (deepest(&l.row_levels), deepest(&l.col_levels))
+    }
+
     pub(crate) fn col_w(&self, c: u32) -> f64 {
         let l = self.wb.layout(self.cur);
         if l.hidden_cols.contains(&c) { 0.0 } else { l.col_widths.get(&c).copied().unwrap_or(DEF_COL_W) }
@@ -461,11 +480,11 @@ impl Spreadsheet {
     }
 
     pub(crate) fn grid_w(&self) -> f64 {
-        (f64::from(self.viewport.size.width) - HEADER_W).max(0.0)
+        (f64::from(self.viewport.size.width) - self.hw()).max(0.0)
     }
 
     pub(crate) fn grid_h(&self) -> f64 {
-        (f64::from(self.viewport.size.height) - HEADER_H).max(0.0)
+        (f64::from(self.viewport.size.height) - self.hh()).max(0.0)
     }
 
     /// Rows that fit in the scrolling part of the grid (for Page Up/Down).
@@ -504,7 +523,7 @@ impl Spreadsheet {
         let (vw, vh) = (f64::from(self.viewport.size.width), f64::from(self.viewport.size.height));
         let (fw, fh) = self.frozen_size();
         // Scrollbars run along the scrolling part only.
-        let (gx, gy, gw, gh) = (ox + HEADER_W + fw, oy + HEADER_H + fh, self.grid_w() - fw, self.grid_h() - fh);
+        let (gx, gy, gw, gh) = (ox + self.hw() + fw, oy + self.hh() + fh, self.grid_w() - fw, self.grid_h() - fh);
         let (cw, ch) = self.content_size();
         let wide = self.scroll_hover == Some(axis) || matches!(self.drag, Some(Drag::Scroll { axis: a, .. }) if a == axis);
         let thickness = if wide { 9.0 } else { 5.0 };
@@ -527,9 +546,9 @@ impl Spreadsheet {
     fn scrollbar_at(&self, pos: Point<Pixels>) -> Option<Axis> {
         let (x, y) = (f64::from(pos.x - self.viewport.origin.x), f64::from(pos.y - self.viewport.origin.y));
         let (vw, vh) = (f64::from(self.viewport.size.width), f64::from(self.viewport.size.height));
-        if x >= vw - SCROLLBAR_HIT && x <= vw && y >= HEADER_H && y <= vh - SCROLLBAR_HIT {
+        if x >= vw - SCROLLBAR_HIT && x <= vw && y >= self.hh() && y <= vh - SCROLLBAR_HIT {
             Some(Axis::Vertical)
-        } else if y >= vh - SCROLLBAR_HIT && y <= vh && x >= HEADER_W && x <= vw - SCROLLBAR_HIT {
+        } else if y >= vh - SCROLLBAR_HIT && y <= vh && x >= self.hw() && x <= vw - SCROLLBAR_HIT {
             Some(Axis::Horizontal)
         } else {
             None
@@ -543,13 +562,13 @@ impl Spreadsheet {
         let (fw, fh) = self.frozen_size();
         match axis {
             Axis::Vertical => {
-                let gy = f64::from(self.viewport.origin.y) + HEADER_H + fh;
+                let gy = f64::from(self.viewport.origin.y) + self.hh() + fh;
                 let gh = self.grid_h() - fh;
                 let track = (gh - t.h).max(1.0);
                 self.scroll_y = (((edge - gy) / track).clamp(0.0, 1.0) * (ch - gh)).clamp(0.0, self.max_scroll_y());
             }
             Axis::Horizontal => {
-                let gx = f64::from(self.viewport.origin.x) + HEADER_W + fw;
+                let gx = f64::from(self.viewport.origin.x) + self.hw() + fw;
                 let gw = self.grid_w() - fw;
                 let track = (gw - t.w).max(1.0);
                 self.scroll_x = (((edge - gx) / track).clamp(0.0, 1.0) * (cw - gw)).clamp(0.0, self.max_scroll_x());
@@ -589,8 +608,8 @@ impl Spreadsheet {
         if x < 0.0 || y < 0.0 || x > f64::from(self.viewport.size.width) || y > f64::from(self.viewport.size.height) {
             return None;
         }
-        let (gx, gy) = (x - HEADER_W, y - HEADER_H);
-        Some(match (x < HEADER_W, y < HEADER_H) {
+        let (gx, gy) = (x - self.hw(), y - self.hh());
+        Some(match (x < self.hw(), y < self.hh()) {
             (true, true) => Hit::Corner,
             (false, true) => {
                 let col = self.col_at_grid(gx);
@@ -1666,7 +1685,7 @@ impl Spreadsheet {
         } else if self.edit.is_some() {
             self.key_editing(key, ctrl, m.shift, m.alt)
         } else {
-            self.key_navigating(key, ctrl, m.shift, cx)
+            self.key_navigating(key, ctrl, m.shift, m.alt, cx)
         };
         if handled {
             cx.stop_propagation();
@@ -1845,7 +1864,7 @@ impl Spreadsheet {
         e.cursor += s.len();
     }
 
-    fn key_navigating(&mut self, key: &str, ctrl: bool, shift: bool, cx: &mut Context<Self>) -> bool {
+    fn key_navigating(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool, cx: &mut Context<Self>) -> bool {
         let page = self.visible_rows() as i64;
         // Excel's number-format shortcuts (Ctrl+Shift+1/3/4/5/`).
         if ctrl && shift {
@@ -1863,6 +1882,8 @@ impl Spreadsheet {
             }
         }
         match (key, ctrl) {
+            ("right", false) if shift && alt => self.group(false),
+            ("left", false) if shift && alt => self.group(true),
             ("up", false) => self.move_by(-1, 0, shift),
             ("down", false) => self.move_by(1, 0, shift),
             ("left", false) => self.move_by(0, -1, shift),
@@ -1954,6 +1975,11 @@ impl Spreadsheet {
                 len / 2.0
             };
             self.drag = Some(Drag::Scroll { axis, grab });
+            cx.notify();
+            return;
+        }
+        if let Some(action) = self.outline_button_at(ev.position) {
+            self.outline_click(action);
             cx.notify();
             return;
         }
@@ -2150,8 +2176,8 @@ impl Spreadsheet {
             Drag::Fill { src } => {
                 let vp = self.viewport;
                 let p = point(
-                    ev.position.x.clamp(vp.origin.x + px(HEADER_W as f32 + 1.), vp.origin.x + vp.size.width - px(1.)),
-                    ev.position.y.clamp(vp.origin.y + px(HEADER_H as f32 + 1.), vp.origin.y + vp.size.height - px(1.)),
+                    ev.position.x.clamp(vp.origin.x + px(self.hw() as f32 + 1.), vp.origin.x + vp.size.width - px(1.)),
+                    ev.position.y.clamp(vp.origin.y + px(self.hh() as f32 + 1.), vp.origin.y + vp.size.height - px(1.)),
                 );
                 if let Some(Hit::Cell(c)) = self.hit_test(p) {
                     self.fill_target = Some(self.fill_target_for(src, c));
@@ -2161,8 +2187,8 @@ impl Spreadsheet {
             Drag::Select | Drag::Point => {
                 let vp = self.viewport;
                 let p = point(
-                    ev.position.x.clamp(vp.origin.x + px(HEADER_W as f32 + 1.), vp.origin.x + vp.size.width - px(1.)),
-                    ev.position.y.clamp(vp.origin.y + px(HEADER_H as f32 + 1.), vp.origin.y + vp.size.height - px(1.)),
+                    ev.position.x.clamp(vp.origin.x + px(self.hw() as f32 + 1.), vp.origin.x + vp.size.width - px(1.)),
+                    ev.position.y.clamp(vp.origin.y + px(self.hh() as f32 + 1.), vp.origin.y + vp.size.height - px(1.)),
                 );
                 if let Some(Hit::Cell(c)) = self.hit_test(p) {
                     if matches!(drag, Drag::Point) {
@@ -2183,8 +2209,8 @@ impl Spreadsheet {
         }
         let sel = self.selection();
         let end = self.wb.layout(self.cur).merge_at(sel.end).map_or(sel.end, |m| m.end);
-        let x = f64::from(self.viewport.origin.x) + HEADER_W + self.grid_x(end.col) + self.col_w(end.col);
-        let y = f64::from(self.viewport.origin.y) + HEADER_H + self.grid_y(end.row) + self.row_h(end.row);
+        let x = f64::from(self.viewport.origin.x) + self.hw() + self.grid_x(end.col) + self.col_w(end.col);
+        let y = f64::from(self.viewport.origin.y) + self.hh() + self.grid_y(end.row) + self.row_h(end.row);
         (f64::from(pos.x) - x).abs() <= 5.0 && (f64::from(pos.y) - y).abs() <= 5.0
     }
 

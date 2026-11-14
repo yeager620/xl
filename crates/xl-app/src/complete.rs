@@ -139,8 +139,8 @@ impl Spreadsheet {
         let e = self.edit.as_ref().filter(|e| e.at.sheet == self.cur)?;
         let t = self.theme;
         let c = e.at.cell;
-        let x = f64::from(self.viewport.origin.x) + crate::app::HEADER_W + self.grid_x(c.col);
-        let y = f64::from(self.viewport.origin.y) + crate::app::HEADER_H + self.grid_y(c.row) + self.row_h(c.row).max(crate::app::ROW_H) + 3.0;
+        let x = f64::from(self.viewport.origin.x) + self.hw() + self.grid_x(c.col);
+        let y = f64::from(self.viewport.origin.y) + self.hh() + self.grid_y(c.row) + self.row_h(c.row).max(crate::app::ROW_H) + 3.0;
         let pos = gpui::point(px(x as f32), px(y as f32));
         let panel = || {
             div()

@@ -466,3 +466,29 @@ fn charts_roundtrip_through_xlsx() {
     assert_eq!(data.categories, ["Jan", "Feb", "Mar"]);
     assert_eq!(data.series[1], ("Costs".to_string(), vec![Some(4.0), Some(6.0), Some(5.0)]));
 }
+
+#[test]
+fn outline_levels_roundtrip_through_xlsx() {
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    wb.set_input(Addr::new(s, CellRef::new(0, 0)), "x").unwrap();
+    {
+        let l = wb.layout_mut(s).unwrap();
+        for r in 1..=6 {
+            l.row_levels.insert(r, 1);
+        }
+        for r in 2..=3 {
+            l.row_levels.insert(r, 2);
+        }
+        l.hidden_rows.extend(2..=3);
+        l.col_levels.insert(4, 1);
+        l.col_levels.insert(5, 1);
+    }
+    let p = tmp("outline.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap().workbook;
+    let l = back.layout(back.sheet_ids()[0]);
+    assert_eq!(l.row_levels, wb.layout(s).row_levels);
+    assert_eq!(l.col_levels, wb.layout(s).col_levels);
+    assert_eq!(l.hidden_rows, wb.layout(s).hidden_rows);
+}

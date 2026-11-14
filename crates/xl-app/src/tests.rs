@@ -614,7 +614,7 @@ fn right_click_row_header_opens_row_menu(cx: &mut TestAppContext) {
     let header = view.read_with(cx, |s, _| {
         let vp = s.viewport;
         // Row 6's header: left gutter, 5 rows down from the top of the grid.
-        point(vp.origin.x + px(10.), vp.origin.y + px((crate::app::HEADER_H + crate::app::ROW_H * 5.5) as f32))
+        point(vp.origin.x + px(10.), vp.origin.y + px((s.hh() + crate::app::ROW_H * 5.5) as f32))
     });
     cx.simulate_mouse_down(header, MouseButton::Right, Modifiers::none());
     view.read_with(cx, |s, _| {
@@ -857,8 +857,8 @@ fn filter_hides_rows_and_undoes(cx: &mut TestAppContext) {
         let f = s.wb.layout(s.cur).filter.clone().expect("filter on");
         assert_eq!(f.range, xl_engine::Range::new(CellRef::parse("F1").unwrap(), CellRef::parse("I6").unwrap()));
         // The Team column's dropdown, at the right edge of G1.
-        let x = f64::from(s.viewport.origin.x) + crate::app::HEADER_W + s.grid_x(6) + s.col_w(6) - 8.0;
-        let y = f64::from(s.viewport.origin.y) + crate::app::HEADER_H + s.grid_y(0) + 10.0;
+        let x = f64::from(s.viewport.origin.x) + s.hw() + s.grid_x(6) + s.col_w(6) - 8.0;
+        let y = f64::from(s.viewport.origin.y) + s.hh() + s.grid_y(0) + 10.0;
         gpui::point(gpui::px(x as f32), gpui::px(y as f32))
     });
     cx.simulate_click(button, gpui::Modifiers::none());
@@ -883,8 +883,8 @@ fn filter_hides_rows_and_undoes(cx: &mut TestAppContext) {
 fn cell_point(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, a1: &str, dx: f64, dy: f64) -> gpui::Point<gpui::Pixels> {
     let c = CellRef::parse(a1).unwrap();
     view.read_with(cx, |s, _| {
-        let x = f64::from(s.viewport.origin.x) + crate::app::HEADER_W + s.grid_x(c.col) + dx;
-        let y = f64::from(s.viewport.origin.y) + crate::app::HEADER_H + s.grid_y(c.row) + dy;
+        let x = f64::from(s.viewport.origin.x) + s.hw() + s.grid_x(c.col) + dx;
+        let y = f64::from(s.viewport.origin.y) + s.hh() + s.grid_y(c.row) + dy;
         gpui::point(gpui::px(x as f32), gpui::px(y as f32))
     })
 }
@@ -1116,4 +1116,48 @@ fn remove_duplicates_and_split_text(cx: &mut TestAppContext) {
     view.update(cx, |s, _| s.text_to_columns(crate::data::Delimiter::Auto));
     assert_eq!([val(&view, cx, "K1"), val(&view, cx, "L1"), val(&view, cx, "M1")], [Value::text("Ada Lovelace"), Value::Number(1815.0), Value::text("London, UK")]);
     assert_eq!(val(&view, cx, "M2"), Value::text("Maida Vale"));
+}
+
+#[gpui::test]
+fn group_collapse_and_expand_rows(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    use crate::outline::OutlineAction;
+    let (view, cx) = setup(cx);
+    // Group the item rows (4-6), then rows 4-5 again (level 2).
+    go(&view, cx, "A4");
+    cx.simulate_keystrokes("shift-down shift-down alt-shift-right");
+    go(&view, cx, "A4");
+    cx.simulate_keystrokes("shift-down alt-shift-right");
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.outline_runs(true), vec![(1, 3, 5), (2, 3, 4)]);
+        assert_eq!(s.hw(), crate::app::HEADER_W + 3.0 * crate::app::OUTLINE_STEP, "two levels of groups: level buttons 1-3, like Excel");
+    });
+    // Click the outer group's − button (beside row 7): rows 4-6 collapse.
+    let button = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, want: &str| {
+        view.read_with(cx, |s, _| {
+            let (b, _, label) = s.outline_buttons().into_iter().find(|(_, a, _)| *a == OutlineAction::Toggle { rows: true, start: 3, end: 5 }).unwrap();
+            assert_eq!(label, want);
+            b.center()
+        })
+    };
+    let minus = button(&view, cx, "−");
+    cx.simulate_click(minus, Modifiers::none());
+    view.read_with(cx, |s, _| assert!((3..=5).all(|r| s.row_h(r) == 0.0)));
+    // The button moved up with the collapsed rows and now shows +.
+    let plus = button(&view, cx, "+");
+    cx.simulate_click(plus, Modifiers::none());
+    view.read_with(cx, |s, _| assert!((3..=5).all(|r| s.row_h(r) > 0.0)));
+    // Level 2 button: show level-1 detail only, hiding level-2 rows.
+    view.update(cx, |s, _| s.outline_click(OutlineAction::Level { rows: true, level: 2 }));
+    view.read_with(cx, |s, _| {
+        assert_eq!((s.row_h(3), s.row_h(4), s.row_h(5) > 0.0), (0.0, 0.0, true));
+    });
+    // Ungroup everything; collapsed rows come back.
+    go(&view, cx, "A4");
+    cx.simulate_keystrokes("shift-down shift-down alt-shift-left alt-shift-left");
+    view.read_with(cx, |s, _| {
+        assert!(s.outline_runs(true).is_empty());
+        assert_eq!(s.hw(), crate::app::HEADER_W);
+        assert!((3..=5).all(|r| s.row_h(r) > 0.0));
+    });
 }

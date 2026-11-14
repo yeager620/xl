@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window, point, px, size};
 
-use crate::app::{CELL_FONT, CELL_PAD, EditMode, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
+use crate::app::{CELL_FONT, CELL_PAD, EditMode, ROW_H, Spreadsheet};
 
 fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
@@ -178,8 +178,8 @@ impl EntityInputHandler for Spreadsheet {
         let e = self.edit.as_ref().filter(|e| e.at.sheet == self.cur)?;
         let prefix = &e.text[..utf16_to_byte(&e.text, range.start)];
         let width = crate::paint::shape(window, prefix.to_string(), crate::paint::cell_font(), self.theme.ink, CELL_FONT).width;
-        let x = f64::from(element.origin.x) + HEADER_W + self.grid_x(e.at.cell.col) + CELL_PAD;
-        let y = f64::from(element.origin.y) + HEADER_H + self.grid_y(e.at.cell.row) + (self.row_h(e.at.cell.row) - ROW_H).max(0.0);
+        let x = f64::from(element.origin.x) + self.hw() + self.grid_x(e.at.cell.col) + CELL_PAD;
+        let y = f64::from(element.origin.y) + self.hh() + self.grid_y(e.at.cell.row) + (self.row_h(e.at.cell.row) - ROW_H).max(0.0);
         Some(Bounds::new(point(px(x as f32) + width, px(y as f32)), size(px(1.), px(ROW_H as f32))))
     }
 

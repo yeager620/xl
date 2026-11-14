@@ -8,23 +8,23 @@ use xl_engine::chart::{Chart, ChartKind, ChartSeries};
 use xl_engine::formula::parse_formula;
 use xl_engine::{CellRef, Range, Value, quote_sheet_name};
 
-use crate::app::{Field, HEADER_H, HEADER_W, Spreadsheet, absolute_range};
+use crate::app::{Field, Spreadsheet, absolute_range};
 
 const DEFAULT_SIZE: (f64, f64) = (480.0, 288.0);
 
 impl Spreadsheet {
     /// Screen position and size of a chart: (x, y, w, h) in window pixels.
     pub(crate) fn chart_rect(&self, chart: &Chart) -> (f64, f64, f64, f64) {
-        let x = f64::from(self.viewport.origin.x) + HEADER_W + self.grid_x(chart.anchor.col) + chart.offset.0;
-        let y = f64::from(self.viewport.origin.y) + HEADER_H + self.grid_y(chart.anchor.row) + chart.offset.1;
+        let x = f64::from(self.viewport.origin.x) + self.hw() + self.grid_x(chart.anchor.col) + chart.offset.0;
+        let y = f64::from(self.viewport.origin.y) + self.hh() + self.grid_y(chart.anchor.row) + chart.offset.1;
         (x, y, chart.size.0, chart.size.1)
     }
 
     /// The topmost chart under a window position.
     pub(crate) fn chart_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let (px, py) = (f64::from(pos.x), f64::from(pos.y));
-        let grid_top = f64::from(self.viewport.origin.y) + HEADER_H;
-        let grid_left = f64::from(self.viewport.origin.x) + HEADER_W;
+        let grid_top = f64::from(self.viewport.origin.y) + self.hh();
+        let grid_left = f64::from(self.viewport.origin.x) + self.hw();
         if px < grid_left || py < grid_top {
             return None;
         }
@@ -146,8 +146,8 @@ impl Spreadsheet {
     /// Where a chart lands when its top-left corner is dragged to window
     /// position (x, y): the cell under it and the offset inside that cell.
     pub(crate) fn chart_anchor_at(&self, x: f64, y: f64) -> (CellRef, (f64, f64)) {
-        let gx = (x - f64::from(self.viewport.origin.x) - HEADER_W).max(0.0);
-        let gy = (y - f64::from(self.viewport.origin.y) - HEADER_H).max(0.0);
+        let gx = (x - f64::from(self.viewport.origin.x) - self.hw()).max(0.0);
+        let gy = (y - f64::from(self.viewport.origin.y) - self.hh()).max(0.0);
         let cell = CellRef::new(self.row_at_grid(gy), self.col_at_grid(gx));
         (cell, ((gx - self.grid_x(cell.col)).max(0.0), (gy - self.grid_y(cell.row)).max(0.0)))
     }

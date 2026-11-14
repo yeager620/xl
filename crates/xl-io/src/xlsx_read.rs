@@ -584,6 +584,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         {
                             l.hidden_rows.insert(row);
                         }
+                        if let Some(level) = attr(e, "outlineLevel").and_then(|s| s.parse::<u8>().ok()).filter(|&l| l > 0)
+                            && let Some(l) = wb.layout_mut(cx.id)
+                        {
+                            l.row_levels.insert(row, level.min(7));
+                        }
                     }
                     "conditionalFormatting" => {
                         cf_ranges = attr(e, "sqref").map(|s| s.split_whitespace().filter_map(parse_range).collect()).unwrap_or_default();
@@ -693,6 +698,15 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         let min: u32 = attr(e, "min").and_then(|s| s.parse().ok()).unwrap_or(1);
                         let max: u32 = attr(e, "max").and_then(|s| s.parse().ok()).unwrap_or(min);
                         let custom = attr(e, "customWidth").is_some_and(|s| s == "1" || s == "true");
+                        if let Some(level) = attr(e, "outlineLevel").and_then(|s| s.parse::<u8>().ok()).filter(|&l| l > 0)
+                            && max >= min
+                            && max - min < 16_384
+                            && let Some(l) = wb.layout_mut(cx.id)
+                        {
+                            for c in min - 1..max.min(MAX_COLS) {
+                                l.col_levels.insert(c, level.min(7));
+                            }
+                        }
                         if attr(e, "hidden").is_some_and(|s| s == "1" || s == "true")
                             && max >= min
                             && let Some(l) = wb.layout_mut(cx.id)

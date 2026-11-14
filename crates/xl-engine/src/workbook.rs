@@ -57,6 +57,9 @@ pub struct SheetLayout {
     pub cond: Vec<crate::cond::CondFormat>,
     /// Charts, back to front.
     pub charts: Vec<crate::chart::Chart>,
+    /// Outline (grouping) level of grouped rows and columns, from 1.
+    pub row_levels: BTreeMap<u32, u8>,
+    pub col_levels: BTreeMap<u32, u8>,
 }
 
 /// A filter on a range whose first row holds the headers.
@@ -79,12 +82,15 @@ impl SheetLayout {
         let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
         let shift_keys = |m: &mut BTreeMap<u32, f64>| *m = std::mem::take(m).into_iter().filter_map(|(k, v)| Some((op.map_pos(k)?, v))).collect();
         let shift_set = |m: &mut BTreeSet<u32>| *m = std::mem::take(m).into_iter().filter_map(|k| op.map_pos(k)).collect();
+        let shift_levels = |m: &mut BTreeMap<u32, u8>| *m = std::mem::take(m).into_iter().filter_map(|(k, v)| Some((op.map_pos(k)?, v))).collect();
         if rows {
             shift_keys(&mut self.row_heights);
             shift_set(&mut self.hidden_rows);
+            shift_levels(&mut self.row_levels);
         } else {
             shift_keys(&mut self.col_widths);
             shift_set(&mut self.hidden_cols);
+            shift_levels(&mut self.col_levels);
         }
         self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
         if rows {

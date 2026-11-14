@@ -10,6 +10,7 @@ mod fill;
 mod find;
 mod ime;
 mod lifecycle;
+mod outline;
 mod palette;
 mod paint;
 mod refs;

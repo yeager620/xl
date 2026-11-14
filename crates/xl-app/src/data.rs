@@ -187,13 +187,13 @@ impl Spreadsheet {
     pub(crate) fn filter_button_at(&self, pos: gpui::Point<gpui::Pixels>) -> Option<u32> {
         let f = self.wb.layout(self.cur).filter.as_ref()?;
         let r = f.range.start.row;
-        let gy = f64::from(self.viewport.origin.y) + crate::app::HEADER_H + self.grid_y(r);
+        let gy = f64::from(self.viewport.origin.y) + self.hh() + self.grid_y(r);
         let (x, y) = (f64::from(pos.x), f64::from(pos.y));
         if y < gy || y > gy + self.row_h(r) {
             return None;
         }
         (f.range.start.col..=f.range.end.col).find(|&c| {
-            let right = f64::from(self.viewport.origin.x) + crate::app::HEADER_W + self.grid_x(c) + self.col_w(c);
+            let right = f64::from(self.viewport.origin.x) + self.hw() + self.grid_x(c) + self.col_w(c);
             x >= right - FILTER_BUTTON - 3.0 && x <= right
         })
     }

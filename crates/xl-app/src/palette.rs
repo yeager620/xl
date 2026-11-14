@@ -98,6 +98,8 @@ pub fn commands() -> Vec<Command> {
         cmd!("Freeze top row", "", |s, w, cx| s.set_freeze((1, 0))),
         cmd!("Freeze first column", "", |s, w, cx| s.set_freeze((0, 1))),
         cmd!("Unfreeze panes", "", |s, w, cx| s.set_freeze((0, 0))),
+        cmd!("Group", "Alt+Shift+Right", |s, w, cx| s.group(false)),
+        cmd!("Ungroup", "Alt+Shift+Left", |s, w, cx| s.group(true)),
         cmd!("Hide rows", "", |s, w, cx| s.set_hidden(true, true)),
         cmd!("Unhide rows", "", |s, w, cx| s.set_hidden(true, false)),
         cmd!("Hide columns", "", |s, w, cx| s.set_hidden(false, true)),

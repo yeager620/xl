@@ -8,7 +8,7 @@ use gpui::{
 use xl_engine::style::luminance;
 use xl_engine::{CellRef, FmtColor, HAlign, LineStyle, MAX_COLS, MAX_ROWS, Range, Rgb, Style, VAlign, Value, col_name};
 
-use crate::app::{Axis, CELL_FONT, CELL_PAD, Drag, HEADER_FONT, HEADER_H, HEADER_W, ROW_H, Spreadsheet};
+use crate::app::{Axis, CELL_FONT, CELL_PAD, Drag, HEADER_FONT, ROW_H, Spreadsheet};
 use crate::refs::{RefSpan, scan_refs};
 use crate::theme::Theme;
 
@@ -180,9 +180,9 @@ impl Spreadsheet {
         let ox = f64::from(bounds.origin.x);
         let oy = f64::from(bounds.origin.y);
         let (vw, vh) = (f64::from(bounds.size.width), f64::from(bounds.size.height));
-        let gx = ox + HEADER_W;
-        let gy = oy + HEADER_H;
-        let (gw, gh) = (vw - HEADER_W, vh - HEADER_H);
+        let gx = ox + self.hw();
+        let gy = oy + self.hh();
+        let (gw, gh) = (vw - self.hw(), vh - self.hh());
         let all = bounds;
         let grid_clip = b(gx, gy, gw, gh);
         let store = self.wb.store(self.cur);
@@ -202,11 +202,11 @@ impl Spreadsheet {
         };
         let col_hdr_clip = |c: u32| {
             let (x, w) = xpane(c);
-            b(x, oy, w, HEADER_H)
+            b(x, oy, w, self.hh())
         };
         let row_hdr_clip = |r: u32| {
             let (y, h) = ypane(r);
-            b(ox, y, HEADER_W, h)
+            b(ox, y, self.hw(), h)
         };
 
         ops.push(Op::Quad(fill(all, t.canvas), all));
@@ -307,19 +307,20 @@ impl Spreadsheet {
             }
         };
 
-        // Headers.
-        ops.push(Op::Quad(fill(b(ox, oy, vw, HEADER_H), t.chrome), all));
-        ops.push(Op::Quad(fill(b(ox, oy, HEADER_W, vh), t.chrome), all));
+        // Headers (after the outline gutters, if any).
+        let (gutter_w, gutter_h) = (self.hw() - crate::app::HEADER_W, self.hh() - crate::app::HEADER_H);
+        ops.push(Op::Quad(fill(b(ox, oy, vw, self.hh()), t.chrome), all));
+        ops.push(Op::Quad(fill(b(ox, oy, self.hw(), vh), t.chrome), all));
         for &(c, x, w) in &cols {
             if (sel.start.col..=sel.end.col).contains(&c) {
-                ops.push(Op::Quad(fill(b(x, oy, w, HEADER_H), t.header_selected), col_hdr_clip(c)));
-                ops.push(Op::Quad(fill(b(x, oy + HEADER_H - 2.0, w, 2.0), t.accent), col_hdr_clip(c)));
+                ops.push(Op::Quad(fill(b(x, oy + gutter_h, w, self.hh() - gutter_h), t.header_selected), col_hdr_clip(c)));
+                ops.push(Op::Quad(fill(b(x, oy + self.hh() - 2.0, w, 2.0), t.accent), col_hdr_clip(c)));
             }
         }
         for &(r, y, h) in &rows {
             if (sel.start.row..=sel.end.row).contains(&r) {
-                ops.push(Op::Quad(fill(b(ox, y, HEADER_W, h), t.header_selected), row_hdr_clip(r)));
-                ops.push(Op::Quad(fill(b(ox + HEADER_W - 2.0, y, 2.0, h), t.accent), row_hdr_clip(r)));
+                ops.push(Op::Quad(fill(b(ox + gutter_w, y, self.hw() - gutter_w, h), t.header_selected), row_hdr_clip(r)));
+                ops.push(Op::Quad(fill(b(ox + self.hw() - 2.0, y, 2.0, h), t.accent), row_hdr_clip(r)));
             }
         }
 
@@ -327,15 +328,15 @@ impl Spreadsheet {
         for &(c, x, w) in &cols {
             let (px0, pw) = xpane(c);
             ops.push(Op::Quad(fill(b(x + w - 1.0, gy, 1.0, gh), t.rule), b(px0, gy, pw, gh)));
-            ops.push(Op::Quad(fill(b(x + w - 1.0, oy + 5.0, 1.0, HEADER_H - 10.0), t.divider), col_hdr_clip(c)));
+            ops.push(Op::Quad(fill(b(x + w - 1.0, oy + gutter_h + 5.0, 1.0, crate::app::HEADER_H - 10.0), t.divider), col_hdr_clip(c)));
         }
         for &(r, y, h) in &rows {
             let (py0, ph) = ypane(r);
             ops.push(Op::Quad(fill(b(gx, y + h - 1.0, gw, 1.0), t.rule), b(gx, py0, gw, ph)));
-            ops.push(Op::Quad(fill(b(ox, y + h - 1.0, HEADER_W, 1.0), t.rule), row_hdr_clip(r)));
+            ops.push(Op::Quad(fill(b(ox + gutter_w, y + h - 1.0, self.hw() - gutter_w, 1.0), t.rule), row_hdr_clip(r)));
         }
-        ops.push(Op::Quad(fill(b(ox, oy + HEADER_H - 1.0, vw, 1.0), t.divider), all));
-        ops.push(Op::Quad(fill(b(ox + HEADER_W - 1.0, oy, 1.0, vh), t.divider), all));
+        ops.push(Op::Quad(fill(b(ox, oy + self.hh() - 1.0, vw, 1.0), t.divider), all));
+        ops.push(Op::Quad(fill(b(ox + self.hw() - 1.0, oy, 1.0, vh), t.divider), all));
 
         // Cell fills (over gridlines, like Excel) and borders. A merged range
         // paints as one cell using its top-left cell's style.
@@ -589,13 +590,13 @@ impl Spreadsheet {
             let active = c >= sel.start.col && c <= sel.end.col;
             let line = shape(window, col_name(c), if active { hf_active.clone() } else { hf.clone() }, if active { t.accent } else { t.ink_muted }, HEADER_FONT);
             let tx = x + (w - f64::from(line.width)) / 2.0;
-            ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px(oy as f32)), clip: col_hdr_clip(c), line_height: px(HEADER_H as f32) });
+            ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px((oy + gutter_h) as f32)), clip: col_hdr_clip(c), line_height: px(crate::app::HEADER_H as f32) });
         }
         for &(r, y, h) in &rows {
             let active = r >= sel.start.row && r <= sel.end.row;
             let line = shape(window, (r + 1).to_string(), if active { hf_active.clone() } else { hf.clone() }, if active { t.accent } else { t.ink_muted }, HEADER_FONT);
-            let tx = ox + (HEADER_W - f64::from(line.width)) / 2.0;
-            let clip = b(ox, y, HEADER_W, h).intersect(&row_hdr_clip(r));
+            let tx = ox + gutter_w + (crate::app::HEADER_W - f64::from(line.width)) / 2.0;
+            let clip = b(ox, y, self.hw(), h).intersect(&row_hdr_clip(r));
             ops.push(Op::Text { line: Box::new(line), origin: point(px(tx as f32), px(y as f32)), clip, line_height: px(h as f32) });
         }
 
@@ -637,6 +638,8 @@ impl Spreadsheet {
             ops.push(Op::Text { line: Box::new(line), origin, clip: grid_clip, line_height: lh });
             ops.push(Op::Quad(fill(b(caret_x, ty + 4.0, 1.5, ROW_H - 8.0), t.accent), grid_clip));
         }
+
+        ops.extend(self.outline_ops(window));
 
         // Charts float over the cells.
         for (i, chart) in layout.charts.iter().enumerate() {
