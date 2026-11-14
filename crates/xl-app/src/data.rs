@@ -343,3 +343,157 @@ mod tests {
         assert_eq!(v.first(), Some(&Value::Bool(true)));
     }
 }
+
+/// How a text-to-columns split finds its pieces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delimiter {
+    /// The most common of tab, semicolon, comma and pipe in the data.
+    Auto,
+    Comma,
+    Tab,
+    Semicolon,
+    Space,
+}
+
+/// Split a line on `sep`, honouring double quotes ("a, b" stays whole; ""
+/// is a literal quote) like CSV.
+pub(crate) fn split_fields(line: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            '"' if quoted => quoted = false,
+            // A field may start with spaces before its opening quote ("a, "b"").
+            '"' if cur.trim().is_empty() => {
+                cur.clear();
+                quoted = true;
+            }
+            c if c == sep && !quoted => out.push(std::mem::take(&mut cur)),
+            c => cur.push(c),
+        }
+    }
+    out.push(cur);
+    if sep == ' ' {
+        // Runs of spaces count as one separator.
+        out.retain(|s| !s.is_empty());
+    }
+    out
+}
+
+impl Spreadsheet {
+    /// Remove rows whose values repeat an earlier row (comparing every
+    /// column, text without case), keeping the first; the rest close up.
+    pub(crate) fn remove_duplicates(&mut self) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let Some(range) = self.data_range() else {
+            self.message = Some(("Select a table of data to remove duplicates from".into(), true));
+            return;
+        };
+        let header = self.guess_header(range);
+        let first = range.start.row + header as u32;
+        let store = self.wb.store(self.cur);
+        let key = |r: u32| -> Vec<String> {
+            (range.start.col..=range.end.col)
+                .map(|c| match store.value(CellRef::new(r, c)) {
+                    Value::Text(t) => format!("t{}", t.to_lowercase()),
+                    Value::Empty => String::new(),
+                    v => format!("v{}", v.display()),
+                })
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        let kept: Vec<u32> = (first..=range.end.row).filter(|&r| seen.insert(key(r))).collect();
+        let removed = (range.end.row + 1 - first) as usize - kept.len();
+        if removed == 0 {
+            self.message = Some(("No duplicate rows found".into(), false));
+            return;
+        }
+        let mut items = Vec::new();
+        for (i, &src) in kept.iter().enumerate() {
+            let dst = first + i as u32;
+            for col in range.start.col..=range.end.col {
+                let from = Addr::new(self.cur, CellRef::new(src, col));
+                items.push((Addr::new(self.cur, CellRef::new(dst, col)), self.wb.snapshot_shifted(from, dst as i64 - src as i64, 0)));
+            }
+        }
+        for r in first + kept.len() as u32..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                items.push((Addr::new(self.cur, CellRef::new(r, col)), xl_engine::CellSnapshot::default()));
+            }
+        }
+        let items = items.into_iter().filter(|(a, snap)| self.wb.snapshot(*a) != *snap).collect();
+        self.apply_snapshots(items);
+        self.anchor = range.start;
+        self.active = CellRef::new(first + kept.len() as u32 - 1, range.end.col);
+        self.message = Some((format!("Removed {removed} duplicate row{}; {} unique remain", if removed == 1 { "" } else { "s" }, kept.len()), false));
+    }
+
+    /// Split the text in the selected column into columns to its right.
+    pub(crate) fn text_to_columns(&mut self, delim: Delimiter) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let sel = self.selection();
+        let col = sel.start.col;
+        let extent = self.wb.store(self.cur).extent();
+        let last = extent.map_or(sel.end.row, |e| sel.end.row.min(e.row));
+        let rows: Vec<(u32, String)> = (sel.start.row..=last)
+            .filter_map(|r| match self.wb.value(self.at(CellRef::new(r, col))) {
+                Value::Text(t) => Some((r, t.to_string())),
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.message = Some(("Select a column of text to split".into(), true));
+            return;
+        }
+        let sep = match delim {
+            Delimiter::Comma => ',',
+            Delimiter::Tab => '\t',
+            Delimiter::Semicolon => ';',
+            Delimiter::Space => ' ',
+            Delimiter::Auto => ['\t', ';', ',', '|']
+                .into_iter()
+                .max_by_key(|&c| rows.iter().filter(|(_, t)| t.contains(c)).count())
+                .filter(|&c| rows.iter().any(|(_, t)| t.contains(c)))
+                .unwrap_or(' '),
+        };
+        let mut changes = Vec::new();
+        let mut widest = 0;
+        for (r, text) in &rows {
+            let parts = split_fields(text, sep);
+            widest = widest.max(parts.len());
+            for (i, p) in parts.into_iter().enumerate() {
+                if let Some(dst) = CellRef::new(*r, col).offset(0, i as i64) {
+                    changes.push((self.at(dst), p.trim().to_string()));
+                }
+            }
+        }
+        self.apply_inputs(changes);
+        self.anchor = CellRef::new(sel.start.row, col);
+        self.active = CellRef::new(last, col + widest.saturating_sub(1) as u32);
+        self.message = Some((format!("Split {} cell{} into {widest} columns", rows.len(), if rows.len() == 1 { "" } else { "s" }), false));
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_fields;
+
+    #[test]
+    fn splits_like_csv() {
+        assert_eq!(split_fields("a,\"b, c\",d", ','), ["a", "b, c", "d"]);
+        assert_eq!(split_fields("say \"\"hi\"\"", ','), ["say \"\"hi\"\""], "quotes only count at the start of a field");
+        assert_eq!(split_fields("\"x \"\"y\"\"\",z", ','), ["x \"y\"", "z"]);
+        assert_eq!(split_fields("Ada  Lovelace", ' '), ["Ada", "Lovelace"]);
+        assert_eq!(split_fields("a;;b", ';'), ["a", "", "b"]);
+    }
+}

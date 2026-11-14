@@ -1087,3 +1087,33 @@ fn insert_move_and_edit_a_chart(cx: &mut TestAppContext) {
         assert_eq!(s.wb.chart_data(s.cur, c).series[0].1[1], Some(93.0));
     });
 }
+
+#[gpui::test]
+fn remove_duplicates_and_split_text(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, _| {
+        let rows = [["City", "Count"], ["Oslo", "1"], ["oslo", "1"], ["Lima", "2"], ["Oslo", "3"], ["Lima", "2"]];
+        let mut items = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                items.push((s.at(CellRef::new(r as u32, 6 + c as u32)), v.to_string()));
+            }
+        }
+        items.push((s.at(CellRef::parse("K1").unwrap()), "Ada Lovelace, 1815, \"London, UK\"".to_string()));
+        items.push((s.at(CellRef::parse("K2").unwrap()), "Alan Turing, 1912, Maida Vale".to_string()));
+        s.wb.set_inputs(items);
+    });
+    go(&view, cx, "G2");
+    view.update(cx, |s, _| s.remove_duplicates());
+    let col = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, c: &str| (1..=6).map(|r| val(view, cx, &format!("{c}{r}"))).collect::<Vec<_>>();
+    assert_eq!(col(&view, cx, "G"), [Value::text("City"), Value::text("Oslo"), Value::text("Lima"), Value::text("Oslo"), Value::Empty, Value::Empty]);
+    assert_eq!(col(&view, cx, "H")[3], Value::Number(3.0), "Oslo/3 differs from Oslo/1; oslo/1 is a case-insensitive repeat");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "G3"), Value::text("oslo"));
+    // Split K1:K2 on commas (detected), respecting quotes; numbers become numbers.
+    go(&view, cx, "K1");
+    cx.simulate_keystrokes("shift-down");
+    view.update(cx, |s, _| s.text_to_columns(crate::data::Delimiter::Auto));
+    assert_eq!([val(&view, cx, "K1"), val(&view, cx, "L1"), val(&view, cx, "M1")], [Value::text("Ada Lovelace"), Value::Number(1815.0), Value::text("London, UK")]);
+    assert_eq!(val(&view, cx, "M2"), Value::text("Maida Vale"));
+}
