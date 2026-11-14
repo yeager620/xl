@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use crate::address::{Addr, CellRef, Range, SheetId};
 use crate::eval::{Ctx, Func, eval};
 use crate::format::{Formatted, NumberFormat};
-use crate::formula::{Expr, ParseError, SheetNames, parse_formula};
+use crate::formula::{Expr, ParseError, SheetNames, Shift, parse_formula};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellInput, CellStore};
 use crate::style::Style;
@@ -784,6 +784,65 @@ impl Workbook {
         let before = self.names.list.len();
         self.names.list.retain(|d| !(d.name.eq_ignore_ascii_case(name) && d.scope == scope));
         (self.names.list.len() != before).then(|| self.rebuild())
+    }
+
+    /// Insert or delete rows or columns. Cells, formats, styles and widths
+    /// move; formulas on every sheet and defined names are rewritten (refs to
+    /// deleted cells become #REF!); then everything recalculates.
+    pub fn apply_shift(&mut self, op: Shift) -> RecalcStats {
+        let target = op.sheet();
+        let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
+        let remap = |c: CellRef| -> Option<CellRef> {
+            if rows { Some(CellRef::new(op.map_pos(c.row)?, c.col)) } else { Some(CellRef::new(c.row, op.map_pos(c.col)?)) }
+        };
+        let Some(sd) = self.sheets.get_mut(target) else { return RecalcStats::default() };
+        sd.store.apply_shift(op);
+        sd.formats = sd.formats.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
+        sd.styles = sd.styles.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
+        if !rows {
+            sd.col_widths = std::mem::take(&mut sd.col_widths).into_iter().filter_map(|(c, w)| Some((op.map_pos(c)?, w))).collect();
+        }
+        for id in self.sheets.order.clone() {
+            let Some(sd) = self.sheets.get_mut(id) else { continue };
+            for (_, cell) in sd.store.cells_mut() {
+                if let CellInput::Formula(e) = &cell.input {
+                    let moved = e.shifted(op, id);
+                    if moved != **e {
+                        cell.input = CellInput::Formula(Arc::new(moved));
+                    }
+                }
+            }
+        }
+        for d in &mut self.names.list {
+            d.expr = Arc::new(d.expr.shifted(op, d.scope.unwrap_or(target)));
+        }
+        self.rebuild()
+    }
+
+    /// Input text of every formula in the workbook (for undoing structural edits).
+    pub fn formula_texts(&self) -> Vec<(Addr, String)> {
+        let mut out = Vec::new();
+        for &id in &self.sheets.order {
+            for (c, cell) in self.sheets.store(id).unwrap().iter() {
+                if cell.is_formula() {
+                    let a = Addr::new(id, c);
+                    out.push((a, self.input_text(a)));
+                }
+            }
+        }
+        out
+    }
+
+    /// Snapshots of every cell in `range` that holds anything (a value, a
+    /// number format or a style).
+    pub fn region_snapshots(&self, sheet: SheetId, range: Range) -> Vec<(Addr, CellSnapshot)> {
+        let Some(sd) = self.sheets.get(sheet) else { return Vec::new() };
+        let mut cells: Vec<CellRef> = sd.store.iter_range(range).map(|(c, _)| c).collect();
+        cells.extend(sd.formats.keys().copied().filter(|c| range.contains(*c)));
+        cells.extend(sd.styles.keys().copied().filter(|c| range.contains(*c)));
+        cells.sort_unstable();
+        cells.dedup();
+        cells.into_iter().map(|c| (Addr::new(sheet, c), self.snapshot(Addr::new(sheet, c)))).collect()
     }
 
     /// Rebuild the dependency graph from scratch and recalculate everything

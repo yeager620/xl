@@ -7,7 +7,7 @@ use gpui::{
     Bounds, ClipboardItem, Context, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point, ScrollEvent, Subscription, Window, point, px,
 };
-use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS, Range, RecalcStats, Rgb, SheetId, Style, Value, Workbook, quote_sheet_name};
+use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS, Range, RecalcStats, Rgb, SheetId, Shift, Style, Value, Workbook, quote_sheet_name};
 
 use crate::theme::Theme;
 
@@ -115,7 +115,35 @@ struct View {
     scroll_y: f64,
 }
 
-type UndoEntry = Vec<(Addr, CellSnapshot)>;
+type Snapshots = Vec<(Addr, CellSnapshot)>;
+
+/// One step on the undo (or redo) stack.
+pub(crate) enum UndoEntry {
+    /// Restore these cells.
+    Cells(Snapshots),
+    /// Undo a structural change: apply its inverse, then restore the cells
+    /// it deleted or rewrote, and the widths of deleted columns.
+    Structure { op: Shift, restore: Snapshots, widths: Vec<(u32, f64)> },
+    /// Redo a structural change.
+    Reapply(Shift),
+}
+
+impl UndoEntry {
+    fn touches_sheet(&self, id: SheetId) -> bool {
+        match self {
+            UndoEntry::Cells(c) => c.iter().any(|(a, _)| a.sheet == id),
+            UndoEntry::Structure { op, .. } | UndoEntry::Reapply(op) => op.sheet() == id,
+        }
+    }
+}
+
+/// What a right-click menu is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextKind {
+    Cells,
+    Rows,
+    Cols,
+}
 
 /// Which toolbar popover is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,6 +202,8 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// Right-click menu: where it opened and what it's for.
+    pub(crate) context: Option<(Point<Pixels>, ContextKind)>,
     /// File being opened in the background.
     pub(crate) loading: Option<String>,
     pub(crate) palette: Option<crate::palette::Palette>,
@@ -232,6 +262,7 @@ impl Spreadsheet {
             renaming: None,
             confirm_delete: None,
             menu: None,
+            context: None,
             loading: None,
             palette: None,
             should_move: false,
@@ -552,8 +583,8 @@ impl Spreadsheet {
                     let v = self.views.get(&next).copied().unwrap_or_default();
                     (self.active, self.anchor, self.scroll_x, self.scroll_y) = (v.active, v.anchor, v.scroll_x, v.scroll_y);
                 }
-                self.undo.retain(|e| e.iter().all(|(a, _)| a.sheet != id));
-                self.redo.retain(|e| e.iter().all(|(a, _)| a.sheet != id));
+                self.undo.retain(|e| !e.touches_sheet(id));
+                self.redo.retain(|e| !e.touches_sheet(id));
                 self.message = Some((format!("Deleted sheet ({} formulas recalculated)", stats.evaluated), false));
                 self.mark_dirty();
             }
@@ -580,7 +611,7 @@ impl Spreadsheet {
         match result {
             Ok(stats) => {
                 if let Some(stats) = stats {
-                    self.push_undo(vec![(edit.at, before)]);
+                    self.push_undo(UndoEntry::Cells(vec![(edit.at, before)]));
                     self.last_stats = Some(stats);
                     self.mark_dirty();
                 }
@@ -615,7 +646,7 @@ impl Spreadsheet {
         }
     }
 
-    fn snapshots(&self, addrs: impl IntoIterator<Item = Addr>) -> UndoEntry {
+    fn snapshots(&self, addrs: impl IntoIterator<Item = Addr>) -> Snapshots {
         addrs.into_iter().map(|a| (a, self.wb.snapshot(a))).collect()
     }
 
@@ -626,39 +657,152 @@ impl Spreadsheet {
         }
         let undo = self.snapshots(changes.iter().map(|(a, _)| *a));
         self.last_stats = Some(self.wb.set_inputs(changes));
-        self.push_undo(undo);
+        self.push_undo(UndoEntry::Cells(undo));
         self.mark_dirty();
     }
 
     /// Apply exact snapshots (inputs + formats) as one undoable step.
-    fn apply_snapshots(&mut self, items: UndoEntry) {
+    fn apply_snapshots(&mut self, items: Snapshots) {
         if items.is_empty() {
             return;
         }
         let undo = self.snapshots(items.iter().map(|(a, _)| *a));
         self.last_stats = Some(self.wb.restore(items));
-        self.push_undo(undo);
+        self.push_undo(UndoEntry::Cells(undo));
         self.mark_dirty();
     }
 
     pub(crate) fn undo_redo(&mut self, is_undo: bool) {
         let entry = if is_undo { self.undo.pop() } else { self.redo.pop() };
         let Some(entry) = entry else { return };
-        let inverse = self.snapshots(entry.iter().map(|(a, _)| *a));
-        if let Some(&(first, _)) = entry.first() {
-            self.switch_sheet(first.sheet);
-            let cells: Vec<CellRef> = entry.iter().filter(|(a, _)| a.sheet == first.sheet).map(|(a, _)| a.cell).collect();
-            let r0 = cells.iter().map(|c| c.row).min().unwrap();
-            let r1 = cells.iter().map(|c| c.row).max().unwrap();
-            let c0 = cells.iter().map(|c| c.col).min().unwrap();
-            let c1 = cells.iter().map(|c| c.col).max().unwrap();
-            self.anchor = CellRef::new(r0, c0);
-            self.active = CellRef::new(r1, c1);
-            self.ensure_visible(self.active);
-        }
-        self.last_stats = Some(self.wb.restore(entry));
+        let inverse = match entry {
+            UndoEntry::Cells(cells) => {
+                let inverse = self.snapshots(cells.iter().map(|(a, _)| *a));
+                if let Some(&(first, _)) = cells.first() {
+                    self.switch_sheet(first.sheet);
+                    let on_sheet: Vec<CellRef> = cells.iter().filter(|(a, _)| a.sheet == first.sheet).map(|(a, _)| a.cell).collect();
+                    let r0 = on_sheet.iter().map(|c| c.row).min().unwrap_or(0);
+                    let r1 = on_sheet.iter().map(|c| c.row).max().unwrap_or(0);
+                    let c0 = on_sheet.iter().map(|c| c.col).min().unwrap_or(0);
+                    let c1 = on_sheet.iter().map(|c| c.col).max().unwrap_or(0);
+                    self.anchor = CellRef::new(r0, c0);
+                    self.active = CellRef::new(r1, c1);
+                    self.ensure_visible(self.active);
+                }
+                self.last_stats = Some(self.wb.restore(cells));
+                UndoEntry::Cells(inverse)
+            }
+            UndoEntry::Structure { op, restore, widths } => {
+                self.switch_sheet(op.sheet());
+                self.wb.apply_shift(op.inverse());
+                // Put back only what the change actually altered.
+                let changed: Snapshots = restore.into_iter().filter(|(a, snap)| self.wb.snapshot(*a) != *snap).collect();
+                self.last_stats = Some(self.wb.restore(changed));
+                for (col, w) in widths {
+                    self.wb.set_col_width(op.sheet(), col, Some(w));
+                }
+                self.clip = None;
+                UndoEntry::Reapply(op)
+            }
+            UndoEntry::Reapply(op) => {
+                self.switch_sheet(op.sheet());
+                self.structural(op)
+            }
+        };
         if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
         self.mark_dirty();
+    }
+
+    /// Apply a structural change and return the entry that undoes it.
+    fn structural(&mut self, op: Shift) -> UndoEntry {
+        let sheet = op.sheet();
+        let mut restore = match op {
+            Shift::DeleteRows { at, count, .. } => {
+                self.wb.region_snapshots(sheet, Range::new(CellRef::new(at, 0), CellRef::new(at + count - 1, MAX_COLS - 1)))
+            }
+            Shift::DeleteCols { at, count, .. } => {
+                self.wb.region_snapshots(sheet, Range::new(CellRef::new(0, at), CellRef::new(MAX_ROWS - 1, at + count - 1)))
+            }
+            _ => Vec::new(),
+        };
+        // Formulas anywhere may be rewritten (e.g. to #REF!); remember them all.
+        restore.extend(self.wb.formula_texts().into_iter().map(|(a, _)| (a, self.wb.snapshot(a))));
+        let widths = match op {
+            Shift::DeleteCols { at, count, .. } => (at..at + count).filter_map(|c| Some((c, self.wb.col_width(sheet, c)?))).collect(),
+            _ => Vec::new(),
+        };
+        self.last_stats = Some(self.wb.apply_shift(op));
+        self.clip = None;
+        UndoEntry::Structure { op, restore, widths }
+    }
+
+    /// Whole rows selected (every column)?
+    pub(crate) fn rows_selected(&self) -> bool {
+        let s = self.selection();
+        s.start.col == 0 && s.end.col == MAX_COLS - 1
+    }
+
+    /// Whole columns selected (every row)?
+    pub(crate) fn cols_selected(&self) -> bool {
+        let s = self.selection();
+        s.start.row == 0 && s.end.row == MAX_ROWS - 1
+    }
+
+    fn do_structural(&mut self, op: Shift) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let undo = self.structural(op);
+        self.push_undo(undo);
+        self.mark_dirty();
+        self.context = None;
+    }
+
+    /// Insert as many rows as are selected, above (or below) the selection.
+    pub(crate) fn insert_rows(&mut self, below: bool) {
+        let s = self.selection();
+        let at = if below { s.end.row + 1 } else { s.start.row };
+        self.do_structural(Shift::InsertRows { sheet: self.cur, at, count: s.rows().min(MAX_ROWS - at) });
+        if below {
+            let (c0, c1) = (self.anchor.col.min(self.active.col), self.anchor.col.max(self.active.col));
+            self.anchor = CellRef::new(at, c0);
+            self.active = CellRef::new(at + s.rows() - 1, c1);
+        }
+    }
+
+    pub(crate) fn insert_cols(&mut self, right: bool) {
+        let s = self.selection();
+        let at = if right { s.end.col + 1 } else { s.start.col };
+        self.do_structural(Shift::InsertCols { sheet: self.cur, at, count: s.cols().min(MAX_COLS - at) });
+        if right {
+            let (r0, r1) = (self.anchor.row.min(self.active.row), self.anchor.row.max(self.active.row));
+            self.anchor = CellRef::new(r0, at);
+            self.active = CellRef::new(r1, at + s.cols() - 1);
+        }
+    }
+
+    pub(crate) fn delete_rows(&mut self) {
+        let s = self.selection();
+        self.do_structural(Shift::DeleteRows { sheet: self.cur, at: s.start.row, count: s.rows() });
+        self.active = CellRef::new(s.start.row, self.active.col.min(self.anchor.col));
+        self.anchor = self.active;
+    }
+
+    pub(crate) fn delete_cols(&mut self) {
+        let s = self.selection();
+        self.do_structural(Shift::DeleteCols { sheet: self.cur, at: s.start.col, count: s.cols() });
+        self.active = CellRef::new(self.active.row.min(self.anchor.row), s.start.col);
+        self.anchor = self.active;
+    }
+
+    /// Ctrl+Shift+= / Ctrl+-: whole columns if columns are selected, else rows.
+    fn insert_or_delete(&mut self, insert: bool) {
+        match (insert, self.cols_selected() && !self.rows_selected()) {
+            (true, true) => self.insert_cols(false),
+            (true, false) => self.insert_rows(false),
+            (false, true) => self.delete_cols(),
+            (false, false) => self.delete_rows(),
+        }
     }
 
     /// Delete clears contents but keeps formats, like Excel.
@@ -812,7 +956,7 @@ impl Spreadsheet {
         for a in targets {
             self.wb.set_format(a, code);
         }
-        self.push_undo(undo);
+        self.push_undo(UndoEntry::Cells(undo));
         self.mark_dirty();
     }
 
@@ -830,7 +974,7 @@ impl Spreadsheet {
             f(&mut st, a.cell, sel);
             self.wb.set_style(a, &st);
         }
-        self.push_undo(undo);
+        self.push_undo(UndoEntry::Cells(undo));
         self.mark_dirty();
         self.menu = None;
     }
@@ -904,7 +1048,7 @@ impl Spreadsheet {
             self.wb.set_style(a, &Style::default());
             self.wb.set_format(a, None);
         }
-        self.push_undo(undo);
+        self.push_undo(UndoEntry::Cells(undo));
         self.mark_dirty();
     }
 
@@ -1307,7 +1451,10 @@ impl Spreadsheet {
                 self.message = None;
                 self.confirm_delete = None;
                 self.menu = None;
+                self.context = None;
             }
+            ("=" | "+", true) if shift => self.insert_or_delete(true),
+            ("-", true) => self.insert_or_delete(false),
             ("b", true) => self.toggle_emphasis(Emphasis::Bold),
             ("i", true) => self.toggle_emphasis(Emphasis::Italic),
             ("u", true) => self.toggle_emphasis(Emphasis::Underline),
@@ -1406,6 +1553,43 @@ impl Spreadsheet {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// Right-click: select what was clicked (unless it's already selected),
+    /// then open the context menu for it.
+    pub(crate) fn on_right_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let Some(hit) = self.hit_test(ev.position) else { return };
+        let sel = self.selection();
+        let kind = match hit {
+            Hit::RowHeader(r) => {
+                if !(self.rows_selected() && (sel.start.row..=sel.end.row).contains(&r)) {
+                    self.anchor = CellRef::new(r, 0);
+                    self.active = CellRef::new(r, MAX_COLS - 1);
+                }
+                ContextKind::Rows
+            }
+            Hit::ColHeader { col, .. } => {
+                if !(self.cols_selected() && (sel.start.col..=sel.end.col).contains(&col)) {
+                    self.anchor = CellRef::new(0, col);
+                    self.active = CellRef::new(MAX_ROWS - 1, col);
+                }
+                ContextKind::Cols
+            }
+            Hit::Cell(c) => {
+                if !sel.contains(c) {
+                    self.select(c, false);
+                }
+                ContextKind::Cells
+            }
+            Hit::Corner => ContextKind::Cells,
+        };
+        self.menu = None;
+        self.context = Some((ev.position, kind));
         cx.notify();
     }
 

@@ -574,3 +574,56 @@ fn autosave_survives_a_crash_and_restores(cx: &mut TestAppContext) {
     assert_eq!(val(&view, cx, "B4"), Value::Number(77.0));
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[gpui::test]
+fn insert_and_delete_rows_with_undo(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    // Fixture: D4..D6 = B*C, D7 = SUM(D4:D6). Select rows 5-6 and insert 2 above.
+    go(&view, cx, "A5");
+    cx.simulate_keystrokes("shift-down ctrl-shift-=");
+    assert_eq!(input(&view, cx, "D9"), "=SUM(D4:D8)", "subtotal grew around the new rows");
+    assert_eq!(input(&view, cx, "D7"), "=B7*C7", "moved formulas point at their moved inputs");
+    assert_eq!(val(&view, cx, "A5"), Value::Empty);
+    assert_eq!(val(&view, cx, "A7"), Value::text("Oat milk"));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(input(&view, cx, "D7"), "=SUM(D4:D6)");
+    assert_eq!(val(&view, cx, "A5"), Value::text("Oat milk"));
+    cx.simulate_keystrokes("ctrl-y");
+    assert_eq!(input(&view, cx, "D9"), "=SUM(D4:D8)");
+    cx.simulate_keystrokes("ctrl-z");
+    // Delete row 4 (Coffee beans): D7's range shrinks; a direct ref breaks, and undo repairs it.
+    go(&view, cx, "F1");
+    cx.simulate_input("=D4*2");
+    cx.simulate_keystrokes("enter");
+    go(&view, cx, "A4");
+    cx.simulate_keystrokes("ctrl--");
+    assert_eq!(input(&view, cx, "D6"), "=SUM(D4:D5)");
+    assert_eq!(input(&view, cx, "F1"), "=#REF!*2");
+    assert_eq!(val(&view, cx, "A4"), Value::text("Oat milk"));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(input(&view, cx, "F1"), "=D4*2", "undo restores formulas that broke");
+    assert_eq!(val(&view, cx, "A4"), Value::text("Coffee beans"));
+    assert_eq!(shown(&view, cx, "D4"), "$43.50", "and the deleted cells' formats");
+}
+
+#[gpui::test]
+fn right_click_row_header_opens_row_menu(cx: &mut TestAppContext) {
+    use crate::app::ContextKind;
+    use gpui::{Modifiers, MouseButton, point, px};
+    let (view, cx) = setup(cx);
+    let header = view.read_with(cx, |s, _| {
+        let vp = s.viewport;
+        // Row 6's header: left gutter, 5 rows down from the top of the grid.
+        point(vp.origin.x + px(10.), vp.origin.y + px((crate::app::HEADER_H + crate::app::ROW_H * 5.5) as f32))
+    });
+    cx.simulate_mouse_down(header, MouseButton::Right, Modifiers::none());
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.context.map(|(_, k)| k), Some(ContextKind::Rows));
+        assert!(s.rows_selected());
+        assert_eq!(s.selection().start.row, 5);
+    });
+    view.update(cx, |s, _| s.insert_rows(true));
+    assert_eq!(val(&view, cx, "A7"), Value::Empty);
+    assert_eq!(val(&view, cx, "A6"), Value::text("Croissants"), "inserted below row 6");
+    assert_eq!(val(&view, cx, "C8"), Value::text("Subtotal"));
+}

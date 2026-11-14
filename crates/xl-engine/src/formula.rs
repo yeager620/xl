@@ -189,6 +189,133 @@ impl Expr {
     }
 }
 
+/// A structural change to a sheet: rows or columns inserted or deleted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Shift {
+    InsertRows { sheet: SheetId, at: u32, count: u32 },
+    DeleteRows { sheet: SheetId, at: u32, count: u32 },
+    InsertCols { sheet: SheetId, at: u32, count: u32 },
+    DeleteCols { sheet: SheetId, at: u32, count: u32 },
+}
+
+impl Shift {
+    pub fn sheet(self) -> SheetId {
+        match self {
+            Shift::InsertRows { sheet, .. } | Shift::DeleteRows { sheet, .. } | Shift::InsertCols { sheet, .. } | Shift::DeleteCols { sheet, .. } => sheet,
+        }
+    }
+
+    /// The change that undoes this one (inserting the deleted rows back, …).
+    pub fn inverse(self) -> Shift {
+        match self {
+            Shift::InsertRows { sheet, at, count } => Shift::DeleteRows { sheet, at, count },
+            Shift::DeleteRows { sheet, at, count } => Shift::InsertRows { sheet, at, count },
+            Shift::InsertCols { sheet, at, count } => Shift::DeleteCols { sheet, at, count },
+            Shift::DeleteCols { sheet, at, count } => Shift::InsertCols { sheet, at, count },
+        }
+    }
+
+    fn is_rows(self) -> bool {
+        matches!(self, Shift::InsertRows { .. } | Shift::DeleteRows { .. })
+    }
+
+    /// Where position `p` (a row or column index along the shifted axis)
+    /// ends up; None if it was deleted.
+    pub fn map_pos(self, p: u32) -> Option<u32> {
+        let limit = if self.is_rows() { MAX_ROWS } else { crate::address::MAX_COLS };
+        match self {
+            Shift::InsertRows { at, count, .. } | Shift::InsertCols { at, count, .. } => {
+                if p < at {
+                    Some(p)
+                } else {
+                    (p + count < limit).then_some(p + count)
+                }
+            }
+            Shift::DeleteRows { at, count, .. } | Shift::DeleteCols { at, count, .. } => {
+                if p < at {
+                    Some(p)
+                } else if p < at + count {
+                    None
+                } else {
+                    Some(p - count)
+                }
+            }
+        }
+    }
+
+    /// Map a span [a, b] along the shifted axis: inserted lines inside the
+    /// span grow it, deleted lines shrink it; None if all of it was deleted.
+    fn map_span(self, a: u32, b: u32) -> Option<(u32, u32)> {
+        match self {
+            Shift::InsertRows { .. } | Shift::InsertCols { .. } => Some((self.map_pos(a)?, self.map_pos(b).unwrap_or(b))),
+            Shift::DeleteRows { at, count, .. } | Shift::DeleteCols { at, count, .. } => {
+                let end_del = at + count;
+                if a >= at && b < end_del {
+                    return None;
+                }
+                let na = if a >= end_del { a - count } else { a.min(at) };
+                let nb = if b >= end_del { b - count } else if b >= at { at.saturating_sub(1).max(na) } else { b };
+                Some((na, nb))
+            }
+        }
+    }
+}
+
+impl Expr {
+    /// The expression after a structural change on `op.sheet()`, for a
+    /// formula that lives on `home`. References to deleted cells become #REF!.
+    pub fn shifted(&self, op: Shift, home: SheetId) -> Expr {
+        let rows = op.is_rows();
+        let on_sheet = |r: &RefAddr| r.sheet.unwrap_or(home) == op.sheet();
+        let map_ref = |r: &RefAddr| -> Option<RefAddr> {
+            if !on_sheet(r) {
+                return Some(*r);
+            }
+            let mut out = *r;
+            if rows {
+                out.cell.row = op.map_pos(r.cell.row)?;
+            } else {
+                out.cell.col = op.map_pos(r.cell.col)?;
+            }
+            Some(out)
+        };
+        let recur = |e: &Expr| Box::new(e.shifted(op, home));
+        match self {
+            Expr::Ref(r) => map_ref(r).map_or(Expr::Error(ErrorKind::Ref), Expr::Ref),
+            Expr::Range(a, b, kind) => {
+                if !on_sheet(a) || (rows && *kind == RangeKind::Columns) {
+                    return self.clone();
+                }
+                let (pa, pb) = if rows { (a.cell.row, b.cell.row) } else { (a.cell.col, b.cell.col) };
+                let (lo, hi) = (pa.min(pb), pa.max(pb));
+                match op.map_span(lo, hi) {
+                    None => Expr::Error(ErrorKind::Ref),
+                    Some((nlo, nhi)) => {
+                        let (mut na, mut nb) = (*a, *b);
+                        let (va, vb) = if pa <= pb { (nlo, nhi) } else { (nhi, nlo) };
+                        if rows {
+                            na.cell.row = va;
+                            nb.cell.row = vb;
+                        } else {
+                            na.cell.col = va;
+                            nb.cell.col = vb;
+                        }
+                        Expr::Range(na, nb, *kind)
+                    }
+                }
+            }
+            Expr::Neg(x) => Expr::Neg(recur(x)),
+            Expr::Plus(x) => Expr::Plus(recur(x)),
+            Expr::Percent(x) => Expr::Percent(recur(x)),
+            Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
+            Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.shifted(op, home)).collect()),
+            Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.shifted(op, home)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError(pub String);
 

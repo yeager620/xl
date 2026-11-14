@@ -15,7 +15,7 @@ pub mod workbook;
 pub use address::{Addr, CellRef, MAX_COLS, MAX_ROWS, Range, SheetId, col_name, parse_col};
 pub use eval::Func;
 pub use format::{FmtColor, Formatted, NumberFormat};
-pub use formula::{ParseError, quote_sheet_name};
+pub use formula::{ParseError, Shift, quote_sheet_name};
 pub use store::{Cell, CellInput, CellStore};
 pub use style::{Border, HAlign, LineStyle, Rgb, Style};
 pub use value::{ErrorKind, Value, format_general};

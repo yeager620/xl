@@ -8,7 +8,7 @@ use gpui::{
 };
 use xl_engine::{HAlign, NumberFormat, Rgb, Value, quote_sheet_name};
 
-use crate::app::{BorderPreset, EditMode, Emphasis, Menu, Spreadsheet};
+use crate::app::{BorderPreset, ContextKind, EditMode, Emphasis, Menu, Spreadsheet};
 use crate::paint::paint_ops;
 use crate::refs::scan_refs;
 use crate::theme::Theme;
@@ -550,6 +550,60 @@ impl Spreadsheet {
         }
     }
 
+    // -------------------------------------------------------- context menu
+
+    fn render_context_menu(&self, kind: ContextKind, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let sel = self.selection();
+        let plural = |n: u32, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+        let rows = plural(sel.rows(), "row", "rows");
+        let cols = plural(sel.cols(), "column", "columns");
+        type Action = fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>);
+        let mut items: Vec<Option<(String, &'static str, Action)>> = Vec::new();
+        let clipboard: [Option<(String, &'static str, Action)>; 4] = [
+            Some(("Cut".into(), "Ctrl+X", |s, _, cx| s.cut(cx))),
+            Some(("Copy".into(), "Ctrl+C", |s, _, cx| s.copy(cx))),
+            Some(("Paste".into(), "Ctrl+V", |s, _, cx| s.paste(cx))),
+            None,
+        ];
+        items.extend(clipboard);
+        match kind {
+            ContextKind::Rows => {
+                items.push(Some((format!("Insert {rows} above"), "Ctrl+Shift+=", |s, _, _| s.insert_rows(false))));
+                items.push(Some((format!("Insert {rows} below"), "", |s, _, _| s.insert_rows(true))));
+                items.push(Some((format!("Delete {rows}"), "Ctrl+-", |s, _, _| s.delete_rows())));
+            }
+            ContextKind::Cols => {
+                items.push(Some((format!("Insert {cols} left"), "Ctrl+Shift+=", |s, _, _| s.insert_cols(false))));
+                items.push(Some((format!("Insert {cols} right"), "", |s, _, _| s.insert_cols(true))));
+                items.push(Some((format!("Delete {cols}"), "Ctrl+-", |s, _, _| s.delete_cols())));
+                items.push(None);
+                items.push(Some(("Autofit column width".into(), "", |s, w, _| s.autofit(s.active.col, w))));
+            }
+            ContextKind::Cells => {
+                items.push(Some((format!("Insert {rows} above"), "", |s, _, _| s.insert_rows(false))));
+                items.push(Some((format!("Insert {cols} left"), "", |s, _, _| s.insert_cols(false))));
+                items.push(Some((format!("Delete {rows}"), "", |s, _, _| s.delete_rows())));
+                items.push(Some((format!("Delete {cols}"), "", |s, _, _| s.delete_cols())));
+            }
+        }
+        items.push(None);
+        items.push(Some(("Clear contents".into(), "Delete", |s, _, _| s.clear_selection())));
+        items.push(Some(("Clear formatting".into(), "", |s, _, _| s.clear_formatting())));
+        let mut panel = menu_panel(&t, 236.).mt(px(0.));
+        for (i, item) in items.into_iter().enumerate() {
+            panel = match item {
+                None => panel.child(menu_separator(&t)),
+                Some((label, keys, action)) => panel.child(menu_item(&t, ("ctx", i), label, keys).on_click(cx.listener(move |this, _, window, cx| {
+                    this.context = None;
+                    action(this, window, cx);
+                    cx.notify();
+                }))),
+            };
+        }
+        panel
+    }
+
     // --------------------------------------------------------- formula bar
 
     fn render_formula_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -837,6 +891,7 @@ impl Render for Spreadsheet {
                     .overflow_hidden()
                     .child(grid)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -844,7 +899,7 @@ impl Render for Spreadsheet {
             )
             .child(self.render_bottom_bar(cx))
             .relative()
-            .when(self.menu.is_some() || self.palette.is_some(), |d| {
+            .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some(), |d| {
                 // Transparent backdrop: a click anywhere outside the open menu or palette closes it.
                 d.child(
                     deferred(div().id("menu-backdrop").absolute().top_0().left_0().size_full().occlude().on_mouse_down(
@@ -852,12 +907,16 @@ impl Render for Spreadsheet {
                         cx.listener(|this, _, _, cx| {
                             this.menu = None;
                             this.palette = None;
+                            this.context = None;
                             cx.stop_propagation();
                             cx.notify();
                         }),
                     ))
                     .with_priority(1),
                 )
+            })
+            .when_some(self.context, |d, (pos, kind)| {
+                d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_context_menu(kind, cx))).with_priority(2))
             })
             .when(self.palette.is_some(), |d| {
                 d.child(deferred(div().absolute().top(px(64.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))

@@ -95,6 +95,58 @@ impl CellStore {
             .flat_map(|(c, col)| col.iter().map(move |(&row, cell)| (CellRef::new(row, c as u32), cell)))
     }
 
+    /// Move cells for inserted/deleted rows or columns. Returns the cells
+    /// that were deleted.
+    pub fn apply_shift(&mut self, op: crate::formula::Shift) -> Vec<(CellRef, Cell)> {
+        use crate::formula::Shift;
+        let mut removed = Vec::new();
+        match op {
+            Shift::InsertRows { .. } | Shift::DeleteRows { .. } => {
+                for (c, col) in self.cols.iter_mut().enumerate() {
+                    let old = std::mem::take(col);
+                    for (row, cell) in old {
+                        match op.map_pos(row) {
+                            Some(r) => {
+                                col.insert(r, cell);
+                            }
+                            None => removed.push((CellRef::new(row, c as u32), cell)),
+                        }
+                    }
+                }
+            }
+            Shift::InsertCols { at, count, .. } => {
+                if (at as usize) < self.cols.len() {
+                    let tail = self.cols.split_off(at as usize);
+                    self.cols.resize_with(at as usize + count as usize, BTreeMap::new);
+                    self.cols.extend(tail);
+                    // Columns pushed past the sheet edge are lost.
+                    let max = crate::address::MAX_COLS as usize;
+                    if self.cols.len() > max {
+                        for (i, col) in self.cols.drain(max..).enumerate() {
+                            removed.extend(col.into_iter().map(|(r, cell)| (CellRef::new(r, (max + i) as u32), cell)));
+                        }
+                    }
+                }
+            }
+            Shift::DeleteCols { at, count, .. } => {
+                let (a, b) = ((at as usize).min(self.cols.len()), ((at + count) as usize).min(self.cols.len()));
+                for (i, col) in self.cols.drain(a..b).enumerate() {
+                    removed.extend(col.into_iter().map(|(r, cell)| (CellRef::new(r, (a + i) as u32), cell)));
+                }
+            }
+        }
+        self.len -= removed.len();
+        removed
+    }
+
+    /// Mutable access to every cell (for rewriting formulas in place).
+    pub fn cells_mut(&mut self) -> impl Iterator<Item = (CellRef, &mut Cell)> + '_ {
+        self.cols
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(c, col)| col.iter_mut().map(move |(&row, cell)| (CellRef::new(row, c as u32), cell)))
+    }
+
     /// Next non-empty row in `col` strictly after (or before) `row`.
     pub fn next_filled_in_col(&self, col: u32, row: u32, forward: bool) -> Option<u32> {
         let m = self.cols.get(col as usize)?;
