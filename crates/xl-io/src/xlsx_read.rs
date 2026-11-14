@@ -83,8 +83,10 @@ fn read_rels(zip: &mut Zip, name: &str) -> Result<HashMap<String, String>, Strin
 
 /// A `<definedName>`: (name, index of the sheet it's local to, formula).
 type DefinedNameXml = (String, Option<usize>, String);
+/// Sheets as (name, relationship id), and defined names.
+type WorkbookXml = (Vec<(String, String)>, Vec<DefinedNameXml>);
 
-fn read_sheet_list(zip: &mut Zip) -> Result<(Vec<(String, String)>, Vec<DefinedNameXml>), String> {
+fn read_sheet_list(zip: &mut Zip) -> Result<WorkbookXml, String> {
     let bytes = read_entry(zip, "xl/workbook.xml")?.ok_or("not an xlsx file (missing xl/workbook.xml)")?;
     let mut r = xml(&bytes);
     let mut out = Vec::new();
