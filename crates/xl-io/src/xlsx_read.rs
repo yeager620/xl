@@ -874,7 +874,6 @@ const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
     ("xl/threadedComments/", "comments"),
     ("xl/pivotTables/", "pivot tables"),
     ("xl/pivotCache/", "pivot tables"),
-    ("xl/tables/", "tables"),
     ("xl/vbaProject.bin", "macros"),
     ("xl/externalLinks/", "links to other workbooks"),
     ("xl/slicers/", "slicers"),
@@ -976,6 +975,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         if skipped {
             note("some kinds of conditional formatting");
         }
+        crate::xlsx_charts::read_sheet_tables(&mut zip, &part, &mut wb, *id)?;
         let drawn = crate::xlsx_charts::read_sheet_charts(&mut zip, &part, &mut wb, *id)?;
         if drawn.other_drawings {
             note("drawings and images");
@@ -990,6 +990,8 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
         note("chart sheets");
     }
-    let stats = wb.recalc_all();
+    // Formulas using tables get their dependencies once the tables are known.
+    let has_tables = wb.sheet_ids().iter().any(|&s| !wb.layout(s).tables.is_empty());
+    let stats = if has_tables { wb.rebuild() } else { wb.recalc_all() };
     Ok(Loaded { workbook: wb, cells, warnings, recalc: stats, unsupported })
 }

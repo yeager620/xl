@@ -12,6 +12,60 @@ use xl_engine::{CellRef, SheetId, Workbook};
 use crate::xlsx_read::{Zip, attr, local, push_entity, read_entry, read_rels, xml};
 use crate::{from_excel_height, from_excel_width_px};
 
+/// Read the tables (xl/tables/*.xml) a worksheet points to.
+pub(crate) fn read_sheet_tables(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<(), String> {
+    let rels = read_rels(zip, &rels_of(sheet_part))?;
+    let parts: Vec<String> = rels.values().filter(|t| t.contains("tables/")).map(|t| resolve(sheet_part, t)).collect();
+    for part in parts {
+        let Some(bytes) = read_entry(zip, &part)? else { continue };
+        let mut r = xml(&bytes);
+        let mut buf = Vec::new();
+        let mut table: Option<xl_engine::Table> = None;
+        loop {
+            match r.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+                Event::Start(ref e) | Event::Empty(ref e) => match local(e.name().as_ref()) {
+                    "table" => {
+                        let range = attr(e, "ref").and_then(|s| {
+                            let (a, b) = s.split_once(':').unwrap_or((&s, &s));
+                            Some(xl_engine::Range::new(CellRef::parse(a)?, CellRef::parse(b)?))
+                        });
+                        let header = attr(e, "headerRowCount").is_none_or(|v| v != "0");
+                        let name = attr(e, "displayName").or_else(|| attr(e, "name"));
+                        if let (Some(range), Some(name), true) = (range, name, header) {
+                            let totals = attr(e, "totalsRowCount").is_some_and(|v| v != "0");
+                            table = Some(xl_engine::Table { name, range, totals, style: xl_engine::TableStyle::Blue, banded: true });
+                        }
+                    }
+                    "tableStyleInfo" => {
+                        if let Some(t) = table.as_mut() {
+                            t.banded = attr(e, "showRowStripes").is_none_or(|v| v != "0");
+                            // Excel's built-in styles cycle through accent colors by number.
+                            let n: u32 = attr(e, "name").and_then(|s| s.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok()).unwrap_or(2);
+                            t.style = match (n + 5) % 7 {
+                                0 => xl_engine::TableStyle::Blue,
+                                1 => xl_engine::TableStyle::Orange,
+                                2 | 3 => xl_engine::TableStyle::Gray,
+                                5 => xl_engine::TableStyle::Green,
+                                _ => xl_engine::TableStyle::Blue,
+                            };
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        if let Some(t) = table
+            && let Some(l) = wb.layout_mut(sheet)
+        {
+            l.tables.push(t);
+        }
+    }
+    Ok(())
+}
+
 /// What reading a sheet's drawing found besides the charts it loaded.
 #[derive(Default)]
 pub(crate) struct DrawingNotes {

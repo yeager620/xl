@@ -91,6 +91,10 @@ impl Spreadsheet {
         out.sort_by_key(|c| c.label().len());
         out.sort_by(|a, b| a.label().cmp(b.label()));
         let mut names: Vec<Candidate> = self.wb.names().iter().filter(|d| d.name.to_ascii_uppercase().starts_with(&up)).map(|d| Candidate::Name(d.name.clone())).collect();
+        // Tables can be referred to by name too (Table1[Column]).
+        for (_, sheet_tables) in self.wb.sheet_ids().iter().map(|&id| (id, &self.wb.layout(id).tables)) {
+            names.extend(sheet_tables.iter().filter(|t| t.name.to_ascii_uppercase().starts_with(&up)).map(|t| Candidate::Name(t.name.clone())));
+        }
         names.sort_by(|a, b| a.label().cmp(b.label()));
         out.extend(names);
         // A word that already is the only match needs no menu.

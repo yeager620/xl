@@ -1194,3 +1194,35 @@ fn sparklines_per_row(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z ctrl-z");
     view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).sparklines.is_empty()));
 }
+
+#[gpui::test]
+fn format_as_table_and_grow(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    table(&view, cx); // F1:H6 plus I2
+    go(&view, cx, "G3");
+    cx.simulate_keystrokes("ctrl-t");
+    view.read_with(cx, |s, _| {
+        let t = &s.wb.layout(s.cur).tables[0];
+        assert_eq!(t.name, "Table1");
+        assert_eq!(t.range, xl_engine::Range::new(CellRef::parse("F1").unwrap(), CellRef::parse("I6").unwrap()));
+        assert!(s.wb.layout(s.cur).filter.is_some(), "tables come with filter buttons");
+    });
+    go(&view, cx, "K1");
+    cx.simulate_input("=SUM(Table1[Score])");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "K1"), Value::Number(71.0 + 93.0 + 88.0 + 65.0));
+    // Typing under the table adds a row that the total includes.
+    go(&view, cx, "H7");
+    cx.simulate_input("50");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).tables[0].range.end.row, 6));
+    assert_eq!(val(&view, cx, "K1"), Value::Number(367.0));
+    // Undo the table entirely: the formula's reference no longer resolves.
+    view.update(cx, |s, _| {
+        s.select(CellRef::parse("G3").unwrap(), false);
+        s.convert_table_to_range();
+    });
+    assert_eq!(val(&view, cx, "K1"), Value::Error(xl_engine::ErrorKind::Ref));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "K1"), Value::Number(367.0), "undo brings the table and its references back");
+}

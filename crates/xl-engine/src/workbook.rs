@@ -58,9 +58,37 @@ pub struct SheetLayout {
     /// Charts, back to front.
     pub charts: Vec<crate::chart::Chart>,
     pub sparklines: Vec<crate::chart::Sparkline>,
+    pub tables: Vec<Table>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
+}
+
+/// A table ("Format as Table"): a named range whose first row holds the
+/// column names (read live from the cells), with optional totals row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Table {
+    pub name: String,
+    pub range: Range,
+    pub totals: bool,
+    pub style: TableStyle,
+    pub banded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TableStyle {
+    #[default]
+    Blue,
+    Green,
+    Orange,
+    Gray,
+}
+
+impl Table {
+    /// Rows holding data (between the header and any totals row).
+    pub fn data_rows(&self) -> std::ops::RangeInclusive<u32> {
+        self.range.start.row + 1..=self.range.end.row - self.totals as u32
+    }
 }
 
 /// A filter on a range whose first row holds the headers.
@@ -94,6 +122,14 @@ impl SheetLayout {
             shift_levels(&mut self.col_levels);
         }
         self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
+        self.tables.retain_mut(|t| match op.map_range(t.range) {
+            // A table keeps its header row and at least one data row.
+            Some(r) if r.rows() > 1 => {
+                t.range = r;
+                true
+            }
+            _ => false,
+        });
         if rows {
             shift_set(&mut self.filtered_rows);
         }
@@ -123,6 +159,39 @@ pub struct Sheets {
 }
 
 impl Sheets {
+    /// The table a structured reference names (or, without a name, the one
+    /// containing `cell`), and the part of it the reference covers.
+    pub(crate) fn resolve_table(&self, sr: &crate::formula::StructRef, sheet: SheetId, cell: CellRef) -> Result<(SheetId, Range), ErrorKind> {
+        use crate::formula::TableArea;
+        let found = self.order.iter().filter_map(|&id| self.get(id)).find_map(|sd| {
+            sd.layout.tables.iter().find(|t| match &sr.table {
+                Some(name) => t.name.eq_ignore_ascii_case(name),
+                None => sd.id == sheet && t.range.contains(cell),
+            }).map(|t| (sd.id, t))
+        });
+        let (id, t) = found.ok_or(ErrorKind::Ref)?;
+        let r = t.range;
+        let (r0, r1) = match sr.area {
+            TableArea::All => (r.start.row, r.end.row),
+            TableArea::Data => (*t.data_rows().start(), *t.data_rows().end()),
+            TableArea::Headers => (r.start.row, r.start.row),
+            TableArea::Totals if t.totals => (r.end.row, r.end.row),
+            TableArea::Totals => return Err(ErrorKind::Ref),
+            TableArea::ThisRow if id == sheet && t.data_rows().contains(&cell.row) => (cell.row, cell.row),
+            TableArea::ThisRow => return Err(ErrorKind::Value),
+        };
+        let (c0, c1) = match &sr.cols {
+            None => (r.start.col, r.end.col),
+            Some((a, b)) => {
+                let store = self.store(id).ok_or(ErrorKind::Ref)?;
+                let find = |name: &str| (r.start.col..=r.end.col).find(|&c| store.value(CellRef::new(r.start.row, c)).display().eq_ignore_ascii_case(name.trim()));
+                let (ca, cb) = (find(a).ok_or(ErrorKind::Ref)?, find(b).ok_or(ErrorKind::Ref)?);
+                (ca.min(cb), ca.max(cb))
+            }
+        };
+        Ok((id, Range::new(CellRef::new(r0, c0), CellRef::new(r1, c1))))
+    }
+
     pub fn store(&self, id: SheetId) -> Option<&CellStore> {
         self.get(id).map(|s| &s.store)
     }
@@ -348,21 +417,27 @@ struct DepGraph {
 }
 
 /// Every reference an expression depends on, following defined names.
-fn collect_refs(expr: &Expr, names: &Names, at: Addr, depth: u8, out: &mut impl FnMut(SheetId, Range)) {
+fn collect_refs(expr: &Expr, sheets: &Sheets, names: &Names, at: Addr, depth: u8, out: &mut impl FnMut(SheetId, Range)) {
     expr.visit_refs(&mut |sheet, r| out(sheet.unwrap_or(at.sheet), r));
+    // Structured references depend on the table's current extent.
+    expr.visit_tables(&mut |t| {
+        if let Ok((sheet, r)) = sheets.resolve_table(t, at.sheet, at.cell) {
+            out(sheet, r);
+        }
+    });
     if depth < 16 {
         expr.visit_names(&mut |n| {
             if let Some(def) = names.lookup(n, at.sheet) {
-                collect_refs(&def.expr, names, at, depth + 1, out);
+                collect_refs(&def.expr, sheets, names, at, depth + 1, out);
             }
         });
     }
 }
 
 impl DepGraph {
-    fn add(&mut self, at: Addr, expr: &Expr, names: &Names) {
+    fn add(&mut self, at: Addr, expr: &Expr, sheets: &Sheets, names: &Names) {
         let mut p = Precedents::default();
-        collect_refs(expr, names, at, 0, &mut |sheet, r| {
+        collect_refs(expr, sheets, names, at, 0, &mut |sheet, r| {
             if r.start == r.end {
                 p.cells.push(Addr::new(sheet, r.start));
             } else {
@@ -1047,7 +1122,7 @@ impl Workbook {
             }
         }
         for (a, e) in formulas {
-            self.graph.add(a, &e, &self.names);
+            self.graph.add(a, &e, &self.sheets, &self.names);
         }
         self.recalc_all()
     }
@@ -1080,6 +1155,63 @@ impl Workbook {
             l.merges.push(range);
         }
         stats
+    }
+
+    /// A table name not used by any table or defined name ("Table1", …).
+    pub fn next_table_name(&self) -> String {
+        (1..).map(|i| format!("Table{i}")).find(|n| self.table_by_name(n).is_none() && self.names.lookup(n, 0).is_none()).unwrap_or_default()
+    }
+
+    pub fn table_by_name(&self, name: &str) -> Option<(SheetId, &Table)> {
+        self.sheets.order.iter().filter_map(|&id| self.sheets.get(id)).find_map(|sd| sd.layout.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name)).map(|t| (sd.id, t)))
+    }
+
+    /// The table containing a cell.
+    pub fn table_at(&self, sheet: SheetId, cell: CellRef) -> Option<&Table> {
+        self.layout(sheet).tables.iter().find(|t| t.range.contains(cell))
+    }
+
+    /// Add a table. Its name must be a valid, unused name; it mustn't overlap
+    /// another table.
+    pub fn add_table(&mut self, sheet: SheetId, table: Table) -> Result<RecalcStats, String> {
+        validate_name(&table.name)?;
+        if self.table_by_name(&table.name).is_some() || self.names.lookup(&table.name, sheet).is_some() {
+            return Err(format!("The name {} is already used", table.name));
+        }
+        if table.range.rows() < 2 {
+            return Err("A table needs a header row and at least one row of data".into());
+        }
+        let overlaps = |a: Range, b: Range| a.start.row <= b.end.row && b.start.row <= a.end.row && a.start.col <= b.end.col && b.start.col <= a.end.col;
+        if self.layout(sheet).tables.iter().any(|t| overlaps(t.range, table.range)) {
+            return Err("Tables can't overlap".into());
+        }
+        let Some(l) = self.layout_mut(sheet) else { return Err("No such sheet".into()) };
+        l.tables.push(table);
+        Ok(self.rebuild())
+    }
+
+    /// Grow tables over data typed in the row just below them (or the column
+    /// just right of them), like Excel. True if any table changed.
+    pub fn grow_tables(&mut self, sheet: SheetId, edited: &[CellRef]) -> bool {
+        let Some(sd) = self.sheets.get_mut(sheet) else { return false };
+        let mut changed = false;
+        for t in &mut sd.layout.tables {
+            let r = t.range;
+            let below = !t.totals && edited.iter().any(|c| c.row == r.end.row + 1 && (r.start.col..=r.end.col).contains(&c.col) && !sd.store.value(*c).is_empty());
+            let right = edited.iter().any(|c| c.col == r.end.col + 1 && (r.start.row..=r.end.row).contains(&c.row) && !sd.store.value(*c).is_empty());
+            if below {
+                t.range.end.row += 1;
+                changed = true;
+            }
+            if right {
+                t.range.end.col += 1;
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild();
+        }
+        changed
     }
 
     /// Recompute which rows the sheet's filter hides. The range first grows
@@ -1170,7 +1302,7 @@ impl Workbook {
                 Ok(Expr::Error(e)) => (CellInput::Value(Value::Error(e)), Value::Error(e)),
                 Ok(e) if !e.has_unknown_func() => {
                     let e = Arc::new(e);
-                    self.graph.add(a, &e, &self.names);
+                    self.graph.add(a, &e, &self.sheets, &self.names);
                     (CellInput::Formula(e), cached)
                 }
                 _ => (CellInput::Opaque(src.into()), cached),
@@ -1297,7 +1429,7 @@ impl Workbook {
             }
             Some(CellInput::Formula(expr)) => {
                 sheet.store.insert(a.cell, Cell { input: CellInput::Formula(expr.clone()), value: old_value });
-                self.graph.add(a, &expr, &self.names);
+                self.graph.add(a, &expr, &self.sheets, &self.names);
                 seeds.push(a);
                 forced.insert(a);
             }

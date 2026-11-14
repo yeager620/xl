@@ -497,3 +497,89 @@ mod split_tests {
         assert_eq!(split_fields("a;;b", ';'), ["a", "", "b"]);
     }
 }
+
+/// Header and banding colors of a table style (light theme, dark theme band).
+pub(crate) fn table_colors(style: xl_engine::TableStyle, dark: bool) -> (u32, u32) {
+    use xl_engine::TableStyle;
+    let (header, band, dark_band) = match style {
+        TableStyle::Blue => (0x4472C4, 0xD9E1F2, 0x26314A),
+        TableStyle::Green => (0x548235, 0xE2EFDA, 0x26372A),
+        TableStyle::Orange => (0xC55A11, 0xFCE4D6, 0x3D2B22),
+        TableStyle::Gray => (0x595959, 0xEDEDED, 0x2E3035),
+    };
+    (header, if dark { dark_band } else { band })
+}
+
+impl Spreadsheet {
+    /// Ctrl+T: make the data around the selection a table (first row = headers).
+    pub(crate) fn format_as_table(&mut self) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        if let Some(t) = self.wb.table_at(self.cur, self.active) {
+            self.message = Some((format!("This is already the table {}", t.name), false));
+            return;
+        }
+        let Some(range) = self.data_range() else {
+            self.message = Some(("Select the data to make a table of".into(), true));
+            return;
+        };
+        if range.rows() < 2 {
+            self.message = Some(("A table needs a header row and at least one row of data".into(), true));
+            return;
+        }
+        let table = xl_engine::Table { name: self.wb.next_table_name(), range, totals: false, style: xl_engine::TableStyle::Blue, banded: true };
+        let name = table.name.clone();
+        let mut result = Ok(());
+        self.change_layout(None, |s| {
+            match s.wb.add_table(s.cur, table) {
+                Ok(stats) => s.last_stats = Some(stats),
+                Err(e) => result = Err(e),
+            }
+            // Give it filter buttons if the sheet has no filter yet.
+            if let Some(l) = s.wb.layout_mut(s.cur)
+                && l.filter.is_none()
+            {
+                l.filter = Some(xl_engine::AutoFilter { range, columns: Default::default() });
+            }
+        });
+        match result {
+            Ok(()) => self.message = Some((format!("Created the table {name} — refer to its columns as {name}[Column]"), false)),
+            Err(e) => self.message = Some((e, true)),
+        }
+    }
+
+    /// Change the table under the selection (one undo step).
+    pub(crate) fn update_table(&mut self, f: impl FnOnce(&mut xl_engine::Table)) {
+        let active = self.active;
+        if self.wb.table_at(self.cur, active).is_none() {
+            self.message = Some(("Select a cell in a table first".into(), true));
+            return;
+        }
+        self.change_layout(None, |s| {
+            if let Some(t) = s.wb.layout_mut(s.cur).and_then(|l| l.tables.iter_mut().find(|t| t.range.contains(active))) {
+                f(t);
+            }
+            s.last_stats = Some(s.wb.rebuild());
+        });
+    }
+
+    /// Turn the table back into a plain range (formulas using it break).
+    pub(crate) fn convert_table_to_range(&mut self) {
+        let active = self.active;
+        let Some(range) = self.wb.table_at(self.cur, active).map(|t| t.range) else {
+            self.message = Some(("Select a cell in a table first".into(), true));
+            return;
+        };
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                l.tables.retain(|t| !t.range.contains(active));
+                if l.filter.as_ref().is_some_and(|f| f.range == range) {
+                    l.filter = None;
+                    l.filtered_rows.clear();
+                }
+            }
+            s.last_stats = Some(s.wb.rebuild());
+        });
+    }
+}

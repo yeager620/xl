@@ -22,6 +22,53 @@ const FUTURE_FUNCTIONS: &[&str] = &[
     "VAR.P", "PERCENTILE.INC", "QUARTILE.INC", "RANK.EQ", "MODE.SNGL",
 ];
 
+/// Files spell "this row" references in full: `[@Qty]` inside table T is
+/// written `T[[#This Row],[Qty]]`. String literals are left alone.
+pub fn expand_this_row(src: &str, table: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + 16);
+    let mut i = 0;
+    let mut quoted = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            quoted = !quoted;
+        }
+        if !quoted && c == b'[' && b.get(i + 1) == Some(&b'@') {
+            // Find the end of this bracket block, honouring ' escapes.
+            let (mut depth, mut j) = (0, i);
+            while j < b.len() {
+                match b[j] {
+                    b'\'' => j += 1,
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let inner = &src[i + 2..j.min(src.len())];
+            let col = inner.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(inner);
+            // A table name right before the bracket stays; otherwise use ours.
+            let named = out.chars().last().is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.');
+            if !named {
+                out.push_str(table);
+            }
+            out.push_str(&format!("[[#This Row],[{col}]]"));
+            i = j + 1;
+            continue;
+        }
+        let ch = src[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Add `_xlfn.` to future functions, skipping string literals.
 pub fn prefix_future_functions(src: &str) -> String {
     let b = src.as_bytes();
@@ -370,7 +417,21 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for &row in layout.hidden_rows.iter().chain(&layout.filtered_rows) {
             ws.set_row_hidden(row).map_err(err)?;
         }
-        if let Some(f) = &layout.filter {
+        for t in &layout.tables {
+            use rust_xlsxwriter::{Table as XTable, TableColumn, TableStyle as XStyle};
+            let r = t.range;
+            let columns: Vec<TableColumn> = (r.start.col..=r.end.col).map(|c| TableColumn::new().set_header(wb.display(Addr::new(id, CellRef::new(r.start.row, c))).text)).collect();
+            let style = match t.style {
+                xl_engine::TableStyle::Blue => XStyle::Medium2,
+                xl_engine::TableStyle::Orange => XStyle::Medium3,
+                xl_engine::TableStyle::Gray => XStyle::Medium4,
+                xl_engine::TableStyle::Green => XStyle::Medium7,
+            };
+            let table = XTable::new().set_name(&t.name).set_columns(&columns).set_style(style).set_banded_rows(t.banded).set_total_row(t.totals);
+            ws.add_table(r.start.row, r.start.col as u16, r.end.row, r.end.col as u16, &table).map_err(err)?;
+        }
+        // A table carries its own filter buttons; a sheet filter on the same cells would clash.
+        if let Some(f) = layout.filter.as_ref().filter(|f| !layout.tables.iter().any(|t| t.range == f.range)) {
             let r = f.range;
             ws.autofilter(r.start.row, r.start.col as u16, r.end.row, r.end.col as u16).map_err(err)?;
             // We hide the filtered rows ourselves (above), matching xl's view.
@@ -444,7 +505,11 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
             let f = fmt(wb.format_code(a), wb.style(a));
             match &c.input {
                 CellInput::Formula(_) | CellInput::Opaque(_) => {
-                    let src = prefix_future_functions(&wb.formula_source(a).unwrap_or_default());
+                    let mut src = prefix_future_functions(&wb.formula_source(a).unwrap_or_default());
+                    if src.contains("[@") {
+                        let table = wb.table_at(id, cell).map_or("", |t| t.name.as_str());
+                        src = expand_this_row(&src, table);
+                    }
                     let formula = Formula::new(format!("={src}")).set_result(result_text(&c.value));
                     match &f {
                         Some(f) => ws.write_formula_with_format(row, col, formula, f),

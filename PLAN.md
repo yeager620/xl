@@ -186,7 +186,7 @@ Checklist (tick as each lands with tests):
 - [x] Formula autocomplete (functions + names) and argument hints
 - [x] Conditional formatting (cell rules, text, top/bottom, above average, duplicates, formula, color scales, data bars) + xlsx
 - [x] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
-- [ ] Tables (Format as Table, banding, structured refs) + xlsx
+- [x] Tables (Format as Table, banding, structured refs) + xlsx
 - [ ] Pivot tables (field panel, sum/count/avg/min/max, refresh)
 - [x] Sparklines (line/column/win-loss) + xlsx
 - [ ] Goal Seek; Solver (min/max/target, constraints)

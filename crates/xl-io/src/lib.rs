@@ -9,7 +9,7 @@ use std::path::Path;
 
 use xl_engine::{RecalcStats, SheetId, Workbook};
 
-pub use xlsx_write::prefix_future_functions;
+pub use xlsx_write::{expand_this_row, prefix_future_functions};
 
 /// A workbook read from disk.
 pub struct Loaded {

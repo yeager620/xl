@@ -820,6 +820,9 @@ impl Spreadsheet {
             Ok(stats) => {
                 if let Some(stats) = stats {
                     self.push_undo(UndoEntry::Cells(vec![(edit.at, before)]));
+                    if edit.at.sheet == self.cur {
+                        self.wb.grow_tables(edit.at.sheet, &[edit.at.cell]);
+                    }
                     self.last_stats = Some(stats);
                     self.mark_dirty();
                 }
@@ -864,8 +867,10 @@ impl Spreadsheet {
             return;
         }
         let undo = self.snapshots(changes.iter().map(|(a, _)| *a));
+        let cells: Vec<CellRef> = changes.iter().filter(|(a, _)| a.sheet == self.cur).map(|(a, _)| a.cell).collect();
         self.last_stats = Some(self.wb.set_inputs(changes));
         self.push_undo(UndoEntry::Cells(undo));
+        self.wb.grow_tables(self.cur, &cells);
         self.mark_dirty();
     }
 
@@ -919,8 +924,13 @@ impl Spreadsheet {
             UndoEntry::Layout { sheet, layout, cells } => {
                 self.switch_sheet(sheet);
                 let inverse = UndoEntry::Layout { sheet, layout: self.wb.layout(sheet).clone(), cells: self.snapshots(cells.iter().map(|(a, _)| *a)) };
+                let tables_changed = self.wb.layout(sheet).tables != layout.tables;
                 if let Some(l) = self.wb.layout_mut(sheet) {
                     *l = layout;
+                }
+                if tables_changed {
+                    // Structured references resolve against the tables.
+                    self.last_stats = Some(self.wb.rebuild());
                 }
                 if !cells.is_empty() {
                     self.last_stats = Some(self.wb.restore(cells));
@@ -1926,6 +1936,7 @@ impl Spreadsheet {
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
             ("g", true) => self.focus_name_box(),
+            ("t", true) => self.format_as_table(),
             ("l", true) if shift => self.toggle_filter(),
             ("f", true) => self.open_find(false),
             ("h", true) => self.open_find(true),

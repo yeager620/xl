@@ -282,14 +282,14 @@ fn loading_keeps_cached_values_for_unsupported_formulas() {
     wb.load_cell(a(s, "A1"), LoadedCell::Value(n(4.0)));
     wb.load_cell(a(s, "A2"), LoadedCell::Formula { src: "A1*10".into(), cached: n(0.0) });
     wb.load_cell(a(s, "A3"), LoadedCell::Formula { src: "_xlfn.LAMBDA(x,x+1)(A1)".into(), cached: n(5.0) });
-    wb.load_cell(a(s, "A4"), LoadedCell::Formula { src: "Table1[Qty]".into(), cached: n(9.0) });
+    wb.load_cell(a(s, "A4"), LoadedCell::Formula { src: "SUM({1,2,6})".into(), cached: n(9.0) });
     wb.load_cell(a(s, "A5"), LoadedCell::Formula { src: "A3+A4".into(), cached: n(0.0) });
     wb.recalc_all();
     assert_eq!(*wb.value(a(s, "A2")), n(40.0), "supported formulas are recalculated");
     assert_eq!(*wb.value(a(s, "A3")), n(5.0), "unsupported functions keep the cached value");
     assert_eq!(*wb.value(a(s, "A4")), n(9.0), "unparseable syntax keeps the cached value");
     assert_eq!(*wb.value(a(s, "A5")), n(14.0), "dependents use cached values");
-    assert_eq!(wb.input_text(a(s, "A4")), "=Table1[Qty]");
+    assert_eq!(wb.input_text(a(s, "A4")), "=SUM({1,2,6})");
 }
 
 #[test]

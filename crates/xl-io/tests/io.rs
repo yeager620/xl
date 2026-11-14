@@ -523,3 +523,42 @@ fn sparklines_roundtrip_through_xlsx() {
     // Cell formulas elsewhere on the sheet are unaffected by reading sparklines.
     assert_eq!(*back.workbook.value(Addr::new(back.workbook.sheet_ids()[0], CellRef::new(0, 4))), Value::Number(16.0));
 }
+
+#[test]
+fn tables_roundtrip_through_xlsx() {
+    use xl_engine::{Range, Table, TableStyle};
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let rows = [["Item", "Qty", "Unit Price", "Total"], ["Pen", "10", "1.5", ""], ["Pad", "4", "3", ""]];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            if !v.is_empty() {
+                wb.set_input(Addr::new(s, CellRef::new(r as u32, c as u32)), v).unwrap();
+            }
+        }
+    }
+    wb.add_table(s, Table { name: "Sales".into(), range: Range::new(CellRef::new(0, 0), CellRef::new(2, 3)), totals: false, style: TableStyle::Green, banded: false }).unwrap();
+    wb.set_inputs([
+        (Addr::new(s, CellRef::new(1, 3)), "=[@Qty]*[@[Unit Price]]".to_string()),
+        (Addr::new(s, CellRef::new(2, 3)), "=[@Qty]*[@[Unit Price]]".to_string()),
+        (Addr::new(s, CellRef::new(0, 5)), "=SUM(Sales[Total])".to_string()),
+    ]);
+    assert_eq!(*wb.value(Addr::new(s, CellRef::new(0, 5))), Value::Number(27.0));
+    let p = tmp("table.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap();
+    assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
+    let b = &back.workbook;
+    let bs = b.sheet_ids()[0];
+    assert_eq!(b.layout(bs).tables, wb.layout(s).tables);
+    assert_eq!(b.input_text(Addr::new(bs, CellRef::new(1, 3))), "=Sales[@Qty]*Sales[@[Unit Price]]", "written in full, read back with the table name");
+    assert_eq!(*b.value(Addr::new(bs, CellRef::new(0, 5))), Value::Number(27.0));
+    assert_eq!(*b.value(Addr::new(bs, CellRef::new(2, 3))), Value::Number(12.0));
+}
+
+#[test]
+fn expands_this_row_references_for_files() {
+    use xl_io::expand_this_row;
+    assert_eq!(expand_this_row("[@Qty]*[@[Unit Price]]", "T"), "T[[#This Row],[Qty]]*T[[#This Row],[Unit Price]]");
+    assert_eq!(expand_this_row("Other[@Qty]&\"[@x]\"", "T"), "Other[[#This Row],[Qty]]&\"[@x]\"");
+}

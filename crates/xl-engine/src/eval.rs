@@ -340,6 +340,7 @@ impl<'a> Ctx<'a> {
                 Some(if self.store(sheet).is_some() { Ok(RangeRef { sheet, range }) } else { Err(ErrorKind::Ref) })
             }
             Expr::Paren(x) => self.resolve(x),
+            Expr::Table(t) => Some(self.sheets.resolve_table(t, self.sheet, self.cell).map(|(sheet, range)| RangeRef { sheet, range })),
             Expr::Name(n) => {
                 let def = self.names.lookup(n, self.sheet)?;
                 self.nested(|cx| cx.resolve(&def.expr)).unwrap_or(Some(Err(ErrorKind::Name)))
@@ -469,7 +470,7 @@ pub fn eval(e: &Expr, cx: &Ctx) -> Value {
         Expr::Text(t) => Value::Text(t.clone()),
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Error(err) => Value::Error(*err),
-        Expr::Ref(_) | Expr::Range(..) | Expr::Call(Func::Offset | Func::Indirect | Func::Index, _) => match cx.resolve(e) {
+        Expr::Ref(_) | Expr::Range(..) | Expr::Table(_) | Expr::Call(Func::Offset | Func::Indirect | Func::Index, _) => match cx.resolve(e) {
             Some(Ok(rr)) => cx.scalar_of(rr),
             Some(Err(err)) => Value::Error(err),
             None => Value::Error(ErrorKind::Value),

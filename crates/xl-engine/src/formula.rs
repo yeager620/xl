@@ -118,6 +118,176 @@ pub enum Expr {
     UnknownFunc(Arc<str>, Vec<Expr>),
     /// A defined name (`TaxRate`), resolved when evaluated.
     Name(Arc<str>),
+    /// A structured reference to part of a table (`Sales[Amount]`, `[@Qty]`).
+    Table(Arc<StructRef>),
+}
+
+/// Which rows of a table a structured reference means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableArea {
+    /// The data rows (the default).
+    Data,
+    All,
+    Headers,
+    Totals,
+    /// The row of the formula (`[@Col]`).
+    ThisRow,
+}
+
+/// `Table[...]`: a table (None = the one containing the formula), an area
+/// and optionally a column or span of columns, by header name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructRef {
+    pub table: Option<Arc<str>>,
+    pub area: TableArea,
+    pub cols: Option<(Arc<str>, Arc<str>)>,
+}
+
+/// Column names with characters that need escaping (or brackets) inside a
+/// structured reference.
+fn escape_column(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if matches!(ch, '[' | ']' | '#' | '\'') {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn needs_brackets(name: &str) -> bool {
+    !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+impl StructRef {
+    /// Parse the text between a reference's outer brackets.
+    fn parse(table: Option<Arc<str>>, spec: &str) -> Result<StructRef, ParseError> {
+        let bad = || ParseError(format!("bad table reference [{spec}]"));
+        let item = |s: &str| -> String {
+            // Unescape 'x and strip one level of brackets.
+            let s = s.trim();
+            let s = s.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(s);
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '\'' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        let special = |s: &str| -> Option<TableArea> {
+            Some(match s.to_ascii_lowercase().as_str() {
+                "#all" => TableArea::All,
+                "#data" => TableArea::Data,
+                "#headers" => TableArea::Headers,
+                "#totals" => TableArea::Totals,
+                "#this row" => TableArea::ThisRow,
+                _ => return None,
+            })
+        };
+        let spec_t = spec.trim();
+        if spec_t.is_empty() {
+            return Ok(StructRef { table, area: TableArea::Data, cols: None });
+        }
+        if let Some(rest) = spec_t.strip_prefix('@') {
+            let col: Arc<str> = item(rest).into();
+            let cols = (!col.is_empty()).then(|| (col.clone(), col));
+            return Ok(StructRef { table, area: TableArea::ThisRow, cols });
+        }
+        if !spec_t.starts_with('[') {
+            if let Some(area) = special(spec_t) {
+                return Ok(StructRef { table, area, cols: None });
+            }
+            let col: Arc<str> = item(spec_t).into();
+            return Ok(StructRef { table, area: TableArea::Data, cols: Some((col.clone(), col)) });
+        }
+        // A list of bracketed items: specials, then a column or column span.
+        let mut parts: Vec<String> = Vec::new();
+        let mut depth = 0;
+        let mut cur = String::new();
+        let mut chars = spec_t.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => {
+                    cur.push(c);
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                    }
+                }
+                '[' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ']' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => parts.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        parts.push(cur);
+        let mut area = TableArea::Data;
+        let mut cols = None;
+        for p in parts {
+            let p = p.trim();
+            if let Some(a) = special(&item(p)) {
+                area = a;
+            } else if let Some((a, b)) = p.split_once("]:[") {
+                cols = Some((item(&format!("{a}]")).into(), item(&format!("[{b}")).into()));
+            } else {
+                let c: Arc<str> = item(p).into();
+                if c.is_empty() {
+                    return Err(bad());
+                }
+                cols = Some((c.clone(), c));
+            }
+        }
+        Ok(StructRef { table, area, cols })
+    }
+
+    fn write(&self, out: &mut String) {
+        if let Some(t) = &self.table {
+            out.push_str(t);
+        }
+        let col = |c: &str| if needs_brackets(c) { format!("[{}]", escape_column(c)) } else { escape_column(c) };
+        let bracketed = |c: &str| format!("[{}]", escape_column(c));
+        let area = match self.area {
+            TableArea::Data => None,
+            TableArea::All => Some("#All"),
+            TableArea::Headers => Some("#Headers"),
+            TableArea::Totals => Some("#Totals"),
+            TableArea::ThisRow => Some("#This Row"),
+        };
+        out.push('[');
+        match (&self.cols, self.area, area) {
+            (None, TableArea::Data, _) => out.push_str("#Data"),
+            (None, _, Some(a)) => out.push_str(a),
+            (Some((a, b)), TableArea::ThisRow, _) if a == b => {
+                out.push('@');
+                out.push_str(&col(a));
+            }
+            (Some((a, b)), TableArea::Data, _) if a == b => out.push_str(&escape_column(a)),
+            (Some((a, b)), _, area) => {
+                if let Some(ar) = area {
+                    out.push_str(&format!("[{ar}],"));
+                }
+                if a == b {
+                    out.push_str(&bracketed(a));
+                } else {
+                    out.push_str(&format!("{}:{}", bracketed(a), bracketed(b)));
+                }
+            }
+            (None, _, None) => {}
+        }
+        out.push(']');
+    }
 }
 
 impl Expr {
@@ -143,7 +313,21 @@ impl Expr {
                 b.visit_refs(f);
             }
             Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_refs(f)),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => {}
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => {}
+        }
+    }
+
+    /// Visit every structured (table) reference in the expression.
+    pub fn visit_tables(&self, f: &mut impl FnMut(&StructRef)) {
+        match self {
+            Expr::Table(t) => f(t),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_tables(f),
+            Expr::Binary(_, a, b) => {
+                a.visit_tables(f);
+                b.visit_tables(f);
+            }
+            Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_tables(f)),
+            _ => {}
         }
     }
 
@@ -328,7 +512,7 @@ impl Expr {
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.shifted(op, home)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.shifted(op, home)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
         }
     }
 }
@@ -372,7 +556,7 @@ impl Expr {
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.offset(dr, dc)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.offset(dr, dc)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
         }
     }
 
@@ -415,7 +599,7 @@ impl Expr {
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.moved(mv, home)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.moved(mv, home)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
         }
     }
 
@@ -437,7 +621,7 @@ impl Expr {
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.rehomed(from, to)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.rehomed(from, to)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
         }
     }
 }
@@ -479,6 +663,8 @@ enum Tok {
     RParen,
     Comma,
     Colon,
+    /// A structured reference: optional table name and the bracket contents.
+    Struct(Option<String>, String),
 }
 
 impl Tok {
@@ -497,8 +683,33 @@ impl Tok {
             Tok::RParen => "')'".into(),
             Tok::Comma => "','".into(),
             Tok::Colon => "':'".into(),
+            Tok::Struct(t, s) => format!("'{}[{s}]'", t.as_deref().unwrap_or("")),
         }
     }
+}
+
+/// The contents of the bracket block starting at byte `start` (a '['),
+/// and the index just past its closing ']'. Nested brackets and ' escapes
+/// are respected.
+fn bracket_block(src: &str, start: usize) -> Result<(String, usize), ParseError> {
+    let b = src.as_bytes();
+    let mut depth = 0;
+    let mut i = start;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => i += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((src[start + 1..i].to_string(), i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(ParseError("unterminated table reference (missing ])".into()))
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
@@ -601,9 +812,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 if b.get(i) == Some(&b'!') {
                     i += 1;
                     out.push(Tok::Sheet(id.to_string()));
+                } else if b.get(i) == Some(&b'[') {
+                    let (spec, end) = bracket_block(src, i)?;
+                    i = end;
+                    out.push(Tok::Struct(Some(id.to_string()), spec));
                 } else {
                     out.push(Tok::Ident(id.to_string()));
                 }
+            }
+            b'[' => {
+                let (spec, end) = bracket_block(src, i)?;
+                i = end;
+                out.push(Tok::Struct(None, spec));
             }
             b'+' => {
                 out.push(Tok::PlusSign);
@@ -749,6 +969,7 @@ impl Parser<'_> {
                 }
             }
             Some(Tok::Ident(id)) => self.ident(id),
+            Some(Tok::Struct(table, spec)) => Ok(Expr::Table(Arc::new(StructRef::parse(table.map(Into::into), &spec)?))),
             Some(t) => Err(ParseError(format!("unexpected {}", t.describe()))),
             None => Err(ParseError("formula ends too early".into())),
         }
@@ -891,6 +1112,7 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut Stri
         Expr::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
         Expr::Error(err) => out.push_str(err.as_str()),
         Expr::Name(n) => out.push_str(n),
+        Expr::Table(t) => t.write(out),
         Expr::Ref(r) => {
             let mark = out.len();
             match shift_ref(r, dr, dc) {
@@ -1050,6 +1272,7 @@ mod tests {
         assert!(parse_formula("1+", &n).is_err());
         assert!(parse_formula("SUM(1,2", &n).is_err());
         assert!(parse_formula("\"abc", &n).is_err());
-        assert!(parse_formula("Table1[Col]", &n).is_err());
+        assert!(parse_formula("Table1[Col", &n).is_err(), "unterminated table reference");
+        assert!(parse_formula("Table1[Col]", &n).is_ok());
     }
 }

@@ -291,19 +291,31 @@ impl Spreadsheet {
                 }
             }
         }
-        // A cell's style with conditional formatting applied on top.
+        // A cell's style with its table's look and conditional formatting on top.
         let styled = |cell: CellRef| -> std::borrow::Cow<'_, Style> {
-            let base = self.wb.style(self.at(cell));
+            let mut base = std::borrow::Cow::Borrowed(self.wb.style(self.at(cell)));
+            if let Some(tb) = layout.tables.iter().find(|tb| tb.range.contains(cell)) {
+                let (header, band) = crate::data::table_colors(tb.style, t.dark);
+                let mut st = base.into_owned();
+                if cell.row == tb.range.start.row {
+                    st.fill = st.fill.or(Some(header));
+                    st.color = st.color.or(Some(0xFFFFFF));
+                    st.bold = true;
+                } else if tb.banded && (cell.row - tb.range.start.row).is_multiple_of(2) && st.fill.is_none() {
+                    st.fill = Some(band);
+                }
+                base = std::borrow::Cow::Owned(st);
+            }
             match cf.get(&cell) {
                 Some(res) if res.fill.is_some() || res.color.is_some() || res.bold || res.italic => {
-                    let mut st = base.clone();
+                    let mut st = base.into_owned();
                     st.fill = res.fill.or(st.fill);
                     st.color = res.color.or(st.color);
                     st.bold |= res.bold;
                     st.italic |= res.italic;
                     std::borrow::Cow::Owned(st)
                 }
-                _ => std::borrow::Cow::Borrowed(base),
+                _ => base,
             }
         };
 
