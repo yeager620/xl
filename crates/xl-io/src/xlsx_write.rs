@@ -5,13 +5,16 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook as XlsxBook};
-use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, Value, Workbook, precise};
+use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, VAlign, Value, Workbook, precise};
 
-use crate::to_excel_width_px;
+use crate::{to_excel_height, to_excel_width_px};
 
 /// Functions newer than Excel 2010 must carry the `_xlfn.` prefix in the
 /// file or Excel shows #NAME?.
-const FUTURE_FUNCTIONS: &[&str] = &["CONCAT", "IFS", "IFNA", "XLOOKUP", "XMATCH", "TEXTJOIN", "SWITCH", "MAXIFS", "MINIFS"];
+const FUTURE_FUNCTIONS: &[&str] = &[
+    "CONCAT", "IFS", "IFNA", "XLOOKUP", "XMATCH", "TEXTJOIN", "SWITCH", "MAXIFS", "MINIFS", "TEXTBEFORE", "TEXTAFTER", "DAYS", "STDEV.S", "STDEV.P", "VAR.S",
+    "VAR.P", "PERCENTILE.INC", "QUARTILE.INC", "RANK.EQ", "MODE.SNGL",
+];
 
 /// Add `_xlfn.` to future functions, skipping string literals.
 pub fn prefix_future_functions(src: &str) -> String {
@@ -97,6 +100,20 @@ fn build_format(code: Option<&str>, st: &Style) -> Format {
         HAlign::Center => f.set_align(FormatAlign::Center),
         HAlign::Right => f.set_align(FormatAlign::Right),
     };
+    f = match st.valign {
+        VAlign::Bottom => f,
+        VAlign::Center => f.set_align(FormatAlign::VerticalCenter),
+        VAlign::Top => f.set_align(FormatAlign::Top),
+    };
+    if st.wrap {
+        f = f.set_text_wrap();
+    }
+    if let Some(t) = st.font_size {
+        f = f.set_font_size(t as f64 / 10.0);
+    }
+    if let Some(name) = &st.font_name {
+        f = f.set_font_name(name.to_string());
+    }
     if !st.top.is_none() {
         f = f.set_border_top(border_kind(&st.top));
         if let Some(c) = st.top.color {
@@ -148,8 +165,27 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
     for &id in wb.sheet_ids() {
         let ws = book.add_worksheet();
         ws.set_name(wb.sheet_name(id)).map_err(err)?;
+        let layout = wb.layout(id);
         for (&col, &px) in wb.col_widths(id) {
             ws.set_column_width_pixels(col as u16, to_excel_width_px(px)).map_err(err)?;
+        }
+        for (&row, &px) in &layout.row_heights {
+            ws.set_row_height(row, to_excel_height(px)).map_err(err)?;
+        }
+        for &row in &layout.hidden_rows {
+            ws.set_row_hidden(row).map_err(err)?;
+        }
+        for &col in &layout.hidden_cols {
+            ws.set_column_hidden(col as u16).map_err(err)?;
+        }
+        if layout.freeze != (0, 0) {
+            ws.set_freeze_panes(layout.freeze.0, layout.freeze.1 as u16).map_err(err)?;
+        }
+        // Merges first: the top-left cell's real contents are written below.
+        for m in &layout.merges {
+            let a = Addr::new(id, m.start);
+            let f = fmt(wb.format_code(a), wb.style(a)).unwrap_or_default();
+            ws.merge_range(m.start.row, m.start.col as u16, m.end.row, m.end.col as u16, "", &f).map_err(err)?;
         }
         // Empty cells that carry a format or style keep it.
         let mut blanks: Vec<CellRef> = wb.formatted_cells(id).map(|(c, _)| c).chain(wb.styled_cells(id).map(|(c, _)| c)).collect();

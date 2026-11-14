@@ -627,3 +627,91 @@ fn right_click_row_header_opens_row_menu(cx: &mut TestAppContext) {
     assert_eq!(val(&view, cx, "A6"), Value::text("Croissants"), "inserted below row 6");
     assert_eq!(val(&view, cx, "C8"), Value::text("Subtotal"));
 }
+
+#[gpui::test]
+fn merge_navigate_and_undo(cx: &mut TestAppContext) {
+    use xl_engine::{HAlign, Range};
+    let (view, cx) = setup(cx);
+    // Select A1:D1 and merge & center; the title stays, the merge is one cell.
+    go(&view, cx, "A1");
+    cx.simulate_keystrokes("shift-right shift-right shift-right");
+    view.update(cx, |s, _| s.toggle_merge(true));
+    let a1d1 = Range::new(CellRef::parse("A1").unwrap(), CellRef::parse("D1").unwrap());
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.wb.layout(s.cur).merges, vec![a1d1]);
+        assert_eq!(s.wb.style(s.at(CellRef::parse("A1").unwrap())).align, HAlign::Center);
+    });
+    assert_eq!(val(&view, cx, "A1"), Value::text("Welcome to xl"));
+    // Clicking inside the merge selects it; arrows step over it.
+    go(&view, cx, "C1");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("A1").unwrap()));
+    cx.simulate_keystrokes("right");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("E1").unwrap()));
+    cx.simulate_keystrokes("left down");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("A2").unwrap()));
+    // Merging clears hidden cells; undo restores them and the layout.
+    go(&view, cx, "A4");
+    cx.simulate_keystrokes("shift-right");
+    view.update(cx, |s, _| s.toggle_merge(false));
+    assert_eq!(val(&view, cx, "B4"), Value::Empty);
+    assert_eq!(val(&view, cx, "D4"), Value::Number(0.0), "D4 = B4*C4 sees the cleared cell");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "B4"), Value::Number(3.0));
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).merges, vec![a1d1]));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).merges.is_empty()));
+    cx.simulate_keystrokes("ctrl-y");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).merges, vec![a1d1]));
+}
+
+#[gpui::test]
+fn hidden_rows_are_skipped_and_sized_to_zero(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "A5");
+    cx.simulate_keystrokes("shift-down");
+    view.update(cx, |s, _| s.set_hidden(true, true));
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.row_h(4), 0.0);
+        assert_eq!(s.row_y(6), s.row_y(4), "rows 5-6 take no space");
+        assert_eq!(s.active, CellRef::parse("A7").unwrap(), "selection moves off hidden rows");
+    });
+    cx.simulate_keystrokes("up");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("A4").unwrap()));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.row_h(4), crate::app::ROW_H));
+}
+
+#[gpui::test]
+fn frozen_panes_keep_headers_in_place(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "B4");
+    view.update(cx, |s, _| s.toggle_freeze());
+    view.update(cx, |s, _| {
+        assert_eq!(s.frozen(), (3, 1));
+        s.scroll_y = 10.0 * crate::app::ROW_H;
+        // The first grid row on screen is still row 1; below the frozen rows
+        // come the scrolled ones.
+        assert_eq!(s.row_at_grid(1.0), 0);
+        assert_eq!(s.row_at_grid(3.0 * crate::app::ROW_H + 1.0), 13);
+        assert_eq!(s.col_at_grid(10.0), 0);
+        s.ensure_visible(CellRef::parse("B5").unwrap());
+        assert_eq!(s.scroll_y, crate::app::ROW_H, "scrolls back so row 5 sits just under row 4, the first scrolling row");
+        s.ensure_visible(CellRef::parse("B2").unwrap());
+        assert_eq!(s.scroll_y, crate::app::ROW_H, "frozen rows never need scrolling");
+    });
+    view.update(cx, |s, _| s.toggle_freeze());
+    view.read_with(cx, |s, _| assert_eq!(s.frozen(), (0, 0)));
+}
+
+#[gpui::test]
+fn wrapped_text_fits_row_height(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "A14");
+    view.update(cx, |s, _| s.toggle_wrap());
+    cx.update(|window, app| {
+        view.update(app, |s, _| s.autofit_row(13, window));
+    });
+    view.read_with(cx, |s, _| assert!(s.row_h(13) >= 2.0 * crate::app::ROW_H, "a long note in a 140px column wraps: {}", s.row_h(13)));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.row_h(13), crate::app::ROW_H));
+}

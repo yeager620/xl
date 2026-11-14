@@ -11,6 +11,8 @@ fn icon(path: &str) -> Option<&'static [u8]> {
         "icons/align-center.svg" => include_bytes!("../../../assets/icons/align-center.svg"),
         "icons/align-left.svg" => include_bytes!("../../../assets/icons/align-left.svg"),
         "icons/align-right.svg" => include_bytes!("../../../assets/icons/align-right.svg"),
+        "icons/wrap-text.svg" => include_bytes!("../../../assets/icons/wrap-text.svg"),
+        "icons/table-cells-merge.svg" => include_bytes!("../../../assets/icons/table-cells-merge.svg"),
         "icons/baseline.svg" => include_bytes!("../../../assets/icons/baseline.svg"),
         "icons/bold.svg" => include_bytes!("../../../assets/icons/bold.svg"),
         "icons/chevron-down.svg" => include_bytes!("../../../assets/icons/chevron-down.svg"),

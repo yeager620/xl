@@ -308,3 +308,38 @@ fn defined_names_roundtrip() {
     let names: Vec<(String, bool)> = wb2.names().iter().map(|d| (d.name.clone(), d.scope.is_some())).collect();
     assert!(names.contains(&("Rate".into(), false)) && names.contains(&("Local".into(), true)), "{names:?}");
 }
+
+#[test]
+fn layout_roundtrips_through_xlsx() {
+    use xl_engine::{Range, Style, VAlign};
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    wb.set_input(a(s, "A1"), "Quarterly report").unwrap();
+    wb.set_input(a(s, "A3"), "A long note that wraps").unwrap();
+    wb.merge(s, Range::new(CellRef::parse("A1").unwrap(), CellRef::parse("D1").unwrap()));
+    wb.set_style(a(s, "A3"), &Style { wrap: true, valign: VAlign::Top, font_size: Some(140), font_name: Some("DejaVu Serif".into()), ..Style::default() });
+    wb.set_row_height(s, 2, Some(44.0));
+    {
+        let l = wb.layout_mut(s).unwrap();
+        l.hidden_rows.insert(5);
+        l.hidden_cols.insert(4);
+        l.freeze = (1, 2);
+    }
+    let p = tmp("layout.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap().workbook;
+    let s2 = back.sheet_ids()[0];
+    let l = back.layout(s2);
+    assert_eq!(l.merges, vec![Range::new(CellRef::parse("A1").unwrap(), CellRef::parse("D1").unwrap())]);
+    assert_eq!(l.freeze, (1, 2));
+    assert!(l.hidden_rows.contains(&5) && l.hidden_cols.contains(&4));
+    assert_eq!(back.row_height(s2, 2), Some(44.0));
+    let st = back.style(a(s2, "A3"));
+    assert!(st.wrap);
+    assert_eq!(st.valign, VAlign::Top);
+    assert_eq!(st.font_size, Some(140));
+    assert_eq!(st.font_name.as_deref(), Some("DejaVu Serif"));
+    let plain = back.style(a(s2, "A1"));
+    assert_eq!((plain.font_size, plain.font_name.clone()), (None, None), "the default font stays implicit");
+    assert_eq!(*back.value(a(s2, "A1")), Value::text("Quarterly report"));
+}

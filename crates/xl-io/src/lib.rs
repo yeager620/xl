@@ -58,6 +58,20 @@ pub fn save(wb: &Workbook, path: &Path, sheet: SheetId) -> Result<(), String> {
 /// Calibri 11), so widths scale by that ratio to keep proportions.
 const SCALE: f64 = 100.0 / 64.0;
 
+/// Pixel height of a default row in xl (the app's ROW_H). Excel's default is
+/// 15pt, so heights scale by that ratio to keep proportions.
+pub const DEFAULT_ROW_PX: f64 = 22.0;
+
+/// Excel row height in points to our pixels.
+pub fn from_excel_height(pt: f64) -> f64 {
+    pt * DEFAULT_ROW_PX / 15.0
+}
+
+/// Our row height in pixels to Excel points.
+pub fn to_excel_height(px: f64) -> f64 {
+    ((px * 15.0 / DEFAULT_ROW_PX) * 4.0).round() / 4.0
+}
+
 /// Excel `<col width>` (characters, padding included) to our pixels, using
 /// the OOXML formula for a 7px max digit width (Calibri 11):
 /// `px = trunc((256 * w + trunc(128 / 7)) / 256 * 7)`.

@@ -7,7 +7,7 @@ use gpui::{
     Bounds, ClipboardItem, Context, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point, ScrollEvent, Subscription, Window, point, px,
 };
-use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS, Range, RecalcStats, Rgb, SheetId, Shift, Style, Value, Workbook, quote_sheet_name};
+use xl_engine::{Addr, Border, CellRef, CellSnapshot, HAlign, MAX_COLS, MAX_ROWS, Range, RecalcStats, Rgb, SheetId, SheetLayout, Shift, Style, VAlign, Value, Workbook, quote_sheet_name};
 
 use crate::theme::Theme;
 
@@ -124,10 +124,12 @@ pub(crate) enum UndoEntry {
     /// Restore these cells.
     Cells(Snapshots),
     /// Undo a structural change: apply its inverse, then restore the cells
-    /// it deleted or rewrote, and the widths of deleted columns.
-    Structure { op: Shift, restore: Snapshots, widths: Vec<(u32, f64)> },
+    /// it deleted or rewrote, and the sheet's layout from before.
+    Structure { op: Shift, restore: Snapshots, layout: SheetLayout },
     /// Redo a structural change.
     Reapply(Shift),
+    /// Restore a sheet's layout (sizes, hidden lines, merges, freeze) and cells.
+    Layout { sheet: SheetId, layout: SheetLayout, cells: Snapshots },
 }
 
 impl UndoEntry {
@@ -135,6 +137,7 @@ impl UndoEntry {
         match self {
             UndoEntry::Cells(c) => c.iter().any(|(a, _)| a.sheet == id),
             UndoEntry::Structure { op, .. } | UndoEntry::Reapply(op) => op.sheet() == id,
+            UndoEntry::Layout { sheet, .. } => *sheet == id,
         }
     }
 }
@@ -204,6 +207,8 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// Layout when a resize drag began, for its undo step.
+    layout_before: Option<(SheetId, SheetLayout)>,
     /// Right-click menu: where it opened and what it's for.
     pub(crate) context: Option<(Point<Pixels>, ContextKind)>,
     /// File being opened in the background.
@@ -264,6 +269,7 @@ impl Spreadsheet {
             renaming: None,
             confirm_delete: None,
             menu: None,
+            layout_before: None,
             context: None,
             loading: None,
             palette: None,
@@ -548,6 +554,8 @@ impl Spreadsheet {
     }
 
     pub(crate) fn select(&mut self, c: CellRef, extend: bool) {
+        // A merged range is selected through its top-left cell.
+        let c = if extend { c } else { self.wb.layout(self.cur).merge_at(c).map_or(c, |m| m.start) };
         self.active = c;
         if !extend {
             self.anchor = c;
@@ -555,12 +563,27 @@ impl Spreadsheet {
         self.ensure_visible(c);
     }
 
+    /// Arrow keys: one visible cell over, stepping across merged ranges and
+    /// skipping hidden rows and columns.
     fn move_by(&mut self, dr: i64, dc: i64, extend: bool) {
-        let from = self.active;
-        let to = CellRef::new(
-            (from.row as i64 + dr).clamp(0, MAX_ROWS as i64 - 1) as u32,
-            (from.col as i64 + dc).clamp(0, MAX_COLS as i64 - 1) as u32,
-        );
+        let here = self.wb.layout(self.cur).merge_at(self.active).filter(|_| !extend).unwrap_or(Range::single(self.active));
+        let mut row = if dr > 0 { here.end.row } else { here.start.row } as i64;
+        let mut col = if dc > 0 { here.end.col } else { here.start.col } as i64;
+        loop {
+            let (nr, nc) = ((row + dr).clamp(0, MAX_ROWS as i64 - 1), (col + dc).clamp(0, MAX_COLS as i64 - 1));
+            if (nr, nc) == (row, col) {
+                break;
+            }
+            (row, col) = (nr, nc);
+            if self.row_h(row as u32) > 0.0 && self.col_w(col as u32) > 0.0 {
+                break;
+            }
+        }
+        if self.row_h(row as u32) == 0.0 || self.col_w(col as u32) == 0.0 {
+            return;
+        }
+        let to = CellRef::new(row as u32, if dc == 0 { self.active.col } else { col as u32 });
+        let to = CellRef::new(if dr == 0 { self.active.row } else { to.row }, to.col);
         self.select(to, extend);
     }
 
@@ -777,14 +800,14 @@ impl Spreadsheet {
                 self.last_stats = Some(self.wb.restore(cells));
                 UndoEntry::Cells(inverse)
             }
-            UndoEntry::Structure { op, restore, widths } => {
+            UndoEntry::Structure { op, restore, layout } => {
                 self.switch_sheet(op.sheet());
                 self.wb.apply_shift(op.inverse());
                 // Put back only what the change actually altered.
                 let changed: Snapshots = restore.into_iter().filter(|(a, snap)| self.wb.snapshot(*a) != *snap).collect();
                 self.last_stats = Some(self.wb.restore(changed));
-                for (col, w) in widths {
-                    self.wb.set_col_width(op.sheet(), col, Some(w));
+                if let Some(l) = self.wb.layout_mut(op.sheet()) {
+                    *l = layout;
                 }
                 self.clip = None;
                 UndoEntry::Reapply(op)
@@ -792,6 +815,17 @@ impl Spreadsheet {
             UndoEntry::Reapply(op) => {
                 self.switch_sheet(op.sheet());
                 self.structural(op)
+            }
+            UndoEntry::Layout { sheet, layout, cells } => {
+                self.switch_sheet(sheet);
+                let inverse = UndoEntry::Layout { sheet, layout: self.wb.layout(sheet).clone(), cells: self.snapshots(cells.iter().map(|(a, _)| *a)) };
+                if let Some(l) = self.wb.layout_mut(sheet) {
+                    *l = layout;
+                }
+                if !cells.is_empty() {
+                    self.last_stats = Some(self.wb.restore(cells));
+                }
+                inverse
             }
         };
         if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
@@ -812,13 +846,117 @@ impl Spreadsheet {
         };
         // Formulas anywhere may be rewritten (e.g. to #REF!); remember them all.
         restore.extend(self.wb.formula_texts().into_iter().map(|(a, _)| (a, self.wb.snapshot(a))));
-        let widths = match op {
-            Shift::DeleteCols { at, count, .. } => (at..at + count).filter_map(|c| Some((c, self.wb.col_width(sheet, c)?))).collect(),
-            _ => Vec::new(),
-        };
+        let layout = self.wb.layout(sheet).clone();
         self.last_stats = Some(self.wb.apply_shift(op));
         self.clip = None;
-        UndoEntry::Structure { op, restore, widths }
+        UndoEntry::Structure { op, restore, layout }
+    }
+
+    /// Change the current sheet's layout (and possibly cells in `touched`) as
+    /// one undoable step.
+    fn change_layout(&mut self, touched: Option<Range>, f: impl FnOnce(&mut Self)) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let sheet = self.cur;
+        let before = self.wb.layout(sheet).clone();
+        let cells = touched.map_or_else(Vec::new, |r| self.wb.region_snapshots(sheet, r));
+        f(self);
+        let changed_cells: Snapshots = cells.into_iter().filter(|(a, snap)| self.wb.snapshot(*a) != *snap).collect();
+        if *self.wb.layout(sheet) != before || !changed_cells.is_empty() {
+            self.push_undo(UndoEntry::Layout { sheet, layout: before, cells: changed_cells });
+            self.mark_dirty();
+        }
+    }
+
+    /// Merge the selection (keeping the top-left value), or unmerge it if it
+    /// overlaps merged cells.
+    pub(crate) fn toggle_merge(&mut self, center: bool) {
+        let sel = self.selection();
+        let sheet = self.cur;
+        let overlaps = self.wb.layout(sheet).merges.iter().any(|m| m.start.row <= sel.end.row && sel.start.row <= m.end.row && m.start.col <= sel.end.col && sel.start.col <= m.end.col);
+        if overlaps {
+            self.change_layout(None, |s| s.wb.unmerge(sheet, sel));
+            return;
+        }
+        if sel.cell_count() < 2 {
+            return;
+        }
+        if sel.cell_count() > 1_000_000 {
+            self.message = Some(("Select a smaller range to merge".into(), true));
+            return;
+        }
+        self.change_layout(Some(sel), |s| {
+            s.last_stats = Some(s.wb.merge(sheet, sel));
+            if center {
+                let a = s.at(sel.start);
+                let mut st = s.wb.style(a).clone();
+                st.align = HAlign::Center;
+                st.valign = VAlign::Center;
+                s.wb.restore(vec![(a, CellSnapshot { style: st, ..s.wb.snapshot(a) })]);
+            }
+        });
+        self.anchor = sel.start;
+        self.active = sel.start;
+    }
+
+    pub(crate) fn toggle_wrap(&mut self) {
+        let on = !self.wb.style(self.at(self.active)).wrap;
+        self.modify_styles(|st, _, _| st.wrap = on);
+    }
+
+    pub(crate) fn set_valign(&mut self, v: VAlign) {
+        self.modify_styles(|st, _, _| st.valign = v);
+    }
+
+    /// Font size in points (None = default).
+    pub(crate) fn set_font_size(&mut self, pt: Option<f64>) {
+        let tenths = pt.map(|p| (p.clamp(1.0, 409.0) * 10.0).round() as u16);
+        self.modify_styles(|st, _, _| st.font_size = tenths);
+    }
+
+    /// Freeze rows above and columns left of the active cell, or unfreeze.
+    pub(crate) fn toggle_freeze(&mut self) {
+        let target = if self.frozen() != (0, 0) { (0, 0) } else { (self.active.row, self.active.col) };
+        self.set_freeze(target);
+    }
+
+    pub(crate) fn set_freeze(&mut self, freeze: (u32, u32)) {
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                l.freeze = freeze;
+            }
+            s.scroll_x = 0.0;
+            s.scroll_y = 0.0;
+        });
+        self.ensure_visible(self.active);
+    }
+
+    /// Hide (or unhide) the selected rows or columns.
+    pub(crate) fn set_hidden(&mut self, rows: bool, hide: bool) {
+        let sel = self.selection();
+        let (a, z) = if rows { (sel.start.row, sel.end.row) } else { (sel.start.col, sel.end.col) };
+        // Unhiding a whole-sheet selection only touches lines that are hidden.
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                let set = if rows { &mut l.hidden_rows } else { &mut l.hidden_cols };
+                if hide {
+                    set.extend(a..=z.min(a + 1_048_576));
+                } else {
+                    let gone: Vec<u32> = set.range(a..=z).copied().collect();
+                    for k in gone {
+                        set.remove(&k);
+                    }
+                }
+            }
+        });
+        if hide {
+            // Move off the hidden lines.
+            let next = if rows { (z + 1..MAX_ROWS).find(|&r| self.row_h(r) > 0.0).map(|r| CellRef::new(r, self.active.col)) } else { (z + 1..MAX_COLS).find(|&c| self.col_w(c) > 0.0).map(|c| CellRef::new(self.active.row, c)) };
+            if let Some(c) = next {
+                self.select(c, false);
+            }
+        }
     }
 
     /// Whole rows selected (every column)?
@@ -1611,6 +1749,7 @@ impl Spreadsheet {
                 if ev.click_count == 2 {
                     self.autofit(col, window);
                 } else {
+                    self.layout_before = Some((self.cur, self.wb.layout(self.cur).clone()));
                     self.drag = Some(Drag::ResizeCol { col, start_x: f64::from(ev.position.x), start_w: self.col_w(col) });
                 }
             }
@@ -1625,6 +1764,7 @@ impl Spreadsheet {
                 if ev.click_count == 2 {
                     self.autofit_row(row, window);
                 } else {
+                    self.layout_before = Some((self.cur, self.wb.layout(self.cur).clone()));
                     self.drag = Some(Drag::ResizeRow { row, start_y: f64::from(ev.position.y), start_h: self.row_h(row) });
                 }
             }
@@ -1730,6 +1870,11 @@ impl Spreadsheet {
     }
 
     pub(crate) fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((sheet, layout)) = self.layout_before.take()
+            && *self.wb.layout(sheet) != layout
+        {
+            self.push_undo(UndoEntry::Layout { sheet, layout, cells: Vec::new() });
+        }
         if self.drag.take().is_some() {
             cx.notify();
         }
@@ -1747,6 +1892,14 @@ impl Spreadsheet {
     }
 
     pub(crate) fn autofit(&mut self, col: u32, window: &mut Window) {
+        let before = self.wb.layout(self.cur).clone();
+        self.autofit_inner(col, window);
+        if *self.wb.layout(self.cur) != before {
+            self.push_undo(UndoEntry::Layout { sheet: self.cur, layout: before, cells: Vec::new() });
+        }
+    }
+
+    fn autofit_inner(&mut self, col: u32, window: &mut Window) {
         let r = Range::new(CellRef::new(0, col), CellRef::new(MAX_ROWS - 1, col));
         let mut w: f64 = MIN_COL_W;
         let f = crate::paint::cell_font();
@@ -1763,8 +1916,7 @@ impl Spreadsheet {
     /// Fit a row to its tallest wrapped or enlarged cell (default height if none).
     pub(crate) fn autofit_row(&mut self, row: u32, window: &mut Window) {
         let h = self.fitted_row_height(row, window);
-        self.wb.set_row_height(self.cur, row, if (h - ROW_H).abs() < 0.5 { None } else { Some(h) });
-        self.mark_dirty();
+        self.change_layout(None, |s| s.wb.set_row_height(s.cur, row, if (h - ROW_H).abs() < 0.5 { None } else { Some(h) }));
     }
 
     /// Height a row needs for its contents: wrapped text and font sizes.
@@ -1774,11 +1926,11 @@ impl Spreadsheet {
         let cells: Vec<CellRef> = self.wb.store(self.cur).iter_range(r).take(2_000).map(|(c, _)| c).collect();
         for c in cells {
             let st = self.wb.style(self.at(c));
-            let size = crate::paint::font_px(&st);
+            let size = crate::paint::font_px(st);
             let line_h = crate::paint::line_height(size);
             let lines = if st.wrap {
                 let text = self.wb.display(self.at(c)).text;
-                crate::paint::wrap_lines(window, &text, crate::paint::cell_font_for(&st), size, self.col_w(c.col) - 2.0 * CELL_PAD).len().max(1)
+                crate::paint::wrap_lines(window, &text, crate::paint::cell_font_for(st), size, self.col_w(c.col) - 2.0 * CELL_PAD).len().max(1)
             } else {
                 1
             };

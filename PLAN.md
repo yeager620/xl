@@ -176,9 +176,9 @@ Written but not yet run here: AppImage (needs appimagetool download), Flatpak (n
 
 Checklist (tick as each lands with tests):
 - [x] Engine groundwork: formula's own cell in eval context; reference-returning functions (OFFSET/INDIRECT/INDEX) and names resolve as ranges
-- [ ] ~49 high-use functions + one-line descriptions for every function (agent, worktree)
+- [x] ~49 high-use functions + one-line descriptions for every function (agent, worktree)
 - [x] Insert/delete rows & columns with formula adjustment (+ formats, styles, widths, later features), undo/redo, context menu, Ctrl+Shift+= / Ctrl+-
-- [ ] Row heights (drag + autofit), hidden rows/cols, merged cells, wrap text, vertical alignment, font size/family; freeze panes (paned painter); xlsx read/write for all
+- [x] Row heights (drag + autofit), hidden rows/cols, merged cells, wrap text, vertical alignment, font size/family; freeze panes (paned painter); xlsx read/write for all
 - [ ] Named ranges (parser, eval, deps), typeable name box (jump / define)
 - [ ] xlsx: detect unsupported parts (charts, drawings, comments, pivots, validation, VBA, …) and warn before overwriting
 - [ ] Find & replace (find bar), sort (A→Z, Z→A, custom), AutoFilter (header dropdowns, value lists) + xlsx

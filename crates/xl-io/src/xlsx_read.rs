@@ -15,10 +15,10 @@ use xl_engine::format::builtin_format;
 use xl_engine::formula::parse_formula;
 use xl_engine::input::classify_literal;
 use xl_engine::style::{INDEXED_COLORS, apply_tint};
-use xl_engine::{Addr, Border, CellRef, ErrorKind, HAlign, LineStyle, LoadedCell, MAX_COLS, Rgb, SheetId, Style, Value, Workbook, validate_sheet_name};
+use xl_engine::{Addr, Border, CellRef, ErrorKind, HAlign, LineStyle, LoadedCell, MAX_COLS, MAX_ROWS, Range, Rgb, SheetId, Style, VAlign, Value, Workbook, validate_sheet_name};
 use zip::ZipArchive;
 
-use crate::{Loaded, from_excel_width};
+use crate::{Loaded, from_excel_height, from_excel_width};
 
 type Zip = ZipArchive<BufReader<File>>;
 
@@ -251,6 +251,8 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
     let mut cur_border = [Border::default(); 4];
     let mut border_side: Option<usize> = None;
     let mut cur_xf: Option<Xf> = None;
+    // The workbook's default font (the first one) is xl's default font too.
+    let mut default_font: Option<(Option<Arc<str>>, Option<u16>)> = None;
     loop {
         let ev = r.read_event().map_err(|e| e.to_string())?;
         let (e, empty) = match &ev {
@@ -272,6 +274,18 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
                 ("fonts", "i") => cur_style.italic = flag(&e),
                 ("fonts", "u") => cur_style.underline = flag(&e),
                 ("fonts", "strike") => cur_style.strike = flag(&e),
+                ("fonts", "sz") => {
+                    cur_style.font_size = attr(&e, "val").and_then(|v| v.parse::<f64>().ok()).map(|pt| (pt * 10.0).round() as u16);
+                    if default_font.as_ref().is_some_and(|d| d.1 == cur_style.font_size) {
+                        cur_style.font_size = None;
+                    }
+                }
+                ("fonts", "name") => {
+                    cur_style.font_name = attr(&e, "val").map(Arc::from);
+                    if default_font.as_ref().is_some_and(|d| d.0 == cur_style.font_name) {
+                        cur_style.font_name = None;
+                    }
+                }
                 ("fonts", "color") => {
                     // The default text color (black / dark 1) stays automatic so dark mode works.
                     cur_style.color = color_of(&e, &theme).filter(|&c| c != 0x000000 && c != theme[1]);
@@ -321,6 +335,12 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
                             Some("right") => HAlign::Right,
                             _ => HAlign::General,
                         };
+                        xf.style.valign = match attr(&e, "vertical").as_deref() {
+                            Some("top") => VAlign::Top,
+                            Some("center" | "justify" | "distributed") => VAlign::Center,
+                            _ => VAlign::Bottom,
+                        };
+                        xf.style.wrap = attr(&e, "wrapText").is_some_and(|v| v == "1" || v == "true");
                     }
                 }
                 _ => {}
@@ -330,6 +350,14 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
                 end_element(&name, &section, &mut fonts, &cur_style, &mut fills, cur_fill, &mut borders, &cur_border, &mut border_side);
             }
             continue;
+        }
+        if let Event::End(e) = &ev
+            && section == "fonts"
+            && local(e.name().as_ref()) == "font"
+            && default_font.is_none()
+        {
+            // The first font defines the defaults; it is itself plain.
+            default_font = Some((cur_style.font_name.take(), cur_style.font_size.take()));
         }
         match ev {
             Event::End(e) => {
@@ -419,6 +447,32 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                             row = n.saturating_sub(1);
                         }
                         col = 0;
+                        let truthy = |k: &str| attr(e, k).is_some_and(|s| s == "1" || s == "true");
+                        if truthy("customHeight")
+                            && let Some(ht) = attr(e, "ht").and_then(|s| s.parse::<f64>().ok())
+                        {
+                            wb.set_row_height(cx.id, row, Some(from_excel_height(ht)));
+                        }
+                        if truthy("hidden")
+                            && let Some(l) = wb.layout_mut(cx.id)
+                        {
+                            l.hidden_rows.insert(row);
+                        }
+                    }
+                    "mergeCell" => {
+                        if let Some(r) = attr(e, "ref").and_then(|s| parse_range(&s))
+                            && r.cell_count() > 1
+                            && let Some(l) = wb.layout_mut(cx.id)
+                        {
+                            l.merges.push(r);
+                        }
+                    }
+                    "pane" => {
+                        let frozen = matches!(attr(e, "state").as_deref(), Some("frozen" | "frozenSplit"));
+                        let split = |k: &str| attr(e, k).and_then(|s| s.parse::<f64>().ok()).map_or(0, |v| v as u32);
+                        if frozen && let Some(l) = wb.layout_mut(cx.id) {
+                            l.freeze = (split("ySplit").min(MAX_ROWS - 1), split("xSplit").min(MAX_COLS - 1));
+                        }
                     }
                     "c" => {
                         cell = attr(e, "r").and_then(|s| CellRef::parse(&s)).unwrap_or(CellRef::new(row, col));
@@ -453,6 +507,12 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         let min: u32 = attr(e, "min").and_then(|s| s.parse().ok()).unwrap_or(1);
                         let max: u32 = attr(e, "max").and_then(|s| s.parse().ok()).unwrap_or(min);
                         let custom = attr(e, "customWidth").is_some_and(|s| s == "1" || s == "true");
+                        if attr(e, "hidden").is_some_and(|s| s == "1" || s == "true")
+                            && max >= min
+                            && let Some(l) = wb.layout_mut(cx.id)
+                        {
+                            l.hidden_cols.extend(min - 1..max.min(MAX_COLS));
+                        }
                         if let Some(w) = attr(e, "width").and_then(|s| s.parse::<f64>().ok())
                             && custom
                             && max >= min
@@ -534,6 +594,12 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         warnings.push(format!("{}: {unresolved_shared} shared formulas couldn't be expanded and were kept as values", wb.sheet_name(cx.id)));
     }
     Ok(())
+}
+
+/// "A1:B2" (or a single cell) to a range.
+fn parse_range(s: &str) -> Option<Range> {
+    let (a, b) = s.split_once(':').unwrap_or((s, s));
+    Some(Range::new(CellRef::parse(a)?, CellRef::parse(b)?))
 }
 
 fn sheet_path(target: &str) -> String {

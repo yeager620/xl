@@ -356,6 +356,17 @@ impl Spreadsheet {
                     cx.notify();
                 }))
             }))
+            .child(tool_button(&t, "wrap", st.wrap).child(icon("wrap-text", t.ink)).tooltip(tip(t, "Wrap text", "")).on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_wrap();
+                cx.notify();
+            })))
+            .child({
+                let merged = self.wb.layout(self.cur).merge_at(self.active).is_some();
+                tool_button(&t, "merge", merged).child(icon("table-cells-merge", t.ink)).tooltip(tip(t, if merged { "Unmerge cells" } else { "Merge and center" }, "")).on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_merge(true);
+                    cx.notify();
+                }))
+            })
             .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx));
 
         let file = no_drag(div()).flex().flex_row().items_center().gap(px(2.)).child(
@@ -572,12 +583,18 @@ impl Spreadsheet {
                 items.push(Some((format!("Insert {rows} above"), "Ctrl+Shift+=", |s, _, _| s.insert_rows(false))));
                 items.push(Some((format!("Insert {rows} below"), "", |s, _, _| s.insert_rows(true))));
                 items.push(Some((format!("Delete {rows}"), "Ctrl+-", |s, _, _| s.delete_rows())));
+                items.push(None);
+                items.push(Some(("Hide".into(), "", |s, _, _| s.set_hidden(true, true))));
+                items.push(Some(("Unhide".into(), "", |s, _, _| s.set_hidden(true, false))));
+                items.push(Some(("Fit row height".into(), "", |s, w, _| s.autofit_row(s.active.row, w))));
             }
             ContextKind::Cols => {
                 items.push(Some((format!("Insert {cols} left"), "Ctrl+Shift+=", |s, _, _| s.insert_cols(false))));
                 items.push(Some((format!("Insert {cols} right"), "", |s, _, _| s.insert_cols(true))));
                 items.push(Some((format!("Delete {cols}"), "Ctrl+-", |s, _, _| s.delete_cols())));
                 items.push(None);
+                items.push(Some(("Hide".into(), "", |s, _, _| s.set_hidden(false, true))));
+                items.push(Some(("Unhide".into(), "", |s, _, _| s.set_hidden(false, false))));
                 items.push(Some(("Autofit column width".into(), "", |s, w, _| s.autofit(s.active.col, w))));
             }
             ContextKind::Cells => {
