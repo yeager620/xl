@@ -15,6 +15,15 @@ pub enum HAlign {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VAlign {
+    /// Excel's default.
+    #[default]
+    Bottom,
+    Center,
+    Top,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineStyle {
     #[default]
     None,
@@ -64,6 +73,13 @@ pub struct Style {
     /// Background fill; None = no fill.
     pub fill: Option<Rgb>,
     pub align: HAlign,
+    pub valign: VAlign,
+    /// Wrap text onto multiple lines within the column width.
+    pub wrap: bool,
+    /// Font size in tenths of a point (110 = 11pt); None = default.
+    pub font_size: Option<u16>,
+    /// Font family; None = the app's default.
+    pub font_name: Option<std::sync::Arc<str>>,
     pub top: Border,
     pub bottom: Border,
     pub left: Border,

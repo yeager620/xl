@@ -147,8 +147,8 @@ impl EntityInputHandler for Spreadsheet {
         let e = self.edit.as_ref().filter(|e| e.at.sheet == self.cur)?;
         let prefix = &e.text[..utf16_to_byte(&e.text, range.start)];
         let width = crate::paint::shape(window, prefix.to_string(), crate::paint::cell_font(), self.theme.ink, CELL_FONT).width;
-        let x = f64::from(element.origin.x) + HEADER_W + self.col_x(e.at.cell.col) - self.scroll_x + CELL_PAD;
-        let y = f64::from(element.origin.y) + HEADER_H + e.at.cell.row as f64 * ROW_H - self.scroll_y;
+        let x = f64::from(element.origin.x) + HEADER_W + self.grid_x(e.at.cell.col) + CELL_PAD;
+        let y = f64::from(element.origin.y) + HEADER_H + self.grid_y(e.at.cell.row) + (self.row_h(e.at.cell.row) - ROW_H).max(0.0);
         Some(Bounds::new(point(px(x as f32) + width, px(y as f32)), size(px(1.), px(ROW_H as f32))))
     }
 

@@ -243,6 +243,23 @@ impl Shift {
         }
     }
 
+    /// [`Shift::map_span`] for callers outside this module.
+    pub fn map_span_pub(self, a: u32, b: u32) -> Option<(u32, u32)> {
+        self.map_span(a, b)
+    }
+
+    /// Where a rectangular range ends up (for merges and other ranges kept
+    /// alongside cells); None if it was deleted entirely.
+    pub fn map_range(self, r: Range) -> Option<Range> {
+        if self.is_rows() {
+            let (a, b) = self.map_span(r.start.row, r.end.row)?;
+            Some(Range::new(CellRef::new(a, r.start.col), CellRef::new(b, r.end.col)))
+        } else {
+            let (a, b) = self.map_span(r.start.col, r.end.col)?;
+            Some(Range::new(CellRef::new(r.start.row, a), CellRef::new(r.end.row, b)))
+        }
+    }
+
     /// Map a span [a, b] along the shifted axis: inserted lines inside the
     /// span grow it, deleted lines shrink it; None if all of it was deleted.
     fn map_span(self, a: u32, b: u32) -> Option<(u32, u32)> {

@@ -13,7 +13,8 @@ use crate::theme::Theme;
 
 pub const ROW_H: f64 = 22.0;
 pub const DEF_COL_W: f64 = 100.0;
-pub const MIN_COL_W: f64 = 28.0;
+pub const MIN_ROW_H: f64 = 8.0;
+const MIN_COL_W: f64 = 28.0;
 pub const HEADER_W: f64 = 46.0;
 pub const HEADER_H: f64 = 22.0;
 pub const CELL_PAD: f64 = 6.0;
@@ -71,6 +72,7 @@ pub enum Drag {
     Select,
     Point,
     ResizeCol { col: u32, start_x: f64, start_w: f64 },
+    ResizeRow { row: u32, start_y: f64, start_h: f64 },
     /// Dragging a scrollbar thumb; `grab` is the pointer offset within it.
     Scroll { axis: Axis, grab: f64 },
 }
@@ -96,7 +98,7 @@ const SCROLLBAR_HIT: f64 = 12.0;
 pub enum Hit {
     Corner,
     ColHeader { col: u32, border: Option<u32> },
-    RowHeader(u32),
+    RowHeader { row: u32, border: Option<u32> },
     Cell(CellRef),
 }
 
@@ -296,35 +298,79 @@ impl Spreadsheet {
     }
 
     // ---------------------------------------------------------------- geometry
+    //
+    // Content space: x/y measured from the top-left of the sheet, with custom
+    // sizes and hidden (zero-size) lines. Screen ("grid") space: relative to
+    // the top-left of the cell area; frozen rows/columns stay put and the rest
+    // scrolls by (scroll_x, scroll_y).
 
     pub(crate) fn col_w(&self, c: u32) -> f64 {
-        self.wb.col_width(self.cur, c).unwrap_or(DEF_COL_W)
+        let l = self.wb.layout(self.cur);
+        if l.hidden_cols.contains(&c) { 0.0 } else { l.col_widths.get(&c).copied().unwrap_or(DEF_COL_W) }
+    }
+
+    pub(crate) fn row_h(&self, r: u32) -> f64 {
+        let l = self.wb.layout(self.cur);
+        if l.hidden_rows.contains(&r) { 0.0 } else { l.row_heights.get(&r).copied().unwrap_or(ROW_H) }
     }
 
     /// Content-space x of the left edge of column `c`.
     pub(crate) fn col_x(&self, c: u32) -> f64 {
-        let mut x = c as f64 * DEF_COL_W;
-        for &w in self.wb.col_widths(self.cur).range(..c).map(|(_, w)| w) {
-            x += w - DEF_COL_W;
-        }
-        x
+        let l = self.wb.layout(self.cur);
+        line_offset(c, DEF_COL_W, &l.col_widths, &l.hidden_cols)
     }
 
-    /// Column containing content-space x.
+    /// Content-space y of the top edge of row `r`.
+    pub(crate) fn row_y(&self, r: u32) -> f64 {
+        let l = self.wb.layout(self.cur);
+        line_offset(r, ROW_H, &l.row_heights, &l.hidden_rows)
+    }
+
+    /// Column containing content-space x (skipping hidden columns).
     pub(crate) fn col_at(&self, x: f64) -> u32 {
-        if x <= 0.0 {
-            return 0;
-        }
-        let (mut lo, mut hi) = (0u32, MAX_COLS - 1);
-        while lo < hi {
-            let mid = (lo + hi).div_ceil(2);
-            if self.col_x(mid) <= x { lo = mid } else { hi = mid - 1 }
-        }
-        lo
+        last_at_or_before(x, MAX_COLS, |c| self.col_x(c))
     }
 
+    /// Row containing content-space y (skipping hidden rows).
     pub(crate) fn row_at(&self, y: f64) -> u32 {
-        ((y / ROW_H).floor().max(0.0) as u32).min(MAX_ROWS - 1)
+        last_at_or_before(y, MAX_ROWS, |r| self.row_y(r))
+    }
+
+    /// Frozen rows and columns.
+    pub(crate) fn frozen(&self) -> (u32, u32) {
+        self.wb.layout(self.cur).freeze
+    }
+
+    /// Size of the frozen area (width, height).
+    pub(crate) fn frozen_size(&self) -> (f64, f64) {
+        let (fr, fc) = self.frozen();
+        (self.col_x(fc), self.row_y(fr))
+    }
+
+    /// Grid-space x of column `c`'s left edge.
+    pub(crate) fn grid_x(&self, c: u32) -> f64 {
+        let (_, fc) = self.frozen();
+        if c < fc { self.col_x(c) } else { self.col_x(c) - self.col_x(fc) + self.frozen_size().0 - self.scroll_x }
+    }
+
+    /// Grid-space y of row `r`'s top edge.
+    pub(crate) fn grid_y(&self, r: u32) -> f64 {
+        let (fr, _) = self.frozen();
+        if r < fr { self.row_y(r) } else { self.row_y(r) - self.row_y(fr) + self.frozen_size().1 - self.scroll_y }
+    }
+
+    /// Column under grid-space x.
+    pub(crate) fn col_at_grid(&self, x: f64) -> u32 {
+        let (_, fc) = self.frozen();
+        let fw = self.frozen_size().0;
+        if x < fw { self.col_at(x).min(fc.saturating_sub(1)) } else { self.col_at(x - fw + self.col_x(fc) + self.scroll_x).max(fc) }
+    }
+
+    /// Row under grid-space y.
+    pub(crate) fn row_at_grid(&self, y: f64) -> u32 {
+        let (fr, _) = self.frozen();
+        let fh = self.frozen_size().1;
+        if y < fh { self.row_at(y).min(fr.saturating_sub(1)) } else { self.row_at(y - fh + self.row_y(fr) + self.scroll_y).max(fr) }
     }
 
     pub(crate) fn grid_w(&self) -> f64 {
@@ -335,25 +381,33 @@ impl Spreadsheet {
         (f64::from(self.viewport.size.height) - HEADER_H).max(0.0)
     }
 
+    /// Rows that fit in the scrolling part of the grid (for Page Up/Down).
     fn visible_rows(&self) -> u32 {
-        ((self.grid_h() / ROW_H).floor() as u32).max(1)
+        let (fr, _) = self.frozen();
+        let top = self.row_at_grid(self.frozen_size().1).max(fr);
+        let bottom = self.row_at_grid(self.grid_h() - 1.0);
+        (bottom.saturating_sub(top)).max(1)
     }
 
     pub(crate) fn max_scroll_x(&self) -> f64 {
-        (self.col_x(MAX_COLS) - self.grid_w()).max(0.0)
+        let (_, fc) = self.frozen();
+        (self.col_x(MAX_COLS) - self.col_x(fc) - (self.grid_w() - self.frozen_size().0)).max(0.0)
     }
 
     pub(crate) fn max_scroll_y(&self) -> f64 {
-        (MAX_ROWS as f64 * ROW_H - self.grid_h()).max(0.0)
+        let (fr, _) = self.frozen();
+        (self.row_y(MAX_ROWS) - self.row_y(fr) - (self.grid_h() - self.frozen_size().1)).max(0.0)
     }
 
-    /// Scrollable content size: the used area plus one screen, at least as
-    /// far as the current scroll position.
+    /// Scrollable content size (of the scrolling panes): the used area plus
+    /// one screen, at least as far as the current scroll position.
     fn content_size(&self) -> (f64, f64) {
         let extent = self.wb.store(self.cur).extent().unwrap_or_default();
-        let (gw, gh) = (self.grid_w(), self.grid_h());
-        let h = ((extent.row.max(self.active.row) + 1) as f64 * ROW_H + gh).max(self.scroll_y + gh);
-        let w = (self.col_x(extent.col.max(self.active.col) + 1) + gw).max(self.scroll_x + gw);
+        let (fr, fc) = self.frozen();
+        let (fw, fh) = self.frozen_size();
+        let (gw, gh) = (self.grid_w() - fw, self.grid_h() - fh);
+        let h = (self.row_y(extent.row.max(self.active.row) + 1) - self.row_y(fr) + gh).max(self.scroll_y + gh);
+        let w = (self.col_x(extent.col.max(self.active.col) + 1) - self.col_x(fc) + gw).max(self.scroll_x + gw);
         (w, h)
     }
 
@@ -361,7 +415,9 @@ impl Spreadsheet {
         let ox = f64::from(self.viewport.origin.x);
         let oy = f64::from(self.viewport.origin.y);
         let (vw, vh) = (f64::from(self.viewport.size.width), f64::from(self.viewport.size.height));
-        let (gx, gy, gw, gh) = (ox + HEADER_W, oy + HEADER_H, self.grid_w(), self.grid_h());
+        let (fw, fh) = self.frozen_size();
+        // Scrollbars run along the scrolling part only.
+        let (gx, gy, gw, gh) = (ox + HEADER_W + fw, oy + HEADER_H + fh, self.grid_w() - fw, self.grid_h() - fh);
         let (cw, ch) = self.content_size();
         let wide = self.scroll_hover == Some(axis) || matches!(self.drag, Some(Drag::Scroll { axis: a, .. }) if a == axis);
         let thickness = if wide { 9.0 } else { 5.0 };
@@ -397,35 +453,46 @@ impl Spreadsheet {
     fn scroll_thumb_to(&mut self, axis: Axis, edge: f64) {
         let Some(t) = self.thumb(axis) else { return };
         let (cw, ch) = self.content_size();
+        let (fw, fh) = self.frozen_size();
         match axis {
             Axis::Vertical => {
-                let gy = f64::from(self.viewport.origin.y) + HEADER_H;
-                let track = (self.grid_h() - t.h).max(1.0);
-                self.scroll_y = (((edge - gy) / track).clamp(0.0, 1.0) * (ch - self.grid_h())).clamp(0.0, self.max_scroll_y());
+                let gy = f64::from(self.viewport.origin.y) + HEADER_H + fh;
+                let gh = self.grid_h() - fh;
+                let track = (gh - t.h).max(1.0);
+                self.scroll_y = (((edge - gy) / track).clamp(0.0, 1.0) * (ch - gh)).clamp(0.0, self.max_scroll_y());
             }
             Axis::Horizontal => {
-                let gx = f64::from(self.viewport.origin.x) + HEADER_W;
-                let track = (self.grid_w() - t.w).max(1.0);
-                self.scroll_x = (((edge - gx) / track).clamp(0.0, 1.0) * (cw - self.grid_w())).clamp(0.0, self.max_scroll_x());
+                let gx = f64::from(self.viewport.origin.x) + HEADER_W + fw;
+                let gw = self.grid_w() - fw;
+                let track = (gw - t.w).max(1.0);
+                self.scroll_x = (((edge - gx) / track).clamp(0.0, 1.0) * (cw - gw)).clamp(0.0, self.max_scroll_x());
             }
         }
     }
 
-    fn ensure_visible(&mut self, c: CellRef) {
+    pub(crate) fn ensure_visible(&mut self, c: CellRef) {
         if self.viewport.size.width <= px(0.) {
             return;
         }
-        let (x0, x1) = (self.col_x(c.col), self.col_x(c.col) + self.col_w(c.col));
-        if x0 < self.scroll_x {
-            self.scroll_x = x0;
-        } else if x1 > self.scroll_x + self.grid_w() {
-            self.scroll_x = (x1 - self.grid_w()).min(x0);
+        let (fr, fc) = self.frozen();
+        let (fw, fh) = self.frozen_size();
+        if c.col >= fc {
+            let (x0, x1) = (self.col_x(c.col) - self.col_x(fc), self.col_x(c.col) - self.col_x(fc) + self.col_w(c.col));
+            let view = self.grid_w() - fw;
+            if x0 < self.scroll_x {
+                self.scroll_x = x0;
+            } else if x1 > self.scroll_x + view {
+                self.scroll_x = (x1 - view).min(x0);
+            }
         }
-        let (y0, y1) = (c.row as f64 * ROW_H, (c.row + 1) as f64 * ROW_H);
-        if y0 < self.scroll_y {
-            self.scroll_y = y0;
-        } else if y1 > self.scroll_y + self.grid_h() {
-            self.scroll_y = y1 - self.grid_h();
+        if c.row >= fr {
+            let (y0, y1) = (self.row_y(c.row) - self.row_y(fr), self.row_y(c.row) - self.row_y(fr) + self.row_h(c.row));
+            let view = self.grid_h() - fh;
+            if y0 < self.scroll_y {
+                self.scroll_y = y0;
+            } else if y1 > self.scroll_y + view {
+                self.scroll_y = (y1 - view).min(y0);
+            }
         }
     }
 
@@ -435,25 +502,43 @@ impl Spreadsheet {
         if x < 0.0 || y < 0.0 || x > f64::from(self.viewport.size.width) || y > f64::from(self.viewport.size.height) {
             return None;
         }
-        let cx = x - HEADER_W + self.scroll_x;
-        let cy = y - HEADER_H + self.scroll_y;
+        let (gx, gy) = (x - HEADER_W, y - HEADER_H);
         Some(match (x < HEADER_W, y < HEADER_H) {
             (true, true) => Hit::Corner,
             (false, true) => {
-                let col = self.col_at(cx);
-                let (left, right) = (self.col_x(col), self.col_x(col) + self.col_w(col));
-                let border = if (right - cx).abs() <= 4.0 {
+                let col = self.col_at_grid(gx);
+                let (left, right) = (self.grid_x(col), self.grid_x(col) + self.col_w(col));
+                let border = if (right - gx).abs() <= 4.0 {
                     Some(col)
-                } else if (cx - left).abs() <= 4.0 && col > 0 {
-                    Some(col - 1)
+                } else if (gx - left).abs() <= 4.0 && col > 0 {
+                    Some(self.prev_visible_col(col))
                 } else {
                     None
                 };
                 Hit::ColHeader { col, border }
             }
-            (true, false) => Hit::RowHeader(self.row_at(cy)),
-            (false, false) => Hit::Cell(CellRef::new(self.row_at(cy), self.col_at(cx))),
+            (true, false) => {
+                let row = self.row_at_grid(gy);
+                let (top, bottom) = (self.grid_y(row), self.grid_y(row) + self.row_h(row));
+                let border = if (bottom - gy).abs() <= 3.0 {
+                    Some(row)
+                } else if (gy - top).abs() <= 3.0 && row > 0 {
+                    Some(self.prev_visible_row(row))
+                } else {
+                    None
+                };
+                Hit::RowHeader { row, border }
+            }
+            (false, false) => Hit::Cell(CellRef::new(self.row_at_grid(gy), self.col_at_grid(gx))),
         })
+    }
+
+    fn prev_visible_col(&self, c: u32) -> u32 {
+        (0..c).rev().find(|&x| self.col_w(x) > 0.0).unwrap_or(0)
+    }
+
+    fn prev_visible_row(&self, r: u32) -> u32 {
+        (0..r).rev().find(|&x| self.row_h(x) > 0.0).unwrap_or(0)
     }
 
     // ------------------------------------------------------------- selection
@@ -1536,7 +1621,14 @@ impl Spreadsheet {
                 self.active = CellRef::new(MAX_ROWS - 1, col);
                 self.anchor.row = 0;
             }
-            Hit::RowHeader(row) => {
+            Hit::RowHeader { border: Some(row), .. } => {
+                if ev.click_count == 2 {
+                    self.autofit_row(row, window);
+                } else {
+                    self.drag = Some(Drag::ResizeRow { row, start_y: f64::from(ev.position.y), start_h: self.row_h(row) });
+                }
+            }
+            Hit::RowHeader { row, .. } => {
                 if !shift {
                     self.anchor = CellRef::new(row, 0);
                 }
@@ -1566,7 +1658,7 @@ impl Spreadsheet {
         let Some(hit) = self.hit_test(ev.position) else { return };
         let sel = self.selection();
         let kind = match hit {
-            Hit::RowHeader(r) => {
+            Hit::RowHeader { row: r, .. } => {
                 if !(self.rows_selected() && (sel.start.row..=sel.end.row).contains(&r)) {
                     self.anchor = CellRef::new(r, 0);
                     self.active = CellRef::new(r, MAX_COLS - 1);
@@ -1612,6 +1704,11 @@ impl Spreadsheet {
             Drag::ResizeCol { col, start_x, start_w } => {
                 let w = (start_w + f64::from(ev.position.x) - start_x).max(MIN_COL_W);
                 self.wb.set_col_width(self.cur, col, Some(w));
+                self.mark_dirty();
+            }
+            Drag::ResizeRow { row, start_y, start_h } => {
+                let h = (start_h + f64::from(ev.position.y) - start_y).max(MIN_ROW_H);
+                self.wb.set_row_height(self.cur, row, Some(h));
                 self.mark_dirty();
             }
             Drag::Select | Drag::Point => {
@@ -1661,6 +1758,33 @@ impl Spreadsheet {
         }
         self.wb.set_col_width(self.cur, col, Some(w.min(800.0)));
         self.mark_dirty();
+    }
+
+    /// Fit a row to its tallest wrapped or enlarged cell (default height if none).
+    pub(crate) fn autofit_row(&mut self, row: u32, window: &mut Window) {
+        let h = self.fitted_row_height(row, window);
+        self.wb.set_row_height(self.cur, row, if (h - ROW_H).abs() < 0.5 { None } else { Some(h) });
+        self.mark_dirty();
+    }
+
+    /// Height a row needs for its contents: wrapped text and font sizes.
+    pub(crate) fn fitted_row_height(&self, row: u32, window: &mut Window) -> f64 {
+        let r = Range::new(CellRef::new(row, 0), CellRef::new(row, MAX_COLS - 1));
+        let mut h: f64 = ROW_H;
+        let cells: Vec<CellRef> = self.wb.store(self.cur).iter_range(r).take(2_000).map(|(c, _)| c).collect();
+        for c in cells {
+            let st = self.wb.style(self.at(c));
+            let size = crate::paint::font_px(&st);
+            let line_h = crate::paint::line_height(size);
+            let lines = if st.wrap {
+                let text = self.wb.display(self.at(c)).text;
+                crate::paint::wrap_lines(window, &text, crate::paint::cell_font_for(&st), size, self.col_w(c.col) - 2.0 * CELL_PAD).len().max(1)
+            } else {
+                1
+            };
+            h = h.max(lines as f64 * line_h);
+        }
+        h.min(400.0)
     }
 
     pub(crate) fn toggle_theme(&mut self) {
@@ -1734,4 +1858,29 @@ pub(crate) fn prev_boundary(s: &str, i: usize) -> usize {
 
 pub(crate) fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].chars().next().map_or(i, |c| i + c.len_utf8())
+}
+
+/// Offset of line `i` along an axis: `i` default-sized lines, adjusted for
+/// custom sizes and hidden (zero-size) lines before it.
+fn line_offset(i: u32, default: f64, sizes: &std::collections::BTreeMap<u32, f64>, hidden: &std::collections::BTreeSet<u32>) -> f64 {
+    let mut x = i as f64 * default;
+    for (k, w) in sizes.range(..i) {
+        if !hidden.contains(k) {
+            x += w - default;
+        }
+    }
+    x - hidden.range(..i).count() as f64 * default
+}
+
+/// The last index in [0, n) whose offset is <= v (offsets are non-decreasing).
+fn last_at_or_before(v: f64, n: u32, offset: impl Fn(u32) -> f64) -> u32 {
+    if v <= 0.0 {
+        return 0;
+    }
+    let (mut lo, mut hi) = (0u32, n - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if offset(mid) <= v { lo = mid } else { hi = mid - 1 }
+    }
+    lo
 }

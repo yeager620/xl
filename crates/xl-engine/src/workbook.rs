@@ -11,7 +11,7 @@
 //! 4. If Kahn stalls, mark exactly the cycle members (Tarjan SCC) `#CIRC!`
 //!    and release cells merely downstream of them.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,50 @@ pub struct SheetData {
     store: CellStore,
     formats: FxHashMap<CellRef, FmtId>,
     styles: FxHashMap<CellRef, StyleId>,
-    col_widths: BTreeMap<u32, f64>,
+    layout: SheetLayout,
+}
+
+/// Row/column sizes and visibility, merged cells and frozen panes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SheetLayout {
+    /// Custom column widths in pixels.
+    pub col_widths: BTreeMap<u32, f64>,
+    /// Custom row heights in pixels.
+    pub row_heights: BTreeMap<u32, f64>,
+    pub hidden_rows: BTreeSet<u32>,
+    pub hidden_cols: BTreeSet<u32>,
+    pub merges: Vec<Range>,
+    /// Frozen (rows, columns) at the top-left.
+    pub freeze: (u32, u32),
+}
+
+impl SheetLayout {
+    /// The merged range containing `c`, if any.
+    pub fn merge_at(&self, c: CellRef) -> Option<Range> {
+        self.merges.iter().copied().find(|m| m.contains(c))
+    }
+
+    fn apply_shift(&mut self, op: Shift) {
+        let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
+        let shift_keys = |m: &mut BTreeMap<u32, f64>| *m = std::mem::take(m).into_iter().filter_map(|(k, v)| Some((op.map_pos(k)?, v))).collect();
+        let shift_set = |m: &mut BTreeSet<u32>| *m = std::mem::take(m).into_iter().filter_map(|k| op.map_pos(k)).collect();
+        if rows {
+            shift_keys(&mut self.row_heights);
+            shift_set(&mut self.hidden_rows);
+        } else {
+            shift_keys(&mut self.col_widths);
+            shift_set(&mut self.hidden_cols);
+        }
+        self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
+        // Lines inserted or deleted inside the frozen area grow or shrink it.
+        let frozen = if rows { &mut self.freeze.0 } else { &mut self.freeze.1 };
+        if *frozen > 0 {
+            *frozen = match op.map_span_pub(0, *frozen - 1) {
+                Some((_, last)) => last + 1,
+                None => 0,
+            };
+        }
+    }
 }
 
 /// All sheets, addressable by stable id, plus their display order.
@@ -472,7 +515,7 @@ impl Workbook {
             None => self.next_sheet_name(),
         };
         let id = self.sheets.slots.len() as SheetId;
-        self.sheets.slots.push(Some(SheetData { id, name, store: CellStore::default(), formats: FxHashMap::default(), styles: FxHashMap::default(), col_widths: BTreeMap::new() }));
+        self.sheets.slots.push(Some(SheetData { id, name, store: CellStore::default(), formats: FxHashMap::default(), styles: FxHashMap::default(), layout: SheetLayout::default() }));
         self.sheets.order.push(id);
         Ok(id)
     }
@@ -799,9 +842,7 @@ impl Workbook {
         sd.store.apply_shift(op);
         sd.formats = sd.formats.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
         sd.styles = sd.styles.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
-        if !rows {
-            sd.col_widths = std::mem::take(&mut sd.col_widths).into_iter().filter_map(|(c, w)| Some((op.map_pos(c)?, w))).collect();
-        }
+        sd.layout.apply_shift(op);
         for id in self.sheets.order.clone() {
             let Some(sd) = self.sheets.get_mut(id) else { continue };
             for (_, cell) in sd.store.cells_mut() {
@@ -868,13 +909,63 @@ impl Workbook {
         self.sheets.get(sheet).into_iter().flat_map(move |s| s.formats.iter().map(move |(c, id)| (*c, self.formats.get(*id).code())))
     }
 
+    pub fn layout(&self, sheet: SheetId) -> &SheetLayout {
+        static EMPTY: std::sync::LazyLock<SheetLayout> = std::sync::LazyLock::new(SheetLayout::default);
+        self.sheets.get(sheet).map_or(&EMPTY, |s| &s.layout)
+    }
+
+    pub fn layout_mut(&mut self, sheet: SheetId) -> Option<&mut SheetLayout> {
+        self.sheets.get_mut(sheet).map(|s| &mut s.layout)
+    }
+
+    /// Merge a range. Only the top-left cell's contents are kept (the others
+    /// are cleared, like Excel); merges it overlaps are absorbed.
+    pub fn merge(&mut self, sheet: SheetId, range: Range) -> RecalcStats {
+        if range.cell_count() < 2 {
+            return RecalcStats::default();
+        }
+        let others: Vec<(Addr, String)> =
+            self.store(sheet).iter_range(range).filter(|(c, _)| *c != range.start).map(|(c, _)| (Addr::new(sheet, c), String::new())).collect();
+        let stats = self.set_inputs(others);
+        if let Some(l) = self.layout_mut(sheet) {
+            l.merges.retain(|m| !(m.start.row <= range.end.row && range.start.row <= m.end.row && m.start.col <= range.end.col && range.start.col <= m.end.col));
+            l.merges.push(range);
+        }
+        stats
+    }
+
+    /// Unmerge every merged range overlapping `range`.
+    pub fn unmerge(&mut self, sheet: SheetId, range: Range) {
+        if let Some(l) = self.layout_mut(sheet) {
+            l.merges.retain(|m| !(m.start.row <= range.end.row && range.start.row <= m.end.row && m.start.col <= range.end.col && range.start.col <= m.end.col));
+        }
+    }
+
+    pub fn row_height(&self, sheet: SheetId, row: u32) -> Option<f64> {
+        self.sheets.get(sheet)?.layout.row_heights.get(&row).copied()
+    }
+
+    /// Set (Some) or reset (None) a row's height in pixels.
+    pub fn set_row_height(&mut self, sheet: SheetId, row: u32, h: Option<f64>) {
+        if let Some(l) = self.layout_mut(sheet) {
+            match h {
+                Some(h) => {
+                    l.row_heights.insert(row, h);
+                }
+                None => {
+                    l.row_heights.remove(&row);
+                }
+            }
+        }
+    }
+
     pub fn col_width(&self, sheet: SheetId, col: u32) -> Option<f64> {
-        self.sheets.get(sheet)?.col_widths.get(&col).copied()
+        self.sheets.get(sheet)?.layout.col_widths.get(&col).copied()
     }
 
     pub fn col_widths(&self, sheet: SheetId) -> &BTreeMap<u32, f64> {
         static EMPTY: BTreeMap<u32, f64> = BTreeMap::new();
-        self.sheets.get(sheet).map_or(&EMPTY, |s| &s.col_widths)
+        self.sheets.get(sheet).map_or(&EMPTY, |s| &s.layout.col_widths)
     }
 
     /// Column width in pixels; None resets to the default.
@@ -882,10 +973,10 @@ impl Workbook {
         if let Some(s) = self.sheets.get_mut(sheet) {
             match px {
                 Some(w) => {
-                    s.col_widths.insert(col, w);
+                    s.layout.col_widths.insert(col, w);
                 }
                 None => {
-                    s.col_widths.remove(&col);
+                    s.layout.col_widths.remove(&col);
                 }
             }
         }
