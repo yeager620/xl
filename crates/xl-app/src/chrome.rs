@@ -367,7 +367,8 @@ impl Spreadsheet {
                     cx.notify();
                 }))
             })
-            .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx));
+            .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx))
+            .child(self.menu_button("cond-format", Menu::CondFormat, "Conditional formatting", icon("highlighter", t.ink).into_any_element(), cx));
 
         let file = no_drag(div()).flex().flex_row().items_center().gap(px(2.)).child(
             tool_button(&t, "palette", false).child(icon("search", t.ink)).tooltip(tip(t, "Search commands", "Ctrl+K")).on_click(cx.listener(|this, _, _, cx| {
@@ -521,6 +522,7 @@ impl Spreadsheet {
                     }))
                     .into_any_element()
             }
+            Menu::CondFormat => self.render_cf_menu(cx).into_any_element(),
             Menu::Main => {
                 let dark = t.dark;
                 let close = |this: &mut Spreadsheet| this.menu = None;
@@ -972,6 +974,7 @@ impl Render for Spreadsheet {
                 d.child(deferred(div().absolute().top(px(64.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
             });
         let content = content.when(self.pending.is_some(), |d| d.child(deferred(self.render_dialog(cx)).with_priority(3)));
+        let content = content.when(self.cf_dialog.is_some(), |d| d.child(deferred(self.render_cf_dialog(cx)).with_priority(3)));
         let content = content.when(self.lossy_prompt, |d| d.child(deferred(self.render_lossy_dialog(cx)).with_priority(4)));
         self.window_frame(content, window)
     }

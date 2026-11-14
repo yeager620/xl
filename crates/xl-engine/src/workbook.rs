@@ -53,6 +53,8 @@ pub struct SheetLayout {
     pub filter: Option<AutoFilter>,
     /// Rows hidden by the filter (separate from rows hidden by hand).
     pub filtered_rows: BTreeSet<u32>,
+    /// Conditional formats, highest priority first.
+    pub cond: Vec<crate::cond::CondFormat>,
 }
 
 /// A filter on a range whose first row holds the headers.
@@ -70,7 +72,8 @@ impl SheetLayout {
         self.merges.iter().copied().find(|m| m.contains(c))
     }
 
-    fn apply_shift(&mut self, op: Shift) {
+    fn apply_shift(&mut self, op: Shift, sheet: SheetId) {
+        self.cond.retain_mut(|c| c.apply_shift(op, sheet));
         let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
         let shift_keys = |m: &mut BTreeMap<u32, f64>| *m = std::mem::take(m).into_iter().filter_map(|(k, v)| Some((op.map_pos(k)?, v))).collect();
         let shift_set = |m: &mut BTreeSet<u32>| *m = std::mem::take(m).into_iter().filter_map(|k| op.map_pos(k)).collect();
@@ -814,6 +817,11 @@ impl Workbook {
     }
 
     /// The formula a name stands for (without '=').
+    /// Evaluate an expression as if it were a formula in `cell` on `sheet`.
+    pub fn eval_at(&self, sheet: SheetId, cell: CellRef, expr: &Expr) -> Value {
+        crate::eval::eval(expr, &crate::eval::Ctx::new(&self.sheets, &self.names, sheet, cell))
+    }
+
     /// Resolve "B7", "Sheet2!A1:C9" or a defined name to a sheet and range,
     /// relative to `sheet`.
     pub fn resolve_reference(&self, text: &str, sheet: SheetId) -> Option<(SheetId, Range)> {
@@ -883,7 +891,7 @@ impl Workbook {
         sd.store.apply_shift(op);
         sd.formats = sd.formats.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
         sd.styles = sd.styles.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
-        sd.layout.apply_shift(op);
+        sd.layout.apply_shift(op, target);
         for id in self.sheets.order.clone() {
             let Some(sd) = self.sheets.get_mut(id) else { continue };
             for (_, cell) in sd.store.cells_mut() {

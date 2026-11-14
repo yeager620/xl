@@ -14,6 +14,7 @@ use quick_xml::events::{BytesRef, BytesStart, Event};
 use xl_engine::format::builtin_format;
 use xl_engine::formula::parse_formula;
 use xl_engine::input::classify_literal;
+use xl_engine::cond::{CfOp, CfRule, CfStyle, CfValue, TextMatch};
 use xl_engine::style::{INDEXED_COLORS, apply_tint};
 use xl_engine::{Addr, Border, CellRef, ErrorKind, HAlign, LineStyle, LoadedCell, MAX_COLS, MAX_ROWS, Range, Rgb, SheetId, Style, VAlign, Value, Workbook, validate_sheet_name};
 use zip::ZipArchive;
@@ -235,10 +236,15 @@ pub(crate) struct Xf {
     style: Style,
 }
 
-fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
+/// Cell formats, conditional-format styles (dxfs) and theme colors.
+type StylesXml = (Vec<Xf>, Vec<CfStyle>, Vec<Rgb>);
+
+fn read_styles(zip: &mut Zip) -> Result<StylesXml, String> {
     let theme = read_theme(zip)?;
     let mut out = Vec::new();
-    let Some(bytes) = read_entry(zip, "xl/styles.xml")? else { return Ok(out) };
+    let mut dxfs: Vec<CfStyle> = Vec::new();
+    let mut dxf_part = "";
+    let Some(bytes) = read_entry(zip, "xl/styles.xml")? else { return Ok((out, dxfs, theme)) };
     let mut r = xml(&bytes);
     let mut custom: HashMap<u32, String> = HashMap::new();
     let mut fonts: Vec<Style> = Vec::new();
@@ -327,6 +333,39 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
                         cur_xf = Some(xf);
                     }
                 }
+                ("dxfs", "dxf") => {
+                    dxfs.push(CfStyle::default());
+                    dxf_part = "";
+                }
+                ("dxfs", "font") => dxf_part = "font",
+                ("dxfs", "fill") => dxf_part = "fill",
+                ("dxfs", "b") => {
+                    if let Some(d) = dxfs.last_mut() {
+                        d.bold = flag(&e);
+                    }
+                }
+                ("dxfs", "i") => {
+                    if let Some(d) = dxfs.last_mut() {
+                        d.italic = flag(&e);
+                    }
+                }
+                ("dxfs", "color") if dxf_part == "font" => {
+                    if let Some(d) = dxfs.last_mut() {
+                        d.color = color_of(&e, &theme);
+                    }
+                }
+                ("dxfs", "bgColor") if dxf_part == "fill" => {
+                    if let Some(d) = dxfs.last_mut() {
+                        d.fill = color_of(&e, &theme).or(d.fill);
+                    }
+                }
+                ("dxfs", "fgColor") if dxf_part == "fill" => {
+                    if let Some(d) = dxfs.last_mut()
+                        && d.fill.is_none()
+                    {
+                        d.fill = color_of(&e, &theme);
+                    }
+                }
                 ("cellXfs", "alignment") => {
                     if let Some(xf) = cur_xf.as_mut() {
                         xf.style.align = match attr(&e, "horizontal").as_deref() {
@@ -376,7 +415,7 @@ fn read_styles(zip: &mut Zip) -> Result<Vec<Xf>, String> {
             _ => {}
         }
     }
-    Ok(out)
+    Ok((out, dxfs, theme))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,6 +446,7 @@ enum Capture {
     Value,
     Formula,
     Inline,
+    CfFormula,
 }
 
 struct SharedFormula {
@@ -418,9 +458,86 @@ struct SheetCtx<'a> {
     id: SheetId,
     shared: &'a [Arc<str>],
     styles: &'a [Xf],
+    dxfs: &'a [CfStyle],
+    theme: &'a [Rgb],
 }
 
-fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize, warnings: &mut Vec<String>) -> Result<(), String> {
+/// A <cfRule> being read.
+#[derive(Default)]
+struct CfRuleXml {
+    ty: String,
+    dxf: Option<usize>,
+    priority: i64,
+    operator: String,
+    stop: bool,
+    text: String,
+    rank: u32,
+    percent: bool,
+    bottom: bool,
+    below: bool,
+    formulas: Vec<String>,
+    cfvos: Vec<(String, String)>,
+    colors: Vec<Rgb>,
+}
+
+fn cf_value(ty: &str, val: &str) -> CfValue {
+    let v = val.parse::<f64>().unwrap_or(0.0);
+    match ty {
+        "min" => CfValue::Min,
+        "max" => CfValue::Max,
+        "percent" => CfValue::Percent(v),
+        "percentile" => CfValue::Percentile(v),
+        _ => CfValue::Number(v),
+    }
+}
+
+impl CfRuleXml {
+    /// The rule in xl's terms; None for kinds xl doesn't support.
+    fn to_rule(&self, wb: &Workbook, dxfs: &[CfStyle]) -> Option<CfRule> {
+        let style = self.dxf.and_then(|i| dxfs.get(i).cloned()).unwrap_or_default();
+        let expr = |i: usize| -> Option<Arc<xl_engine::formula::Expr>> { parse_formula(self.formulas.get(i)?, wb.sheets()).ok().map(Arc::new) };
+        Some(match self.ty.as_str() {
+            "cellIs" => {
+                let op = match self.operator.as_str() {
+                    "between" => CfOp::Between,
+                    "notBetween" => CfOp::NotBetween,
+                    "equal" => CfOp::Equal,
+                    "notEqual" => CfOp::NotEqual,
+                    "greaterThan" => CfOp::Greater,
+                    "lessThan" => CfOp::Less,
+                    "greaterThanOrEqual" => CfOp::GreaterEq,
+                    "lessThanOrEqual" => CfOp::LessEq,
+                    _ => return None,
+                };
+                let b = if matches!(op, CfOp::Between | CfOp::NotBetween) { Some(expr(1)?) } else { None };
+                CfRule::Cell { op, a: expr(0)?, b, style }
+            }
+            "containsText" => CfRule::Text { kind: TextMatch::Contains, text: self.text.clone(), style },
+            "notContainsText" => CfRule::Text { kind: TextMatch::NotContains, text: self.text.clone(), style },
+            "beginsWith" => CfRule::Text { kind: TextMatch::BeginsWith, text: self.text.clone(), style },
+            "endsWith" => CfRule::Text { kind: TextMatch::EndsWith, text: self.text.clone(), style },
+            "top10" => CfRule::Top { n: self.rank.max(1), percent: self.percent, bottom: self.bottom, style },
+            "aboveAverage" => CfRule::Average { above: !self.below, style },
+            "duplicateValues" => CfRule::Duplicates { unique: false, style },
+            "uniqueValues" => CfRule::Duplicates { unique: true, style },
+            "containsBlanks" => CfRule::Blanks { blanks: true, style },
+            "notContainsBlanks" => CfRule::Blanks { blanks: false, style },
+            "expression" => CfRule::Formula { expr: expr(0)?, style },
+            "colorScale" if (2..=3).contains(&self.colors.len()) && self.cfvos.len() == self.colors.len() => {
+                CfRule::ColorScale { stops: self.cfvos.iter().zip(&self.colors).map(|((t, v), c)| (cf_value(t, v), *c)).collect() }
+            }
+            "dataBar" if self.cfvos.len() >= 2 => CfRule::DataBar {
+                color: self.colors.first().copied().unwrap_or(0x638EC6),
+                min: cf_value(&self.cfvos[0].0, &self.cfvos[0].1),
+                max: cf_value(&self.cfvos[1].0, &self.cfvos[1].1),
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// Read one worksheet. Returns true if it had conditional formats xl can't keep.
+fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize, warnings: &mut Vec<String>) -> Result<bool, String> {
     let mut r = xml(bytes);
     let mut buf = Vec::new();
     let mut row: u32 = 0;
@@ -438,6 +555,12 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     // AutoFilter: range, then per column the listed values.
     let mut filter: Option<xl_engine::AutoFilter> = None;
     let mut filter_col: Option<u32> = None;
+    // Conditional formatting: (priority, rule) pairs, and the one being read.
+    let mut cf_rules: Vec<(i64, xl_engine::cond::CondFormat)> = Vec::new();
+    let mut cf_ranges: Vec<Range> = Vec::new();
+    let mut cf_rule: Option<CfRuleXml> = None;
+    let mut cf_formula = String::new();
+    let mut cf_skipped = false;
 
     loop {
         let ev = r.read_event_into(&mut buf).map_err(|e| e.to_string())?;
@@ -460,6 +583,47 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                             && let Some(l) = wb.layout_mut(cx.id)
                         {
                             l.hidden_rows.insert(row);
+                        }
+                    }
+                    "conditionalFormatting" => {
+                        cf_ranges = attr(e, "sqref").map(|s| s.split_whitespace().filter_map(parse_range).collect()).unwrap_or_default();
+                    }
+                    // Extension copies (x14:cfRule) duplicate the main rule.
+                    "cfRule" if e.name().as_ref() == "cfRule" => {
+                        let truthy = |k: &str| attr(e, k).is_some_and(|s| s == "1" || s == "true");
+                        cf_rule = Some(CfRuleXml {
+                            ty: attr(e, "type").unwrap_or_default(),
+                            dxf: attr(e, "dxfId").and_then(|s| s.parse().ok()),
+                            priority: attr(e, "priority").and_then(|s| s.parse().ok()).unwrap_or(i64::MAX),
+                            operator: attr(e, "operator").unwrap_or_default(),
+                            stop: truthy("stopIfTrue"),
+                            text: attr(e, "text").unwrap_or_default(),
+                            rank: attr(e, "rank").and_then(|s| s.parse().ok()).unwrap_or(10),
+                            percent: truthy("percent"),
+                            bottom: truthy("bottom"),
+                            below: attr(e, "aboveAverage").is_some_and(|s| s == "0" || s == "false"),
+                            ..Default::default()
+                        });
+                        if empty {
+                            if let Some(rule) = cf_rule.take().and_then(|x| x.to_rule(wb, cx.dxfs).map(|r| (x.priority, x.stop, r))) {
+                                cf_rules.push((rule.0, xl_engine::cond::CondFormat { ranges: cf_ranges.clone(), rule: rule.2, stop_if_true: rule.1 }));
+                            } else {
+                                cf_skipped = true;
+                            }
+                        }
+                    }
+                    "formula" if cf_rule.is_some() && !empty => {
+                        cf_formula.clear();
+                        cap = Capture::CfFormula;
+                    }
+                    "cfvo" => {
+                        if let Some(rule) = cf_rule.as_mut() {
+                            rule.cfvos.push((attr(e, "type").unwrap_or_default(), attr(e, "val").unwrap_or_default()));
+                        }
+                    }
+                    "color" if cf_rule.is_some() => {
+                        if let (Some(rule), Some(c)) = (cf_rule.as_mut(), color_of(e, cx.theme)) {
+                            rule.colors.push(c);
                         }
                     }
                     "autoFilter" => {
@@ -552,15 +716,31 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                 Capture::Value => v.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::Formula => f.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::Inline => v.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
+                Capture::CfFormula => cf_formula.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::None => {}
             },
             Event::GeneralRef(ref g) => match cap {
                 Capture::Value | Capture::Inline => push_entity(&mut v, g),
                 Capture::Formula => push_entity(&mut f, g),
+                Capture::CfFormula => push_entity(&mut cf_formula, g),
                 Capture::None => {}
             },
             Event::End(ref e) => match local(e.name().as_ref()) {
                 "v" | "f" | "t" => cap = Capture::None,
+                "formula" if cap == Capture::CfFormula => {
+                    cap = Capture::None;
+                    if let Some(rule) = cf_rule.as_mut() {
+                        rule.formulas.push(std::mem::take(&mut cf_formula));
+                    }
+                }
+                "cfRule" if e.name().as_ref() == "cfRule" => {
+                    if let Some(x) = cf_rule.take() {
+                        match x.to_rule(wb, cx.dxfs) {
+                            Some(rule) => cf_rules.push((x.priority, xl_engine::cond::CondFormat { ranges: cf_ranges.clone(), rule, stop_if_true: x.stop })),
+                            None => cf_skipped = true,
+                        }
+                    }
+                }
                 "c" => {
                     let addr = Addr::new(cx.id, cell);
                     let value = match ty.as_str() {
@@ -612,6 +792,12 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         }
         buf.clear();
     }
+    if !cf_rules.is_empty()
+        && let Some(l) = wb.layout_mut(cx.id)
+    {
+        cf_rules.sort_by_key(|(p, _)| *p);
+        l.cond = cf_rules.into_iter().map(|(_, c)| c).collect();
+    }
     if let Some(f) = filter
         && let Some(l) = wb.layout_mut(cx.id)
     {
@@ -626,7 +812,7 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     if unresolved_shared > 0 {
         warnings.push(format!("{}: {unresolved_shared} shared formulas couldn't be expanded and were kept as values", wb.sheet_name(cx.id)));
     }
-    Ok(())
+    Ok(cf_skipped)
 }
 
 /// Package parts xl doesn't model, by path prefix.
@@ -649,7 +835,6 @@ const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
 /// Worksheet elements xl doesn't model.
 const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
     ("<dataValidations", "data validation"),
-    ("<conditionalFormatting", "conditional formatting"),
     ("<hyperlinks", "hyperlinks"),
     ("<sheetProtection", "sheet protection"),
     ("<customFilters", "advanced filters"),
@@ -679,7 +864,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     let rels = read_rels(&mut zip, "xl/_rels/workbook.xml.rels")?;
     let (list, defined_names) = read_sheet_list(&mut zip)?;
     let shared = read_shared_strings(&mut zip)?;
-    let styles = read_styles(&mut zip)?;
+    let (styles, dxfs, theme) = read_styles(&mut zip)?;
 
     let mut wb = Workbook::empty();
     let mut warnings = Vec::new();
@@ -738,7 +923,10 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
                 note(label);
             }
         }
-        read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles }, &mut cells, &mut warnings)?;
+        let skipped = read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles, dxfs: &dxfs, theme: &theme }, &mut cells, &mut warnings)?;
+        if skipped {
+            note("some kinds of conditional formatting");
+        }
     }
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
         note("chart sheets");

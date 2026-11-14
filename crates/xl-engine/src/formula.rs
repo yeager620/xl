@@ -352,6 +352,30 @@ impl Move {
 }
 
 impl Expr {
+    /// The formula as if copied `dr` rows and `dc` columns away: relative
+    /// references move, absolute ones stay (off-sheet ones become #REF!).
+    pub fn offset(&self, dr: i64, dc: i64) -> Expr {
+        if (dr, dc) == (0, 0) {
+            return self.clone();
+        }
+        let recur = |e: &Expr| Box::new(e.offset(dr, dc));
+        match self {
+            Expr::Ref(r) => shift_ref(r, dr, dc).map_or(Expr::Error(ErrorKind::Ref), Expr::Ref),
+            Expr::Range(a, b, kind) => match (shift_ref(a, dr, dc), shift_ref(b, dr, dc)) {
+                (Some(a), Some(b)) => Expr::Range(a, b, *kind),
+                _ => Expr::Error(ErrorKind::Ref),
+            },
+            Expr::Neg(x) => Expr::Neg(recur(x)),
+            Expr::Plus(x) => Expr::Plus(recur(x)),
+            Expr::Percent(x) => Expr::Percent(recur(x)),
+            Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
+            Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.offset(dr, dc)).collect()),
+            Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.offset(dr, dc)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+        }
+    }
+
     /// Rewrite references for a move, in a formula on sheet `home`.
     pub fn moved(&self, mv: &Move, home: SheetId) -> Expr {
         let to = mv.to_range();

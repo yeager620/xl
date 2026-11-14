@@ -4,7 +4,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rust_xlsxwriter::{Color, FilterCondition, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook as XlsxBook};
+use rust_xlsxwriter::{
+    Color, ConditionalFormat2ColorScale, ConditionalFormat3ColorScale, ConditionalFormatAverage, ConditionalFormatAverageRule, ConditionalFormatBlank,
+    ConditionalFormatCell, ConditionalFormatCellRule, ConditionalFormatDataBar, ConditionalFormatDuplicate, ConditionalFormatFormula, ConditionalFormatText,
+    ConditionalFormatTextRule, ConditionalFormatTop, ConditionalFormatTopRule, ConditionalFormatType, FilterCondition, Format, FormatAlign, FormatBorder,
+    FormatUnderline, Formula, Workbook as XlsxBook, Worksheet,
+};
+use xl_engine::cond::{CfOp, CfRule, CfStyle, CfValue, CondFormat, TextMatch};
 use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, VAlign, Value, Workbook, precise};
 
 use crate::{to_excel_height, to_excel_width_px};
@@ -141,6 +147,116 @@ fn build_format(code: Option<&str>, st: &Style) -> Format {
     f
 }
 
+fn dxf_format(st: &CfStyle) -> Format {
+    let mut f = Format::new();
+    if let Some(c) = st.fill {
+        f = f.set_background_color(Color::RGB(c));
+    }
+    if let Some(c) = st.color {
+        f = f.set_font_color(Color::RGB(c));
+    }
+    if st.bold {
+        f = f.set_bold();
+    }
+    if st.italic {
+        f = f.set_italic();
+    }
+    f
+}
+
+fn cf_point(v: CfValue) -> (ConditionalFormatType, f64) {
+    match v {
+        CfValue::Min => (ConditionalFormatType::Lowest, 0.0),
+        CfValue::Max => (ConditionalFormatType::Highest, 0.0),
+        CfValue::Number(x) => (ConditionalFormatType::Number, x),
+        CfValue::Percent(p) => (ConditionalFormatType::Percent, p),
+        CfValue::Percentile(p) => (ConditionalFormatType::Percentile, p),
+    }
+}
+
+/// Write one conditional format (rules go in priority order).
+fn write_cond(ws: &mut Worksheet, wb: &Workbook, cf: &CondFormat) -> Result<(), rust_xlsxwriter::XlsxError> {
+    let Some(first) = cf.ranges.first() else { return Ok(()) };
+    let multi = cf.ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" ");
+    let (r0, c0, r1, c1) = (first.start.row, first.start.col as u16, first.end.row, first.end.col as u16);
+    let src = |e: &xl_engine::formula::Expr| Formula::new(prefix_future_functions(&e.to_source(0, 0, wb.sheets())));
+    macro_rules! add {
+        ($cf:expr) => {
+            ws.add_conditional_format(r0, c0, r1, c1, &$cf.set_multi_range(multi.as_str()).set_stop_if_true(cf.stop_if_true))?
+        };
+    }
+    match &cf.rule {
+        CfRule::Cell { op, a, b, style } => {
+            let (a, b) = (src(a), b.as_ref().map(|b| src(b)).unwrap_or_else(|| Formula::new("0")));
+            let rule = match op {
+                CfOp::Between => ConditionalFormatCellRule::Between(a, b),
+                CfOp::NotBetween => ConditionalFormatCellRule::NotBetween(a, b),
+                CfOp::Equal => ConditionalFormatCellRule::EqualTo(a),
+                CfOp::NotEqual => ConditionalFormatCellRule::NotEqualTo(a),
+                CfOp::Greater => ConditionalFormatCellRule::GreaterThan(a),
+                CfOp::Less => ConditionalFormatCellRule::LessThan(a),
+                CfOp::GreaterEq => ConditionalFormatCellRule::GreaterThanOrEqualTo(a),
+                CfOp::LessEq => ConditionalFormatCellRule::LessThanOrEqualTo(a),
+            };
+            add!(ConditionalFormatCell::new().set_rule(rule).set_format(dxf_format(style)))
+        }
+        CfRule::Text { kind, text, style } => {
+            let rule = match kind {
+                TextMatch::Contains => ConditionalFormatTextRule::Contains(text.clone()),
+                TextMatch::NotContains => ConditionalFormatTextRule::DoesNotContain(text.clone()),
+                TextMatch::BeginsWith => ConditionalFormatTextRule::BeginsWith(text.clone()),
+                TextMatch::EndsWith => ConditionalFormatTextRule::EndsWith(text.clone()),
+            };
+            add!(ConditionalFormatText::new().set_rule(rule).set_format(dxf_format(style)))
+        }
+        CfRule::Top { n, percent, bottom, style } => {
+            let n = (*n).min(u16::MAX as u32) as u16;
+            let rule = match (percent, bottom) {
+                (false, false) => ConditionalFormatTopRule::Top(n),
+                (false, true) => ConditionalFormatTopRule::Bottom(n),
+                (true, false) => ConditionalFormatTopRule::TopPercent(n),
+                (true, true) => ConditionalFormatTopRule::BottomPercent(n),
+            };
+            add!(ConditionalFormatTop::new().set_rule(rule).set_format(dxf_format(style)))
+        }
+        CfRule::Average { above, style } => {
+            let rule = if *above { ConditionalFormatAverageRule::AboveAverage } else { ConditionalFormatAverageRule::BelowAverage };
+            add!(ConditionalFormatAverage::new().set_rule(rule).set_format(dxf_format(style)))
+        }
+        CfRule::Duplicates { unique, style } => {
+            let d = ConditionalFormatDuplicate::new().set_format(dxf_format(style));
+            add!(if *unique { d.invert() } else { d })
+        }
+        CfRule::Blanks { blanks, style } => {
+            let d = ConditionalFormatBlank::new().set_format(dxf_format(style));
+            add!(if *blanks { d } else { d.invert() })
+        }
+        CfRule::Formula { expr, style } => add!(ConditionalFormatFormula::new().set_rule(src(expr)).set_format(dxf_format(style))),
+        CfRule::ColorScale { stops } => match stops.as_slice() {
+            [(lo, lc), (hi, hc)] => {
+                let ((lt, lv), (ht, hv)) = (cf_point(*lo), cf_point(*hi));
+                add!(ConditionalFormat2ColorScale::new().set_minimum(lt, lv).set_maximum(ht, hv).set_minimum_color(Color::RGB(*lc)).set_maximum_color(Color::RGB(*hc)))
+            }
+            [(lo, lc), (mid, mc), (hi, hc)] => {
+                let ((lt, lv), (mt, mv), (ht, hv)) = (cf_point(*lo), cf_point(*mid), cf_point(*hi));
+                add!(ConditionalFormat3ColorScale::new()
+                    .set_minimum(lt, lv)
+                    .set_midpoint(mt, mv)
+                    .set_maximum(ht, hv)
+                    .set_minimum_color(Color::RGB(*lc))
+                    .set_midpoint_color(Color::RGB(*mc))
+                    .set_maximum_color(Color::RGB(*hc)))
+            }
+            _ => ws,
+        },
+        CfRule::DataBar { color, min, max } => {
+            let ((lt, lv), (ht, hv)) = (cf_point(*min), cf_point(*max));
+            add!(ConditionalFormatDataBar::new().set_minimum(lt, lv).set_maximum(ht, hv).set_fill_color(Color::RGB(*color)).set_solid_fill(true).set_border_off(true))
+        }
+    };
+    Ok(())
+}
+
 fn result_text(v: &Value) -> String {
     match v {
         Value::Number(n) => precise(*n),
@@ -196,6 +312,9 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         }
         if layout.freeze != (0, 0) {
             ws.set_freeze_panes(layout.freeze.0, layout.freeze.1 as u16).map_err(err)?;
+        }
+        for cf in &layout.cond {
+            write_cond(ws, wb, cf).map_err(err)?;
         }
         // Merges first: the top-left cell's real contents are written below.
         for m in &layout.merges {

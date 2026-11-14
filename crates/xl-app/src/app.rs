@@ -177,6 +177,9 @@ pub enum Field {
     NameBox,
     Find,
     Replace,
+    /// Conditional formatting dialog values.
+    Cf1,
+    Cf2,
 }
 
 /// What a right-click menu is about.
@@ -194,6 +197,7 @@ pub enum Menu {
     TextColor,
     Fill,
     Borders,
+    CondFormat,
     Main,
 }
 
@@ -252,6 +256,8 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// The open conditional-formatting rule dialog.
+    pub(crate) cf_dialog: Option<crate::cond_ui::CfDialog>,
     /// Highlighted formula suggestion.
     pub(crate) ac_selected: usize,
     /// Suggestions hidden (Escape) for the word starting at this position.
@@ -331,6 +337,7 @@ impl Spreadsheet {
             filter_menu: None,
             fill_target: None,
             ac_selected: 0,
+            cf_dialog: None,
             ac_dismissed: None,
             context: None,
             loading: None,
@@ -1621,6 +1628,8 @@ impl Spreadsheet {
         let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
         let handled = if self.lossy_prompt {
             self.key_lossy(key, cx)
+        } else if self.cf_dialog.is_some() {
+            self.key_cf_dialog(key)
         } else if self.pending.is_some() {
             self.key_dialog(key, window, cx)
         } else if ctrl && (key == "q" || key == "w") {

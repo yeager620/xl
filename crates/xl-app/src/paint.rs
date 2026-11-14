@@ -267,6 +267,36 @@ impl Spreadsheet {
         };
         let active_range = layout.merge_at(self.active).unwrap_or(Range::single(self.active));
 
+        // Conditional formatting for the visible cells.
+        let mut cf: std::collections::HashMap<CellRef, xl_engine::cond::CfResult> = std::collections::HashMap::new();
+        if !layout.cond.is_empty() {
+            let view = xl_engine::cond::CondView::new(&self.wb, self.cur);
+            for &(r, _, _) in &rows {
+                for &(c, _, _) in &cols {
+                    let cell = CellRef::new(r, c);
+                    let res = view.cell(cell);
+                    if !res.is_empty() {
+                        cf.insert(cell, res);
+                    }
+                }
+            }
+        }
+        // A cell's style with conditional formatting applied on top.
+        let styled = |cell: CellRef| -> std::borrow::Cow<'_, Style> {
+            let base = self.wb.style(self.at(cell));
+            match cf.get(&cell) {
+                Some(res) if res.fill.is_some() || res.color.is_some() || res.bold || res.italic => {
+                    let mut st = base.clone();
+                    st.fill = res.fill.or(st.fill);
+                    st.color = res.color.or(st.color);
+                    st.bold |= res.bold;
+                    st.italic |= res.italic;
+                    std::borrow::Cow::Owned(st)
+                }
+                _ => std::borrow::Cow::Borrowed(base),
+            }
+        };
+
         // Headers.
         ops.push(Op::Quad(fill(b(ox, oy, vw, HEADER_H), t.chrome), all));
         ops.push(Op::Quad(fill(b(ox, oy, HEADER_W, vh), t.chrome), all));
@@ -337,20 +367,32 @@ impl Spreadsheet {
                 if merge_at(cell).is_some() {
                     continue;
                 }
-                let st = self.wb.style(self.at(cell));
+                let st = styled(cell);
                 if st.fill.is_some() || st.has_borders() {
-                    paint_box(&mut ops, st, x, y, w, h, clip_of(r, c), false);
+                    paint_box(&mut ops, &st, x, y, w, h, clip_of(r, c), false);
                 }
             }
         }
         for m in &merges {
-            let st = self.wb.style(self.at(m.start));
+            let st = styled(m.start);
             for (rect, clip) in pieces(*m) {
                 let (x, y) = (f64::from(rect.origin.x), f64::from(rect.origin.y));
-                paint_box(&mut ops, st, x, y, f64::from(rect.size.width), f64::from(rect.size.height), clip, true);
+                paint_box(&mut ops, &st, x, y, f64::from(rect.size.width), f64::from(rect.size.height), clip, true);
             }
         }
         ops.extend(border_ops);
+
+        // Data bars, under the text.
+        for &(r, y, h) in &rows {
+            for &(c, x, w) in &cols {
+                if let Some((frac, color)) = cf.get(&CellRef::new(r, c)).and_then(|res| res.bar) {
+                    let mut fill_color = rgb(color);
+                    fill_color.a = 0.6;
+                    let len = ((w - 5.0) * frac).max(2.0);
+                    ops.push(Op::Quad(quad(b(x + 2.0, y + 3.0, len, h - 7.0), Corners::all(px(1.5)), fill_color, Edges::default(), fill_color, BorderStyle::Solid), clip_of(r, c)));
+                }
+            }
+        }
 
         // Selection fill (the active cell stays clear).
         let multi = sel.start != sel.end && sel != active_range;
@@ -358,7 +400,7 @@ impl Spreadsheet {
             for (rect, clip) in pieces(sel) {
                 ops.push(Op::Quad(fill(rect, t.selection), clip));
             }
-            let st = self.wb.style(self.at(active_range.start));
+            let st = styled(active_range.start);
             for (rect, clip) in pieces(active_range) {
                 ops.push(Op::Quad(fill(rect, st.fill.map_or(t.canvas, rgb)), clip));
             }
@@ -384,7 +426,8 @@ impl Spreadsheet {
                 return;
             }
             let shown = self.wb.display(self.at(cell));
-            let st = self.wb.style(self.at(cell));
+            let st_cow = styled(cell);
+            let st: &Style = &st_cow;
             let color = match (v, shown.color) {
                 (Value::Error(_), _) => t.error,
                 (_, Some(fc)) => fmt_color(&t, fc),

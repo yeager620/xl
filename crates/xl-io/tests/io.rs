@@ -396,3 +396,39 @@ fn autofilter_roundtrips_through_xlsx() {
     assert_eq!(l.filtered_rows.iter().copied().collect::<Vec<_>>(), vec![2]);
     assert!(l.hidden_rows.is_empty(), "filtered rows aren't hand-hidden rows");
 }
+
+#[test]
+fn conditional_formats_roundtrip_through_xlsx() {
+    use std::sync::Arc;
+    use xl_engine::Range;
+    use xl_engine::cond::{CfOp, CfRule, CfStyle, CfValue, CondFormat, TextMatch};
+    use xl_engine::formula::parse_formula;
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    for r in 0..5 {
+        wb.set_input(Addr::new(s, CellRef::new(r, 0)), &format!("{}", r * 10)).unwrap();
+    }
+    let rg = |a: &str, b: &str| Range::new(CellRef::parse(a).unwrap(), CellRef::parse(b).unwrap());
+    let red = CfStyle { fill: Some(0xFFC7CE), color: Some(0x9C0006), bold: true, italic: false };
+    let e = |src: &str| Arc::new(parse_formula(src, wb.sheets()).unwrap());
+    let rules = vec![
+        CondFormat { ranges: vec![rg("A1", "A5")], rule: CfRule::Cell { op: CfOp::Between, a: e("10"), b: Some(e("$B$1*2")), style: red.clone() }, stop_if_true: true },
+        CondFormat::new(vec![rg("A1", "A5"), rg("C1", "C5")], CfRule::Text { kind: TextMatch::BeginsWith, text: "ab".into(), style: CfStyle { italic: true, ..CfStyle::default() } }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::Top { n: 3, percent: true, bottom: true, style: red.clone() }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::Average { above: false, style: red.clone() }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::Duplicates { unique: true, style: red.clone() }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::Formula { expr: e("MOD(A1,2)=0"), style: red.clone() }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::ColorScale { stops: vec![(CfValue::Min, 0xF8696B), (CfValue::Percentile(50.0), 0xFFEB84), (CfValue::Max, 0x63BE7B)] }),
+        CondFormat::new(vec![rg("A1", "A5")], CfRule::DataBar { color: 0x638EC6, min: CfValue::Number(0.0), max: CfValue::Percent(90.0) }),
+    ];
+    wb.layout_mut(s).unwrap().cond = rules.clone();
+    let p = tmp("cond.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap();
+    assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
+    let got = &back.workbook.layout(back.workbook.sheet_ids()[0]).cond;
+    assert_eq!(got.len(), rules.len());
+    for (g, want) in got.iter().zip(&rules) {
+        assert_eq!(g, want);
+    }
+}

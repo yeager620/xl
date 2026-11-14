@@ -999,3 +999,29 @@ fn formula_autocomplete_and_hints(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(val(&view, cx, "F2"), Value::Number(0.165));
 }
+
+#[gpui::test]
+fn conditional_formatting_dialog(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "B4");
+    cx.simulate_keystrokes("shift-down shift-down");
+    view.update(cx, |s, _| s.open_cf_dialog(crate::cond_ui::CfKind::Greater));
+    cx.simulate_input("5");
+    view.update(cx, |s, _| s.cf_dialog.as_mut().unwrap().preset = 2); // green
+    cx.simulate_keystrokes("enter");
+    let fill = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, a1: &str| {
+        view.read_with(cx, |s, _| xl_engine::cond::CondView::new(&s.wb, s.cur).cell(CellRef::parse(a1).unwrap()).fill)
+    };
+    view.read_with(cx, |s, _| assert!(s.cf_dialog.is_none() && s.field.is_none(), "{:?} {:?}", s.message, s.wb.layout(s.cur).cond));
+    assert_eq!(fill(&view, cx, "B4"), None, "3 is not > 5");
+    assert_eq!(fill(&view, cx, "B5"), Some(0xC6EFCE));
+    assert_eq!(fill(&view, cx, "B6"), Some(0xC6EFCE));
+    // Typing into the grid while the dialog is open doesn't reach cells.
+    view.update(cx, |s, _| s.open_cf_dialog(crate::cond_ui::CfKind::Formula));
+    cx.simulate_input("B4>10");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "B4"), Value::Number(3.0));
+    assert_eq!(fill(&view, cx, "B6"), Some(0xFFC7CE), "the newer rule (12 > 10, red preset) wins");
+    cx.simulate_keystrokes("ctrl-z ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).cond.is_empty()));
+}

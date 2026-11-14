@@ -184,7 +184,7 @@ Checklist (tick as each lands with tests):
 - [x] Find & replace (find bar), sort (A→Z, Z→A, custom), AutoFilter (header dropdowns, value lists) + xlsx (multi-key custom sort dialog: later)
 - [x] Fill handle drag + series (numbers, dates, months/weekdays, "Item 1"), double-click fill; paste special (values/formats/formulas/transpose); cut = move with reference updates
 - [x] Formula autocomplete (functions + names) and argument hints
-- [ ] Conditional formatting (cell rules, text, top/bottom, above average, duplicates, formula, color scales, data bars) + xlsx
+- [x] Conditional formatting (cell rules, text, top/bottom, above average, duplicates, formula, color scales, data bars) + xlsx
 - [ ] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
 - [ ] Tables (Format as Table, banding, structured refs) + xlsx
 - [ ] Pivot tables (field panel, sum/count/avg/min/max, refresh)

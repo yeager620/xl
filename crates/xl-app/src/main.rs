@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod chrome;
 mod complete;
+mod cond_ui;
 mod data;
 mod fill;
 mod find;
