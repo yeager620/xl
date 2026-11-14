@@ -368,3 +368,31 @@ fn reports_parts_it_cannot_keep() {
     xl_io::save(&loaded.workbook, &p2, loaded.workbook.sheet_ids()[0]).unwrap();
     assert!(xl_io::open(&p2).unwrap().unsupported.is_empty());
 }
+
+#[test]
+fn autofilter_roundtrips_through_xlsx() {
+    use xl_engine::{AutoFilter, Range};
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let rows = [["Fruit", "Qty"], ["Apple", "3"], ["Pear", "5"], ["Apple", "7"], ["", "1"]];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            if !v.is_empty() {
+                wb.set_input(Addr::new(s, CellRef::new(r as u32, c as u32)), v).unwrap();
+            }
+        }
+    }
+    let mut f = AutoFilter { range: Range::new(CellRef::new(0, 0), CellRef::new(4, 1)), columns: Default::default() };
+    f.columns.insert(0, ["Apple".to_string(), String::new()].into_iter().collect());
+    wb.layout_mut(s).unwrap().filter = Some(f.clone());
+    wb.reapply_filter(s);
+    assert_eq!(wb.layout(s).filtered_rows.iter().copied().collect::<Vec<_>>(), vec![2], "only Pear is hidden");
+    let p = tmp("filter.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap();
+    assert!(!back.unsupported.contains(&"advanced filters"));
+    let l = back.workbook.layout(back.workbook.sheet_ids()[0]);
+    assert_eq!(l.filter.as_ref(), Some(&f));
+    assert_eq!(l.filtered_rows.iter().copied().collect::<Vec<_>>(), vec![2]);
+    assert!(l.hidden_rows.is_empty(), "filtered rows aren't hand-hidden rows");
+}

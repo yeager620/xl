@@ -50,6 +50,18 @@ pub struct SheetLayout {
     pub merges: Vec<Range>,
     /// Frozen (rows, columns) at the top-left.
     pub freeze: (u32, u32),
+    pub filter: Option<AutoFilter>,
+    /// Rows hidden by the filter (separate from rows hidden by hand).
+    pub filtered_rows: BTreeSet<u32>,
+}
+
+/// A filter on a range whose first row holds the headers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoFilter {
+    pub range: Range,
+    /// Column → the displayed values to show ("" stands for blanks). Columns
+    /// without an entry show everything.
+    pub columns: BTreeMap<u32, BTreeSet<String>>,
 }
 
 impl SheetLayout {
@@ -70,6 +82,16 @@ impl SheetLayout {
             shift_set(&mut self.hidden_cols);
         }
         self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
+        if rows {
+            shift_set(&mut self.filtered_rows);
+        }
+        self.filter = self.filter.take().and_then(|mut f| {
+            f.range = op.map_range(f.range)?;
+            if !rows {
+                f.columns = std::mem::take(&mut f.columns).into_iter().filter_map(|(c, v)| Some((op.map_pos(c)?, v))).collect();
+            }
+            Some(f)
+        });
         // Lines inserted or deleted inside the frozen area grow or shrink it.
         let frozen = if rows { &mut self.freeze.0 } else { &mut self.freeze.1 };
         if *frozen > 0 {
@@ -951,6 +973,33 @@ impl Workbook {
             l.merges.push(range);
         }
         stats
+    }
+
+    /// Recompute which rows the sheet's filter hides. The range first grows
+    /// down over rows of data added right below it, like Excel's.
+    pub fn reapply_filter(&mut self, sheet: SheetId) {
+        let Some(mut f) = self.layout(sheet).filter.clone() else {
+            if let Some(l) = self.layout_mut(sheet) {
+                l.filtered_rows.clear();
+            }
+            return;
+        };
+        let store = self.store(sheet);
+        let row_has_data = |r: u32| (f.range.start.col..=f.range.end.col).any(|c| !store.value(CellRef::new(r, c)).is_empty());
+        while f.range.end.row + 1 < crate::address::MAX_ROWS && row_has_data(f.range.end.row + 1) {
+            f.range.end.row += 1;
+        }
+        let mut hidden = BTreeSet::new();
+        for r in f.range.start.row + 1..=f.range.end.row {
+            let shown = f.columns.iter().all(|(&c, allowed)| allowed.contains(&self.display(Addr::new(sheet, CellRef::new(r, c))).text));
+            if !shown {
+                hidden.insert(r);
+            }
+        }
+        if let Some(l) = self.layout_mut(sheet) {
+            l.filter = Some(f);
+            l.filtered_rows = hidden;
+        }
     }
 
     /// Unmerge every merged range overlapping `range`.

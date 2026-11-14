@@ -435,6 +435,9 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     let mut cap = Capture::None;
     let mut shared_formulas: HashMap<u32, SharedFormula> = HashMap::new();
     let mut unresolved_shared = 0usize;
+    // AutoFilter: range, then per column the listed values.
+    let mut filter: Option<xl_engine::AutoFilter> = None;
+    let mut filter_col: Option<u32> = None;
 
     loop {
         let ev = r.read_event_into(&mut buf).map_err(|e| e.to_string())?;
@@ -457,6 +460,25 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                             && let Some(l) = wb.layout_mut(cx.id)
                         {
                             l.hidden_rows.insert(row);
+                        }
+                    }
+                    "autoFilter" => {
+                        if let Some(r) = attr(e, "ref").and_then(|s| parse_range(&s)) {
+                            filter = Some(xl_engine::AutoFilter { range: r, columns: Default::default() });
+                        }
+                    }
+                    "filterColumn" => filter_col = attr(e, "colId").and_then(|s| s.parse::<u32>().ok()),
+                    "filters" => {
+                        if let (Some(f), Some(c)) = (filter.as_mut(), filter_col) {
+                            let set = f.columns.entry(f.range.start.col + c).or_default();
+                            if attr(e, "blank").is_some_and(|v| v == "1" || v == "true") {
+                                set.insert(String::new());
+                            }
+                        }
+                    }
+                    "filter" => {
+                        if let (Some(f), Some(c), Some(v)) = (filter.as_mut(), filter_col, attr(e, "val")) {
+                            f.columns.entry(f.range.start.col + c).or_default().insert(v);
                         }
                     }
                     "mergeCell" => {
@@ -590,6 +612,17 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         }
         buf.clear();
     }
+    if let Some(f) = filter
+        && let Some(l) = wb.layout_mut(cx.id)
+    {
+        // Rows the filter hid aren't hidden by hand.
+        let rows: Vec<u32> = l.hidden_rows.range(f.range.start.row + 1..=f.range.end.row).copied().collect();
+        for r in rows {
+            l.hidden_rows.remove(&r);
+            l.filtered_rows.insert(r);
+        }
+        l.filter = Some(f);
+    }
     if unresolved_shared > 0 {
         warnings.push(format!("{}: {unresolved_shared} shared formulas couldn't be expanded and were kept as values", wb.sheet_name(cx.id)));
     }
@@ -619,7 +652,11 @@ const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
     ("<conditionalFormatting", "conditional formatting"),
     ("<hyperlinks", "hyperlinks"),
     ("<sheetProtection", "sheet protection"),
-    ("<autoFilter", "filters"),
+    ("<customFilters", "advanced filters"),
+    ("<top10", "advanced filters"),
+    ("<dynamicFilter", "advanced filters"),
+    ("<colorFilter", "advanced filters"),
+    ("<iconFilter", "advanced filters"),
     ("<x14:sparklineGroups", "sparklines"),
 ];
 

@@ -19,4 +19,4 @@ pub use formula::{ParseError, Shift, quote_sheet_name};
 pub use store::{Cell, CellInput, CellStore};
 pub use style::{Border, HAlign, LineStyle, Rgb, Style, VAlign};
 pub use value::{ErrorKind, Value, format_general};
-pub use workbook::{CellSnapshot, LoadedCell, RecalcStats, SheetLayout, Workbook, precise, validate_sheet_name};
+pub use workbook::{AutoFilter, CellSnapshot, LoadedCell, RecalcStats, SheetLayout, Workbook, precise, validate_sheet_name};

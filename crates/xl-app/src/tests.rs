@@ -810,3 +810,72 @@ fn find_and_replace(cx: &mut TestAppContext) {
         assert_eq!(s.active, CellRef::parse("D4").unwrap());
     });
 }
+
+/// A small table at F1:H6 (Name, Team, Score) away from the fixture's data.
+fn table(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext) {
+    view.update(cx, |s, _| {
+        let rows = [["Name", "Team", "Score"], ["dana", "Red", "71"], ["Ari", "Blue", "93"], ["cy", "Red", "88"], ["Bo", "Blue", "65"], ["Eve", "Green", ""]];
+        let mut items = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                if !v.is_empty() {
+                    items.push((s.at(CellRef::new(r as u32, 5 + c as u32)), v.to_string()));
+                }
+            }
+        }
+        items.push((s.at(CellRef::parse("I2").unwrap()), "=H2*2".to_string()));
+        s.wb.set_inputs(items);
+    });
+}
+
+#[gpui::test]
+fn sort_detects_header_and_moves_formulas(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    table(&view, cx);
+    go(&view, cx, "H3");
+    view.update(cx, |s, _| s.sort_by_active(false)); // by Score, high to low; blank last
+    let col = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, c: &str| (2..=6).map(|r| val(view, cx, &format!("{c}{r}"))).collect::<Vec<_>>();
+    assert_eq!(val(&view, cx, "F1"), Value::text("Name"), "header row stays put");
+    assert_eq!(col(&view, cx, "F"), ["Ari", "cy", "dana", "Bo", "Eve"].map(Value::text).to_vec());
+    // dana's row moved from 2 to 4 with its formula, which follows the row.
+    assert_eq!(input(&view, cx, "I4"), "=H4*2");
+    assert_eq!(val(&view, cx, "I4"), Value::Number(142.0));
+    go(&view, cx, "F2");
+    view.update(cx, |s, _| s.sort_by_active(true)); // by Name, case-insensitive
+    assert_eq!(col(&view, cx, "F"), ["Ari", "Bo", "cy", "dana", "Eve"].map(Value::text).to_vec());
+    cx.simulate_keystrokes("ctrl-z ctrl-z");
+    assert_eq!(col(&view, cx, "F"), ["dana", "Ari", "cy", "Bo", "Eve"].map(Value::text).to_vec());
+}
+
+#[gpui::test]
+fn filter_hides_rows_and_undoes(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    table(&view, cx);
+    go(&view, cx, "G3");
+    cx.simulate_keystrokes("ctrl-shift-l");
+    let button = view.read_with(cx, |s, _| {
+        let f = s.wb.layout(s.cur).filter.clone().expect("filter on");
+        assert_eq!(f.range, xl_engine::Range::new(CellRef::parse("F1").unwrap(), CellRef::parse("I6").unwrap()));
+        // The Team column's dropdown, at the right edge of G1.
+        let x = f64::from(s.viewport.origin.x) + crate::app::HEADER_W + s.grid_x(6) + s.col_w(6) - 8.0;
+        let y = f64::from(s.viewport.origin.y) + crate::app::HEADER_H + s.grid_y(0) + 10.0;
+        gpui::point(gpui::px(x as f32), gpui::px(y as f32))
+    });
+    cx.simulate_click(button, gpui::Modifiers::none());
+    view.update(cx, |s, _| {
+        let m = s.filter_menu.as_mut().expect("dropdown open");
+        assert_eq!(m.values.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(), ["Blue", "Green", "Red"]);
+        m.values[0].1 = false; // hide Blue
+        m.values[1].1 = false; // hide Green
+    });
+    view.update(cx, |s, _| s.apply_filter_menu());
+    view.read_with(cx, |s, _| {
+        let hidden: Vec<u32> = s.wb.layout(s.cur).filtered_rows.iter().copied().collect();
+        assert_eq!(hidden, vec![2, 4, 5], "Ari, Bo (Blue) and Eve (Green) are hidden");
+        assert_eq!(s.row_h(2), 0.0);
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).filtered_rows.is_empty()));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).filter.is_none()));
+}

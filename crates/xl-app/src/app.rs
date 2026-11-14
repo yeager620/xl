@@ -223,6 +223,8 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// The open filter dropdown.
+    pub(crate) filter_menu: Option<crate::data::FilterMenu>,
     /// Layout when a resize drag began, for its undo step.
     layout_before: Option<(SheetId, SheetLayout)>,
     /// Right-click menu: where it opened and what it's for.
@@ -291,6 +293,7 @@ impl Spreadsheet {
             confirm_delete: None,
             menu: None,
             layout_before: None,
+            filter_menu: None,
             context: None,
             loading: None,
             palette: None,
@@ -338,19 +341,19 @@ impl Spreadsheet {
 
     pub(crate) fn row_h(&self, r: u32) -> f64 {
         let l = self.wb.layout(self.cur);
-        if l.hidden_rows.contains(&r) { 0.0 } else { l.row_heights.get(&r).copied().unwrap_or(ROW_H) }
+        if l.hidden_rows.contains(&r) || l.filtered_rows.contains(&r) { 0.0 } else { l.row_heights.get(&r).copied().unwrap_or(ROW_H) }
     }
 
     /// Content-space x of the left edge of column `c`.
     pub(crate) fn col_x(&self, c: u32) -> f64 {
         let l = self.wb.layout(self.cur);
-        line_offset(c, DEF_COL_W, &l.col_widths, &l.hidden_cols)
+        line_offset(c, DEF_COL_W, &l.col_widths, &l.hidden_cols, &std::collections::BTreeSet::new())
     }
 
     /// Content-space y of the top edge of row `r`.
     pub(crate) fn row_y(&self, r: u32) -> f64 {
         let l = self.wb.layout(self.cur);
-        line_offset(r, ROW_H, &l.row_heights, &l.hidden_rows)
+        line_offset(r, ROW_H, &l.row_heights, &l.hidden_rows, &l.filtered_rows)
     }
 
     /// Column containing content-space x (skipping hidden columns).
@@ -791,7 +794,7 @@ impl Spreadsheet {
     }
 
     /// Apply exact snapshots (inputs + formats) as one undoable step.
-    fn apply_snapshots(&mut self, items: Snapshots) {
+    pub(crate) fn apply_snapshots(&mut self, items: Snapshots) {
         if items.is_empty() {
             return;
         }
@@ -875,7 +878,7 @@ impl Spreadsheet {
 
     /// Change the current sheet's layout (and possibly cells in `touched`) as
     /// one undoable step.
-    fn change_layout(&mut self, touched: Option<Range>, f: impl FnOnce(&mut Self)) {
+    pub(crate) fn change_layout(&mut self, touched: Option<Range>, f: impl FnOnce(&mut Self)) {
         if self.edit.is_some() && !self.commit_edit() {
             return;
         }
@@ -1768,10 +1771,12 @@ impl Spreadsheet {
                 self.confirm_delete = None;
                 self.menu = None;
                 self.context = None;
+                self.filter_menu = None;
             }
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
             ("g", true) => self.focus_name_box(),
+            ("l", true) if shift => self.toggle_filter(),
             ("f", true) => self.open_find(false),
             ("h", true) => self.open_find(true),
             ("b", true) => self.toggle_emphasis(Emphasis::Bold),
@@ -1871,6 +1876,9 @@ impl Spreadsheet {
                 }
                 self.active = CellRef::new(row, MAX_COLS - 1);
                 self.anchor.col = 0;
+            }
+            Hit::Cell(c) if self.filter_button_at(ev.position) == Some(c.col) => {
+                self.open_filter_menu(c.col, ev.position);
             }
             Hit::Cell(c) => {
                 if ev.click_count >= 2 {
@@ -2110,15 +2118,24 @@ pub(crate) fn next_boundary(s: &str, i: usize) -> usize {
 }
 
 /// Offset of line `i` along an axis: `i` default-sized lines, adjusted for
-/// custom sizes and hidden (zero-size) lines before it.
-fn line_offset(i: u32, default: f64, sizes: &std::collections::BTreeMap<u32, f64>, hidden: &std::collections::BTreeSet<u32>) -> f64 {
+/// custom sizes and hidden (zero-size) lines before it. Lines can be hidden
+/// two ways (by hand, by a filter).
+fn line_offset(
+    i: u32,
+    default: f64,
+    sizes: &std::collections::BTreeMap<u32, f64>,
+    hidden: &std::collections::BTreeSet<u32>,
+    also_hidden: &std::collections::BTreeSet<u32>,
+) -> f64 {
+    let is_hidden = |k: &u32| hidden.contains(k) || also_hidden.contains(k);
     let mut x = i as f64 * default;
     for (k, w) in sizes.range(..i) {
-        if !hidden.contains(k) {
+        if !is_hidden(k) {
             x += w - default;
         }
     }
-    x - hidden.range(..i).count() as f64 * default
+    let count = hidden.range(..i).count() + also_hidden.range(..i).filter(|k| !hidden.contains(k)).count();
+    x - count as f64 * default
 }
 
 /// The last index in [0, n) whose offset is <= v (offsets are non-decreasing).

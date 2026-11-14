@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook as XlsxBook};
+use rust_xlsxwriter::{Color, FilterCondition, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook as XlsxBook};
 use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, VAlign, Value, Workbook, precise};
 
 use crate::{to_excel_height, to_excel_width_px};
@@ -172,8 +172,24 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for (&row, &px) in &layout.row_heights {
             ws.set_row_height(row, to_excel_height(px)).map_err(err)?;
         }
-        for &row in &layout.hidden_rows {
+        for &row in layout.hidden_rows.iter().chain(&layout.filtered_rows) {
             ws.set_row_hidden(row).map_err(err)?;
+        }
+        if let Some(f) = &layout.filter {
+            let r = f.range;
+            ws.autofilter(r.start.row, r.start.col as u16, r.end.row, r.end.col as u16).map_err(err)?;
+            // We hide the filtered rows ourselves (above), matching xl's view.
+            ws.filter_automatic_off();
+            for (&col, allowed) in &f.columns {
+                if allowed.is_empty() {
+                    continue;
+                }
+                let mut cond = FilterCondition::new();
+                for v in allowed {
+                    cond = if v.is_empty() { cond.add_list_blanks_filter() } else { cond.add_list_filter(v.as_str()) };
+                }
+                ws.filter_column(col as u16, &cond).map_err(err)?;
+            }
         }
         for &col in &layout.hidden_cols {
             ws.set_column_hidden(col as u16).map_err(err)?;

@@ -154,7 +154,7 @@ fn window_button(t: &Theme, id: &'static str, name: &'static str) -> gpui::State
         .child(svg().path(format!("icons/{name}.svg")).size(px(14.)).text_color(t.ink))
 }
 
-fn menu_panel(t: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn menu_panel(t: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id("menu-panel")
         .occlude()
@@ -173,7 +173,7 @@ fn menu_panel(t: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
         .whitespace_nowrap()
 }
 
-fn menu_item(t: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, detail: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn menu_item(t: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, detail: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
@@ -190,7 +190,7 @@ fn menu_item(t: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedS
         .child(div().text_color(t.ink_muted).child(detail.into()))
 }
 
-fn menu_separator(t: &Theme) -> impl IntoElement {
+pub(crate) fn menu_separator(t: &Theme) -> impl IntoElement {
     div().h(px(1.)).mx(px(4.)).my(px(4.)).bg(t.divider)
 }
 
@@ -604,6 +604,12 @@ impl Spreadsheet {
                 items.push(Some((format!("Delete {cols}"), "", |s, _, _| s.delete_cols())));
             }
         }
+        if kind == ContextKind::Cells {
+            items.push(None);
+            items.push(Some(("Sort A → Z".into(), "", |s, _, _| s.sort_by_active(true))));
+            items.push(Some(("Sort Z → A".into(), "", |s, _, _| s.sort_by_active(false))));
+            items.push(Some(("Filter".into(), "Ctrl+Shift+L", |s, _, _| s.toggle_filter())));
+        }
         items.push(None);
         items.push(Some(("Clear contents".into(), "Delete", |s, _, _| s.clear_selection())));
         items.push(Some(("Clear formatting".into(), "", |s, _, _| s.clear_formatting())));
@@ -933,7 +939,7 @@ impl Render for Spreadsheet {
             )
             .child(self.render_bottom_bar(cx))
             .relative()
-            .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some(), |d| {
+            .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some() || self.filter_menu.is_some(), |d| {
                 // Transparent backdrop: a click anywhere outside the open menu or palette closes it.
                 d.child(
                     deferred(div().id("menu-backdrop").absolute().top_0().left_0().size_full().occlude().on_mouse_down(
@@ -942,12 +948,16 @@ impl Render for Spreadsheet {
                             this.menu = None;
                             this.palette = None;
                             this.context = None;
+                            this.filter_menu = None;
                             cx.stop_propagation();
                             cx.notify();
                         }),
                     ))
                     .with_priority(1),
                 )
+            })
+            .when_some(self.filter_menu.as_ref().map(|m| m.pos), |d, pos| {
+                d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_filter_menu(cx))).with_priority(2))
             })
             .when_some(self.context, |d, (pos, kind)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_context_menu(kind, cx))).with_priority(2))

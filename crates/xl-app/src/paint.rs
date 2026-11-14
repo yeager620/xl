@@ -469,6 +469,25 @@ impl Spreadsheet {
             }
         }
 
+        // Filter dropdown buttons in the header row.
+        if let Some(f) = &layout.filter
+            && let Some(&(r, y, h)) = rows.iter().find(|row| row.0 == f.range.start.row)
+        {
+            let size = crate::data::FILTER_BUTTON;
+            for &(c, x, w) in cols.iter().filter(|col| (f.range.start.col..=f.range.end.col).contains(&col.0)) {
+                let active = f.columns.contains_key(&c);
+                let (bx, by) = (x + w - size - 3.0, y + (h - size) / 2.0);
+                let clip = clip_of(r, c);
+                let (bg, fg) = if active { (t.accent, t.on_accent) } else { (t.chrome, t.ink_muted) };
+                ops.push(Op::Quad(border_quad(b(bx, by, size, size), 1.0, if active { t.accent } else { t.divider }, bg, BorderStyle::Solid, 3.0), clip));
+                // A small down-pointing triangle, drawn as stacked bars.
+                let (cx0, cy0) = (bx + size / 2.0, by + size / 2.0 - 1.5);
+                for (i, half) in [3.5, 2.5, 1.5, 0.5].iter().enumerate() {
+                    ops.push(Op::Quad(fill(b(cx0 - half, cy0 + i as f64, half * 2.0, 1.0), fg), clip));
+                }
+            }
+        }
+
         // Freeze lines.
         if fc > 0 && fw < gw {
             ops.push(Op::Quad(fill(b(gx + fw - 1.0, oy, 1.0, vh), t.ink_faint), all));
