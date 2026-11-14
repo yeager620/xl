@@ -37,15 +37,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>A budget with live totals for the selected cells</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-1.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-1.png</image>
     </screenshot>
     <screenshot>
       <caption>Writing a formula, with each reference highlighted in the grid</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-2.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-2.png</image>
     </screenshot>
     <screenshot>
       <caption>Every command a keystroke away in the command palette</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.1.1/packaging/screenshots/screenshot-3.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-3.png</image>
     </screenshot>
   </screenshots>
   <branding>
@@ -58,6 +58,20 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.2.0" date="2026-11-14">
+      <description>
+        <p>A big step toward Excel parity:</p>
+        <ul>
+          <li>Insert and delete rows and columns with formula adjustment; cut and paste moves cells and their references</li>
+          <li>Row heights, hidden rows and columns, merged cells, wrap text, font sizes, freeze panes, grouping and outlines</li>
+          <li>Find and replace, sort, filters, remove duplicates, text to columns</li>
+          <li>Fill handle series, paste special, formula autocomplete and 48 more functions</li>
+          <li>Conditional formatting, charts, sparklines, tables with structured references and pivot tables</li>
+          <li>Goal Seek and Solver</li>
+          <li>Warns before saving over parts of an xlsx file it can't keep</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-13">
       <description>
         <p>Packaged for Flathub under the app ID io.github.yeager620.xl.</p>

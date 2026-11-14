@@ -5,7 +5,7 @@ exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.1"
+version = "0.2.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yeager620/xl"
 homepage = "https://github.com/yeager620/xl"
