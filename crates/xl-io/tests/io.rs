@@ -359,9 +359,12 @@ fn reports_parts_it_cannot_keep() {
     ws.add_data_validation(0, 2, 5, 2, &DataValidation::new().allow_whole_number(rust_xlsxwriter::DataValidationRule::Between(1, 10))).unwrap();
     book.save(&p).unwrap();
     let loaded = xl_io::open(&p).unwrap();
-    for part in ["charts", "comments", "data validation"] {
+    for part in ["comments", "data validation"] {
         assert!(loaded.unsupported.contains(&part), "{part} missing from {:?}", loaded.unsupported);
     }
+    let charts = &loaded.workbook.layout(loaded.workbook.sheet_ids()[0]).charts;
+    assert_eq!(charts.len(), 1, "Excel's chart is read");
+    assert_eq!(charts[0].anchor, CellRef::new(3, 3));
     assert_eq!(*loaded.workbook.value(a(loaded.workbook.sheet_ids()[0], "A2")), Value::Number(2.0));
     // A file xl wrote itself has nothing to lose.
     let p2 = tmp("plain.xlsx");
@@ -431,4 +434,35 @@ fn conditional_formats_roundtrip_through_xlsx() {
     for (g, want) in got.iter().zip(&rules) {
         assert_eq!(g, want);
     }
+}
+
+#[test]
+fn charts_roundtrip_through_xlsx() {
+    use std::sync::Arc;
+    use xl_engine::chart::{Chart, ChartKind, ChartSeries};
+    use xl_engine::formula::parse_formula;
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let rows = [["Month", "Sales", "Costs"], ["Jan", "10", "4"], ["Feb", "14", "6"], ["Mar", "9", "5"]];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            wb.set_input(Addr::new(s, CellRef::new(r as u32, c as u32)), v).unwrap();
+        }
+    }
+    let e = |src: &str| Arc::new(parse_formula(src, wb.sheets()).unwrap());
+    let series = |col: &str| ChartSeries { name: Some(e(&format!("Sheet1!${col}$1"))), categories: Some(e("Sheet1!$A$2:$A$4")), values: e(&format!("Sheet1!${col}$2:${col}$4")) };
+    let chart = Chart { kind: ChartKind::Bar, title: Some("Q1".into()), series: vec![series("B"), series("C")], anchor: CellRef::new(1, 4), offset: (0.0, 0.0), size: (480.0, 286.0), stacked: true };
+    wb.layout_mut(s).unwrap().charts.push(chart.clone());
+    let p = tmp("chart.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap();
+    let got = &back.workbook.layout(back.workbook.sheet_ids()[0]).charts;
+    assert_eq!(got.len(), 1);
+    let g = &got[0];
+    assert_eq!((g.kind, g.stacked, g.title.as_deref(), g.anchor), (ChartKind::Bar, true, Some("Q1"), CellRef::new(1, 4)));
+    assert_eq!(g.series, chart.series);
+    assert!((g.size.0 - 480.0).abs() < 3.0 && (g.size.1 - 286.0).abs() < 3.0, "size {:?}", g.size);
+    let data = back.workbook.chart_data(back.workbook.sheet_ids()[0], g);
+    assert_eq!(data.categories, ["Jan", "Feb", "Mar"]);
+    assert_eq!(data.series[1], ("Costs".to_string(), vec![Some(4.0), Some(6.0), Some(5.0)]));
 }

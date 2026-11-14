@@ -21,20 +21,20 @@ use zip::ZipArchive;
 
 use crate::{Loaded, from_excel_height, from_excel_width};
 
-type Zip = ZipArchive<BufReader<File>>;
+pub(crate) type Zip = ZipArchive<BufReader<File>>;
 
-fn local(name: &str) -> &str {
+pub(crate) fn local(name: &str) -> &str {
     match name.rfind(':') {
         Some(i) => &name[i + 1..],
         None => name,
     }
 }
 
-fn attr(e: &BytesStart, key: &str) -> Option<String> {
+pub(crate) fn attr(e: &BytesStart, key: &str) -> Option<String> {
     e.attributes().with_checks(false).flatten().find(|a| local(a.key.as_ref()) == key).and_then(|a| a.normalized_value(XmlVersion::Implicit1_0).ok().map(|v| v.into_owned()))
 }
 
-fn push_entity(out: &mut String, r: &BytesRef) {
+pub(crate) fn push_entity(out: &mut String, r: &BytesRef) {
     if let Ok(Some(c)) = r.resolve_char_ref() {
         out.push(c);
         return;
@@ -49,7 +49,7 @@ fn push_entity(out: &mut String, r: &BytesRef) {
     });
 }
 
-fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Option<Vec<u8>>, String> {
     let mut f = match zip.by_name(name) {
         Ok(f) => f,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
@@ -60,11 +60,11 @@ fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Opt
     Ok(Some(buf))
 }
 
-fn xml(bytes: &[u8]) -> Reader<&[u8]> {
+pub(crate) fn xml(bytes: &[u8]) -> Reader<&[u8]> {
     Reader::from_reader(bytes)
 }
 
-fn read_rels(zip: &mut Zip, name: &str) -> Result<HashMap<String, String>, String> {
+pub(crate) fn read_rels(zip: &mut Zip, name: &str) -> Result<HashMap<String, String>, String> {
     let mut out = HashMap::new();
     let Some(bytes) = read_entry(zip, name)? else { return Ok(out) };
     let mut r = xml(&bytes);
@@ -817,8 +817,6 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
 
 /// Package parts xl doesn't model, by path prefix.
 const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
-    ("xl/charts/", "charts"),
-    ("xl/drawings/", "drawings and images"),
     ("xl/media/", "drawings and images"),
     ("xl/comments", "comments"),
     ("xl/threadedComments/", "comments"),
@@ -926,6 +924,16 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         let skipped = read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles, dxfs: &dxfs, theme: &theme }, &mut cells, &mut warnings)?;
         if skipped {
             note("some kinds of conditional formatting");
+        }
+        let drawn = crate::xlsx_charts::read_sheet_charts(&mut zip, &part, &mut wb, *id)?;
+        if drawn.other_drawings {
+            note("drawings and images");
+        }
+        if drawn.unsupported_charts {
+            note("some kinds of charts");
+        }
+        if drawn.charts > 0 && drawn.styled_charts {
+            note("chart styling (the charts themselves are kept)");
         }
     }
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {

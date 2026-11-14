@@ -1,6 +1,7 @@
 //! xl-io: reading and writing workbooks (xlsx, csv).
 
 mod csv_io;
+mod xlsx_charts;
 mod xlsx_read;
 mod xlsx_write;
 
@@ -81,6 +82,11 @@ pub fn to_excel_height(px: f64) -> f64 {
 pub fn from_excel_width(width: f64) -> f64 {
     let excel_px = (((256.0 * width + 18.0) / 256.0) * 7.0).trunc();
     (excel_px * SCALE).round().max(8.0)
+}
+
+/// Excel pixels (horizontal) to ours.
+pub fn from_excel_width_px(px: f64) -> f64 {
+    px * SCALE
 }
 
 /// Our pixels to Excel pixels.

@@ -1025,3 +1025,65 @@ fn conditional_formatting_dialog(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z ctrl-z");
     view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).cond.is_empty()));
 }
+
+#[gpui::test]
+fn insert_move_and_edit_a_chart(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    use xl_engine::chart::ChartKind;
+    let (view, cx) = setup(cx);
+    table(&view, cx); // F1:H6 Name / Team / Score
+    go(&view, cx, "F1");
+    cx.simulate_keystrokes("shift-down shift-down shift-down shift-down shift-down shift-right shift-right");
+    view.update(cx, |s, _| s.insert_chart(ChartKind::Column));
+    let data = view.read_with(cx, |s, _| {
+        let l = s.wb.layout(s.cur);
+        assert_eq!(l.charts.len(), 1);
+        assert_eq!(s.selected_chart, Some(0));
+        s.wb.chart_data(s.cur, &l.charts[0])
+    });
+    assert_eq!(data.categories, ["dana", "Ari", "cy", "Bo", "Eve"], "the text column gives the categories");
+    assert_eq!(data.series.len(), 1, "Team is text, so only Score is a series");
+    assert_eq!(data.series[0].0, "Score");
+    assert_eq!(data.series[0].1, vec![Some(71.0), Some(93.0), Some(88.0), Some(65.0), None]);
+    // Values update live.
+    view.update(cx, |s, _| s.wb.set_input(s.at(CellRef::parse("H2").unwrap()), "10").unwrap());
+    let v = view.read_with(cx, |s, _| s.wb.chart_data(s.cur, &s.wb.layout(s.cur).charts[0]).series[0].1[0]);
+    assert_eq!(v, Some(10.0));
+    // Drag it by its body 3 rows down.
+    let (x, y) = view.read_with(cx, |s, _| {
+        let (x, y, _, _) = s.chart_rect(&s.wb.layout(s.cur).charts[0]);
+        (x, y)
+    });
+    let grab = gpui::point(gpui::px((x + 50.0) as f32), gpui::px((y + 50.0) as f32));
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+    let to = gpui::point(gpui::px((x + 50.0) as f32), gpui::px((y + 50.0 + 3.0 * crate::app::ROW_H) as f32));
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).charts[0].anchor, CellRef::parse("J4").unwrap()));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).charts[0].anchor, CellRef::parse("J1").unwrap()));
+    // Retitle, change kind, delete.
+    view.update(cx, |s, _| {
+        s.selected_chart = Some(0);
+        s.edit_chart_title();
+    });
+    cx.simulate_input("Scores");
+    cx.simulate_keystrokes("enter");
+    view.update(cx, |s, _| s.update_chart(|c| c.kind = ChartKind::Line));
+    view.read_with(cx, |s, _| {
+        let c = &s.wb.layout(s.cur).charts[0];
+        assert_eq!((c.title.as_deref(), c.kind), (Some("Scores"), ChartKind::Line));
+    });
+    cx.simulate_keystrokes("delete");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).charts.is_empty()));
+    assert_eq!(val(&view, cx, "J1"), Value::Empty, "deleting the chart didn't clear cells");
+    // Inserting rows above moves the chart and its data references.
+    cx.simulate_keystrokes("ctrl-z");
+    go(&view, cx, "A1");
+    cx.simulate_keystrokes("ctrl-shift-=");
+    view.read_with(cx, |s, _| {
+        let c = &s.wb.layout(s.cur).charts[0];
+        assert_eq!(c.anchor, CellRef::parse("J2").unwrap());
+        assert_eq!(s.wb.chart_data(s.cur, c).series[0].1[1], Some(93.0));
+    });
+}

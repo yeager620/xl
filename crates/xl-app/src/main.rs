@@ -1,5 +1,7 @@
 mod app;
 mod assets;
+mod chart_paint;
+mod charts;
 mod chrome;
 mod complete;
 mod cond_ui;

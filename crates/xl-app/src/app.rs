@@ -75,6 +75,9 @@ pub enum Drag {
     ResizeRow { row: u32, start_y: f64, start_h: f64 },
     /// Dragging the fill handle of `src`.
     Fill { src: Range },
+    /// Moving a chart: where the pointer grabbed it relative to its corner.
+    MoveChart { index: usize, grab: (f64, f64) },
+    ResizeChart { index: usize, start: (f64, f64), size: (f64, f64) },
     /// Dragging a scrollbar thumb; `grab` is the pointer offset within it.
     Scroll { axis: Axis, grab: f64 },
 }
@@ -180,6 +183,8 @@ pub enum Field {
     /// Conditional formatting dialog values.
     Cf1,
     Cf2,
+    /// The selected chart's title.
+    ChartTitle,
 }
 
 /// What a right-click menu is about.
@@ -188,6 +193,7 @@ pub enum ContextKind {
     Cells,
     Rows,
     Cols,
+    Chart,
 }
 
 /// Which toolbar popover is open.
@@ -198,6 +204,7 @@ pub enum Menu {
     Fill,
     Borders,
     CondFormat,
+    Chart,
     Main,
 }
 
@@ -256,6 +263,9 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// The selected chart (index on the current sheet).
+    pub(crate) selected_chart: Option<usize>,
+    pub(crate) chart_title_text: String,
     /// The open conditional-formatting rule dialog.
     pub(crate) cf_dialog: Option<crate::cond_ui::CfDialog>,
     /// Highlighted formula suggestion.
@@ -338,6 +348,8 @@ impl Spreadsheet {
             fill_target: None,
             ac_selected: 0,
             cf_dialog: None,
+            selected_chart: None,
+            chart_title_text: String::new(),
             ac_dismissed: None,
             context: None,
             loading: None,
@@ -1645,6 +1657,8 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
+        } else if self.field == Some(Field::ChartTitle) {
+            self.key_chart_title(key)
         } else if matches!(self.field, Some(Field::Find | Field::Replace)) {
             self.key_find(key, m.shift)
         } else if self.field.is_some() {
@@ -1876,6 +1890,7 @@ impl Spreadsheet {
             ("enter", _) => self.move_by(if shift { -1 } else { 1 }, 0, false),
             ("tab", _) => self.move_by(0, if shift { -1 } else { 1 }, false),
             ("f2", _) => self.begin_edit(None, EditMode::Edit),
+            ("delete" | "backspace", false) if self.selected_chart.is_some() => self.delete_chart(),
             ("delete" | "backspace", false) => self.clear_selection(),
             ("escape", _) => {
                 self.anchor = self.active;
@@ -1885,6 +1900,7 @@ impl Spreadsheet {
                 self.context = None;
                 self.filter_menu = None;
                 self.clip = None;
+                self.selected_chart = None;
             }
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
@@ -1941,6 +1957,33 @@ impl Spreadsheet {
             cx.notify();
             return;
         }
+        if self.edit.is_none() && self.on_chart_grip(ev.position) {
+            if let Some(index) = self.selected_chart {
+                let size = self.wb.layout(self.cur).charts[index].size;
+                self.layout_before = Some((self.cur, self.wb.layout(self.cur).clone()));
+                self.drag = Some(Drag::ResizeChart { index, start: (f64::from(ev.position.x), f64::from(ev.position.y)), size });
+            }
+            cx.notify();
+            return;
+        }
+        if self.edit.is_none()
+            && let Some(index) = self.chart_at(ev.position)
+        {
+            if self.field == Some(Field::ChartTitle) && self.selected_chart != Some(index) {
+                self.field = None;
+            }
+            self.selected_chart = Some(index);
+            if ev.click_count >= 2 {
+                self.edit_chart_title();
+            } else {
+                let (x, y, _, _) = self.chart_rect(&self.wb.layout(self.cur).charts[index]);
+                self.layout_before = Some((self.cur, self.wb.layout(self.cur).clone()));
+                self.drag = Some(Drag::MoveChart { index, grab: (f64::from(ev.position.x) - x, f64::from(ev.position.y) - y) });
+            }
+            cx.notify();
+            return;
+        }
+        self.selected_chart = None;
         let Some(hit) = self.hit_test(ev.position) else { return };
         let shift = ev.modifiers.shift;
         // Clicking a cell while writing a formula inserts a reference.
@@ -2025,6 +2068,14 @@ impl Spreadsheet {
         if self.edit.is_some() && !self.commit_edit() {
             return;
         }
+        if let Some(index) = self.chart_at(ev.position) {
+            self.selected_chart = Some(index);
+            self.menu = None;
+            self.context = Some((ev.position, ContextKind::Chart));
+            cx.notify();
+            return;
+        }
+        self.selected_chart = None;
         let Some(hit) = self.hit_test(ev.position) else { return };
         let sel = self.selection();
         let kind = match hit {
@@ -2079,6 +2130,21 @@ impl Spreadsheet {
             Drag::ResizeRow { row, start_y, start_h } => {
                 let h = (start_h + f64::from(ev.position.y) - start_y).max(MIN_ROW_H);
                 self.wb.set_row_height(self.cur, row, Some(h));
+                self.mark_dirty();
+            }
+            Drag::MoveChart { index, grab } => {
+                let (anchor, offset) = self.chart_anchor_at(f64::from(ev.position.x) - grab.0, f64::from(ev.position.y) - grab.1);
+                if let Some(c) = self.wb.layout_mut(self.cur).and_then(|l| l.charts.get_mut(index)) {
+                    c.anchor = anchor;
+                    c.offset = offset;
+                }
+                self.mark_dirty();
+            }
+            Drag::ResizeChart { index, start, size } => {
+                let (w, h) = ((size.0 + f64::from(ev.position.x) - start.0).max(160.0), (size.1 + f64::from(ev.position.y) - start.1).max(120.0));
+                if let Some(c) = self.wb.layout_mut(self.cur).and_then(|l| l.charts.get_mut(index)) {
+                    c.size = (w, h);
+                }
                 self.mark_dirty();
             }
             Drag::Fill { src } => {

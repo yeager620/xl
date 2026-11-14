@@ -2,6 +2,7 @@
 //! number formats and incremental recalculation.
 
 pub mod address;
+pub mod chart;
 pub mod cond;
 pub mod datetime;
 pub mod eval;

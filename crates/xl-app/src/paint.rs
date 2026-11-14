@@ -14,6 +14,7 @@ use crate::theme::Theme;
 
 pub enum Op {
     Quad(PaintQuad, Bounds<Pixels>),
+    Path(gpui::Path, Hsla, Bounds<Pixels>),
     Text { line: Box<ShapedLine>, origin: Point<Pixels>, clip: Bounds<Pixels>, line_height: Pixels },
 }
 
@@ -21,6 +22,7 @@ pub fn paint_ops(ops: Vec<Op>, window: &mut Window, cx: &mut App) {
     for op in ops {
         match op {
             Op::Quad(q, clip) => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| w.paint_quad(q)),
+            Op::Path(path, color, clip) => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| w.paint_path(path, color)),
             Op::Text { line, origin, clip, line_height } => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| {
                 line.paint(origin, line_height, TextAlign::Left, None, w, cx).ok();
             }),
@@ -82,6 +84,14 @@ pub fn wrap_lines(window: &mut Window, text: &str, f: Font, size: f32, width: f6
         out.push(line);
     }
     out
+}
+
+pub(crate) fn rect(x: f64, y: f64, w: f64, h: f64) -> Bounds<Pixels> {
+    b(x, y, w, h)
+}
+
+pub(crate) fn outline(bounds: Bounds<Pixels>, width: f32, color: Hsla, bg: Hsla, radius: f32) -> PaintQuad {
+    border_quad(bounds, width, color, bg, BorderStyle::Solid, radius)
 }
 
 pub fn shape(window: &mut Window, text: impl Into<SharedString>, f: Font, color: Hsla, size_px: f32) -> ShapedLine {
@@ -626,6 +636,15 @@ impl Spreadsheet {
             let origin = point(px((f64::from(ab.origin.x) + CELL_PAD) as f32), px(ty as f32));
             ops.push(Op::Text { line: Box::new(line), origin, clip: grid_clip, line_height: lh });
             ops.push(Op::Quad(fill(b(caret_x, ty + 4.0, 1.5, ROW_H - 8.0), t.accent), grid_clip));
+        }
+
+        // Charts float over the cells.
+        for (i, chart) in layout.charts.iter().enumerate() {
+            let (x, y, w, h) = self.chart_rect(chart);
+            let clip = clip_of(chart.anchor.row, chart.anchor.col);
+            let data = self.wb.chart_data(self.cur, chart);
+            let selected = self.selected_chart == Some(i);
+            ops.extend(crate::chart_paint::chart_ops(self, chart, &data, (x, y, w, h), clip, selected, window));
         }
 
         // Scrollbars (overlay).

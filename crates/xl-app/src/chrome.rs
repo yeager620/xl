@@ -368,7 +368,8 @@ impl Spreadsheet {
                 }))
             })
             .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx))
-            .child(self.menu_button("cond-format", Menu::CondFormat, "Conditional formatting", icon("highlighter", t.ink).into_any_element(), cx));
+            .child(self.menu_button("cond-format", Menu::CondFormat, "Conditional formatting", icon("highlighter", t.ink).into_any_element(), cx))
+            .child(self.menu_button("chart", Menu::Chart, "Insert chart", icon("chart-column", t.ink).into_any_element(), cx));
 
         let file = no_drag(div()).flex().flex_row().items_center().gap(px(2.)).child(
             tool_button(&t, "palette", false).child(icon("search", t.ink)).tooltip(tip(t, "Search commands", "Ctrl+K")).on_click(cx.listener(|this, _, _, cx| {
@@ -523,6 +524,16 @@ impl Spreadsheet {
                     .into_any_element()
             }
             Menu::CondFormat => self.render_cf_menu(cx).into_any_element(),
+            Menu::Chart => {
+                let mut panel = menu_panel(&t, 200.);
+                for (i, k) in xl_engine::chart::ChartKind::ALL.into_iter().enumerate() {
+                    panel = panel.child(menu_item(&t, ("insert-chart", i), format!("{} chart", k.label()), "").on_click(cx.listener(move |this, _, _, cx| {
+                        this.insert_chart(k);
+                        cx.notify();
+                    })));
+                }
+                panel.into_any_element()
+            }
             Menu::Main => {
                 let dark = t.dark;
                 let close = |this: &mut Spreadsheet| this.menu = None;
@@ -583,7 +594,35 @@ impl Spreadsheet {
             None,
         ];
         items.extend(clipboard);
+        if kind == ContextKind::Chart {
+            let current = self.selected_chart.and_then(|i| self.wb.layout(self.cur).charts.get(i)).map(|c| (c.kind, c.stacked));
+            let mut panel = menu_panel(&t, 220.).mt(px(0.));
+            for (i, k) in xl_engine::chart::ChartKind::ALL.into_iter().enumerate() {
+                let on = current.is_some_and(|c| c.0 == k);
+                panel = panel.child(menu_item(&t, ("chart-kind", i), format!("{}{}", k.label(), if on { "  ✓" } else { "" }), "").on_click(cx.listener(move |this, _, _, cx| {
+                    this.update_chart(|c| c.kind = k);
+                    cx.notify();
+                })));
+            }
+            let stacked = current.is_some_and(|c| c.1);
+            return panel
+                .child(menu_separator(&t))
+                .child(menu_item(&t, "chart-stacked", if stacked { "Side by side" } else { "Stacked" }, "").on_click(cx.listener(|this, _, _, cx| {
+                    this.update_chart(|c| c.stacked = !c.stacked);
+                    cx.notify();
+                })))
+                .child(menu_item(&t, "chart-title", "Edit title…", "Double-click").on_click(cx.listener(|this, _, _, cx| {
+                    this.edit_chart_title();
+                    cx.notify();
+                })))
+                .child(menu_separator(&t))
+                .child(menu_item(&t, "chart-delete", "Delete chart", "Delete").on_click(cx.listener(|this, _, _, cx| {
+                    this.delete_chart();
+                    cx.notify();
+                })));
+        }
         match kind {
+            ContextKind::Chart => {}
             ContextKind::Rows => {
                 items.push(Some((format!("Insert {rows} above"), "Ctrl+Shift+=", |s, _, _| s.insert_rows(false))));
                 items.push(Some((format!("Insert {rows} below"), "", |s, _, _| s.insert_rows(true))));

@@ -48,6 +48,7 @@ impl Spreadsheet {
             Some(crate::app::Field::Replace) => return &self.find.replacement,
             Some(crate::app::Field::Cf1) => return self.cf_dialog.as_ref().map_or("", |d| &d.value1),
             Some(crate::app::Field::Cf2) => return self.cf_dialog.as_ref().map_or("", |d| &d.value2),
+            Some(crate::app::Field::ChartTitle) => return &self.chart_title_text,
             None => {}
         }
         match (&self.renaming, &self.edit) {
@@ -117,6 +118,7 @@ impl EntityInputHandler for Spreadsheet {
                         d.value1.push_str(text);
                     }
                 }
+                crate::app::Field::ChartTitle => self.chart_title_text.push_str(text),
                 crate::app::Field::Cf2 => {
                     if let Some(d) = self.cf_dialog.as_mut() {
                         d.value2.push_str(text);

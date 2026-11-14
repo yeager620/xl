@@ -55,6 +55,8 @@ pub struct SheetLayout {
     pub filtered_rows: BTreeSet<u32>,
     /// Conditional formats, highest priority first.
     pub cond: Vec<crate::cond::CondFormat>,
+    /// Charts, back to front.
+    pub charts: Vec<crate::chart::Chart>,
 }
 
 /// A filter on a range whose first row holds the headers.
@@ -906,6 +908,13 @@ impl Workbook {
         for d in &mut self.names.list {
             d.expr = Arc::new(d.expr.shifted(op, d.scope.unwrap_or(target)));
         }
+        for id in self.sheets.order.clone() {
+            if let Some(sd) = self.sheets.get_mut(id) {
+                for chart in &mut sd.layout.charts {
+                    chart.apply_shift(op, id);
+                }
+            }
+        }
         self.rebuild()
     }
 
@@ -935,6 +944,13 @@ impl Workbook {
                     if moved != **e {
                         cell.input = CellInput::Formula(Arc::new(moved));
                     }
+                }
+            }
+        }
+        for id in self.sheets.order.clone() {
+            if let Some(sd) = self.sheets.get_mut(id) {
+                for chart in &mut sd.layout.charts {
+                    chart.apply_move(&mv, id);
                 }
             }
         }
