@@ -132,7 +132,7 @@ pub enum PasteMode {
 }
 
 /// A value as typed input that reproduces it exactly.
-fn value_input(v: &Value) -> String {
+pub(crate) fn value_input(v: &Value) -> String {
     match v {
         Value::Number(n) => xl_engine::precise(*n),
         Value::Text(t) if t.starts_with('=') || t.starts_with('\'') || xl_engine::input::classify_literal(t).is_some() => format!("'{t}"),
@@ -164,6 +164,8 @@ pub(crate) enum UndoEntry {
     Reapply(Shift),
     /// Restore a sheet's layout (sizes, hidden lines, merges, freeze) and cells.
     Layout { sheet: SheetId, layout: SheetLayout, cells: Snapshots },
+    /// Several steps undone together (last first).
+    Group(Vec<UndoEntry>),
 }
 
 impl UndoEntry {
@@ -172,6 +174,7 @@ impl UndoEntry {
             UndoEntry::Cells(c) => c.iter().any(|(a, _)| a.sheet == id),
             UndoEntry::Structure { op, .. } | UndoEntry::Reapply(op) => op.sheet() == id,
             UndoEntry::Layout { sheet, .. } => *sheet == id,
+            UndoEntry::Group(steps) => steps.iter().any(|s| s.touches_sheet(id)),
         }
     }
 }
@@ -242,7 +245,7 @@ pub struct Spreadsheet {
     pub(crate) drag: Option<Drag>,
     /// Scrollbar under the pointer (drawn wider).
     pub(crate) scroll_hover: Option<Axis>,
-    undo: Vec<UndoEntry>,
+    pub(crate) undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     pub(crate) clip: Option<Clip>,
     pub(crate) last_stats: Option<RecalcStats>,
@@ -823,6 +826,7 @@ impl Spreadsheet {
                     if edit.at.sheet == self.cur {
                         self.wb.grow_tables(edit.at.sheet, &[edit.at.cell]);
                     }
+                    self.refresh_pivots_using(edit.at.sheet, &[edit.at.cell]);
                     self.last_stats = Some(stats);
                     self.mark_dirty();
                 }
@@ -871,6 +875,7 @@ impl Spreadsheet {
         self.last_stats = Some(self.wb.set_inputs(changes));
         self.push_undo(UndoEntry::Cells(undo));
         self.wb.grow_tables(self.cur, &cells);
+        self.refresh_pivots_using(self.cur, &cells);
         self.mark_dirty();
     }
 
@@ -888,7 +893,17 @@ impl Spreadsheet {
     pub(crate) fn undo_redo(&mut self, is_undo: bool) {
         let entry = if is_undo { self.undo.pop() } else { self.redo.pop() };
         let Some(entry) = entry else { return };
-        let inverse = match entry {
+        let inverse = self.invert(entry);
+        if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
+        self.mark_dirty();
+    }
+
+    /// Apply an undo (or redo) step and return the step that reverses it.
+    fn invert(&mut self, entry: UndoEntry) -> UndoEntry {
+        match entry {
+            // Steps run last-first; listing the inverses in the order they ran
+            // makes the inverse group run them last-first too, i.e. reversed.
+            UndoEntry::Group(steps) => UndoEntry::Group(steps.into_iter().rev().map(|s| self.invert(s)).collect()),
             UndoEntry::Cells(cells) => {
                 let inverse = self.snapshots(cells.iter().map(|(a, _)| *a));
                 if let Some(&(first, _)) = cells.first() {
@@ -937,9 +952,7 @@ impl Spreadsheet {
                 }
                 inverse
             }
-        };
-        if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
-        self.mark_dirty();
+        }
     }
 
     /// Apply a structural change and return the entry that undoes it.
@@ -970,8 +983,13 @@ impl Spreadsheet {
         }
         let sheet = self.cur;
         let before = self.wb.layout(sheet).clone();
-        let cells = touched.map_or_else(Vec::new, |r| self.wb.region_snapshots(sheet, r));
+        let mut cells = touched.map_or_else(Vec::new, |r| self.wb.region_snapshots(sheet, r));
         f(self);
+        // Cells that were empty and now aren't must be emptied again on undo.
+        if let Some(r) = touched {
+            let filled: Vec<Addr> = self.wb.region_snapshots(sheet, r).into_iter().map(|(a, _)| a).filter(|a| !cells.iter().any(|(x, _)| x == a)).collect();
+            cells.extend(filled.into_iter().map(|a| (a, CellSnapshot::default())));
+        }
         let changed_cells: Snapshots = cells.into_iter().filter(|(a, snap)| self.wb.snapshot(*a) != *snap).collect();
         if *self.wb.layout(sheet) != before || !changed_cells.is_empty() {
             self.push_undo(UndoEntry::Layout { sheet, layout: before, cells: changed_cells });
@@ -1593,8 +1611,11 @@ impl Spreadsheet {
                 let csv = xl_io::FileKind::of(&path) == Some(xl_io::FileKind::Csv);
                 self.dirty = false;
                 self.clear_recovery();
+                let pivots = self.wb.sheet_ids().iter().any(|&id| !self.wb.layout(id).pivots.is_empty());
                 self.message = Some(if csv && self.wb.sheet_ids().len() > 1 {
                     (format!("Saved {} (CSV holds only the current sheet)", path.display()), false)
+                } else if pivots && !csv {
+                    (format!("Saved {} — pivot tables are saved as their current values", path.display()), false)
                 } else {
                     (format!("Saved {}", path.display()), false)
                 });

@@ -533,6 +533,11 @@ impl Spreadsheet {
                         cx.notify();
                     })));
                 }
+                panel = panel.child(menu_separator(&t)).child(menu_item(&t, "insert-pivot", "Pivot table", "").on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    this.insert_pivot();
+                    cx.notify();
+                })));
                 panel = panel.child(menu_separator(&t));
                 for (i, (k, label)) in [(SparkKind::Line, "Line sparklines"), (SparkKind::Column, "Column sparklines"), (SparkKind::WinLoss, "Win/loss sparklines")].into_iter().enumerate() {
                     panel = panel.child(menu_item(&t, ("insert-spark", i), label, "").on_click(cx.listener(move |this, _, _, cx| {
@@ -981,9 +986,11 @@ impl Render for Spreadsheet {
             .when(self.find.open, |d| d.child(self.render_find_bar(cx)))
             .children(self.render_recovery_bar(cx))
             .child(
+                div().flex_1().min_h(px(0.)).flex().flex_row().child(
                 div()
                     .flex_1()
-                    .min_h(px(0.))
+                    .min_w(px(0.))
+                    .h_full()
                     .relative()
                     .overflow_hidden()
                     .child(grid)
@@ -993,6 +1000,8 @@ impl Render for Spreadsheet {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll)),
+                )
+                .children(self.render_pivot_panel(cx)),
             )
             .child(self.render_bottom_bar(cx))
             .relative()

@@ -13,6 +13,7 @@ mod lifecycle;
 mod outline;
 mod palette;
 mod paint;
+mod pivot_ui;
 mod refs;
 #[cfg(test)]
 mod tests;

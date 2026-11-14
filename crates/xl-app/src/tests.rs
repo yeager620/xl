@@ -1226,3 +1226,61 @@ fn format_as_table_and_grow(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     assert_eq!(val(&view, cx, "K1"), Value::Number(367.0), "undo brings the table and its references back");
 }
+
+#[gpui::test]
+fn pivot_table_panel_and_live_refresh(cx: &mut TestAppContext) {
+    use crate::pivot_ui::Area;
+    let (view, cx) = setup(cx);
+    table(&view, cx); // F1:H6 Name/Team/Score (+ I2 formula)
+    go(&view, cx, "G2");
+    view.update(cx, |s, _| s.insert_pivot());
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.wb.sheet_name(s.cur), "Pivot 1");
+        assert!(s.active_pivot().is_some(), "the panel shows for the new pivot");
+    });
+    // Defaults: rows by Name (first text column), sum of the last number column.
+    // Switch rows to Team.
+    view.update(cx, |s, _| {
+        let fields = s.wb.pivot_fields(s.cur, &s.wb.layout(s.cur).pivots[0]);
+        assert_eq!(&fields[..3], ["Name", "Team", "Score"]);
+        s.toggle_pivot_field(0, Area::Rows);
+        s.toggle_pivot_field(1, Area::Rows);
+        let p = &s.wb.layout(s.cur).pivots[0];
+        assert_eq!(p.rows, vec![1]);
+    });
+    // Make sure Score is the value field.
+    view.update(cx, |s, _| {
+        let p = s.wb.layout(s.cur).pivots[0].clone();
+        if !p.values.iter().any(|(f, _)| *f == 2) {
+            s.toggle_pivot_field(2, Area::Values);
+        }
+        for (f, _) in p.values.iter().filter(|(f, _)| *f != 2) {
+            s.toggle_pivot_field(*f, Area::Values);
+        }
+    });
+    let grid = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| (1..=5).map(|r| (val(view, cx, &format!("A{r}")), val(view, cx, &format!("B{r}")))).collect::<Vec<_>>();
+    assert_eq!(
+        grid(&view, cx),
+        vec![
+            (Value::text("Team"), Value::text("Sum of Score")),
+            (Value::text("Blue"), Value::Number(158.0)),
+            (Value::text("Green"), Value::Empty),
+            (Value::text("Red"), Value::Number(159.0)),
+            (Value::text("Grand Total"), Value::Number(317.0)),
+        ]
+    );
+    // Editing the source refreshes the pivot; one undo reverts both.
+    view.update(cx, |s, _| {
+        let welcome = s.wb.sheet_ids()[0];
+        s.switch_sheet(welcome);
+        s.select(CellRef::parse("H6").unwrap(), false);
+    });
+    cx.simulate_input("20");
+    cx.simulate_keystrokes("enter");
+    let pivot_sheet = view.read_with(cx, |s, _| s.wb.sheet_ids()[1]);
+    let green = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| view.read_with(cx, |s, _| s.wb.value(Addr::new(pivot_sheet, CellRef::parse("B3").unwrap())).clone());
+    assert_eq!(green(&view, cx), Value::Number(20.0));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(green(&view, cx), Value::Empty);
+    view.read_with(cx, |s, _| assert_eq!(*s.wb.value(Addr::new(s.wb.sheet_ids()[0], CellRef::parse("H6").unwrap())), Value::Empty));
+}

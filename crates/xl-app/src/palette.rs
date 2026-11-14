@@ -63,6 +63,8 @@ pub fn commands() -> Vec<Command> {
         cmd!("Insert area chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Area)),
         cmd!("Insert pie chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Pie)),
         cmd!("Insert scatter chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Scatter)),
+        cmd!("Insert pivot table", "", |s, w, cx| s.insert_pivot()),
+        cmd!("Refresh pivot table", "", |s, w, cx| s.refresh_pivot()),
         cmd!("Format as table", "Ctrl+T", |s, w, cx| s.format_as_table()),
         cmd!("Convert table to range", "", |s, w, cx| s.convert_table_to_range()),
         cmd!("Table style: blue", "", |s, w, cx| s.update_table(|t| t.style = xl_engine::TableStyle::Blue)),

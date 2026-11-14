@@ -59,6 +59,8 @@ pub struct SheetLayout {
     pub charts: Vec<crate::chart::Chart>,
     pub sparklines: Vec<crate::chart::Sparkline>,
     pub tables: Vec<Table>,
+    /// Pivot tables whose output is on this sheet.
+    pub pivots: Vec<crate::pivot::Pivot>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
@@ -996,6 +998,9 @@ impl Workbook {
                     chart.apply_shift(op, id);
                 }
                 sd.layout.sparklines.retain_mut(|s| s.apply_shift(op, id));
+                for p in &mut sd.layout.pivots {
+                    p.apply_shift(op, id);
+                }
             }
         }
         self.rebuild()
