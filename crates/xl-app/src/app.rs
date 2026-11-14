@@ -190,6 +190,8 @@ pub enum Field {
     Cf2,
     /// The selected chart's title.
     ChartTitle,
+    /// A field of the Goal Seek / Solver form.
+    Form(u8),
 }
 
 /// What a right-click menu is about.
@@ -271,6 +273,8 @@ pub struct Spreadsheet {
     /// The selected chart (index on the current sheet).
     pub(crate) selected_chart: Option<usize>,
     pub(crate) chart_title_text: String,
+    /// The open Goal Seek / Solver form.
+    pub(crate) form: Option<crate::solver_ui::FormDialog>,
     /// The open conditional-formatting rule dialog.
     pub(crate) cf_dialog: Option<crate::cond_ui::CfDialog>,
     /// Highlighted formula suggestion.
@@ -353,6 +357,7 @@ impl Spreadsheet {
             fill_target: None,
             ac_selected: 0,
             cf_dialog: None,
+            form: None,
             selected_chart: None,
             chart_title_text: String::new(),
             ac_dismissed: None,
@@ -853,7 +858,7 @@ impl Spreadsheet {
         self.message = None;
     }
 
-    fn push_undo(&mut self, entry: UndoEntry) {
+    pub(crate) fn push_undo(&mut self, entry: UndoEntry) {
         self.undo.push(entry);
         self.redo.clear();
         if self.undo.len() > 500 {
@@ -861,7 +866,7 @@ impl Spreadsheet {
         }
     }
 
-    fn snapshots(&self, addrs: impl IntoIterator<Item = Addr>) -> Snapshots {
+    pub(crate) fn snapshots(&self, addrs: impl IntoIterator<Item = Addr>) -> Snapshots {
         addrs.into_iter().map(|a| (a, self.wb.snapshot(a))).collect()
     }
 
@@ -1692,6 +1697,8 @@ impl Spreadsheet {
             self.key_lossy(key, cx)
         } else if self.cf_dialog.is_some() {
             self.key_cf_dialog(key)
+        } else if self.form.is_some() {
+            self.key_form(key)
         } else if self.pending.is_some() {
             self.key_dialog(key, window, cx)
         } else if ctrl && (key == "q" || key == "w") {

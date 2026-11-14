@@ -1036,6 +1036,7 @@ impl Render for Spreadsheet {
             });
         let content = content.when(self.pending.is_some(), |d| d.child(deferred(self.render_dialog(cx)).with_priority(3)));
         let content = content.when(self.cf_dialog.is_some(), |d| d.child(deferred(self.render_cf_dialog(cx)).with_priority(3)));
+        let content = content.when(self.form.is_some(), |d| d.child(deferred(self.render_form(cx)).with_priority(3)));
         let content = content.when(self.lossy_prompt, |d| d.child(deferred(self.render_lossy_dialog(cx)).with_priority(4)));
         self.window_frame(content, window)
     }

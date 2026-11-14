@@ -15,6 +15,7 @@ mod palette;
 mod paint;
 mod pivot_ui;
 mod refs;
+mod solver_ui;
 #[cfg(test)]
 mod tests;
 mod theme;

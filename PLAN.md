@@ -189,5 +189,5 @@ Checklist (tick as each lands with tests):
 - [x] Tables (Format as Table, banding, structured refs) + xlsx
 - [x] Pivot tables (field panel, sum/count/avg/min/max, refresh)
 - [x] Sparklines (line/column/win-loss) + xlsx
-- [ ] Goal Seek; Solver (min/max/target, constraints)
+- [x] Goal Seek; Solver (min/max/target, constraints)
 - [x] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx

@@ -1284,3 +1284,45 @@ fn pivot_table_panel_and_live_refresh(cx: &mut TestAppContext) {
     assert_eq!(green(&view, cx), Value::Empty);
     view.read_with(cx, |s, _| assert_eq!(*s.wb.value(Addr::new(s.wb.sheet_ids()[0], CellRef::parse("H6").unwrap())), Value::Empty));
 }
+
+#[gpui::test]
+fn goal_seek_and_solver_dialogs(cx: &mut TestAppContext) {
+    use crate::solver_ui::FormKind;
+    let (view, cx) = setup(cx);
+    // Goal Seek: make the total (D10) 100 by changing croissants' qty (B6).
+    go(&view, cx, "D10");
+    view.update(cx, |s, _| s.open_form(FormKind::GoalSeek));
+    cx.simulate_input("100");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("B6");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.form.is_none(), "{:?}", s.message));
+    let total = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| match val(view, cx, "D10") {
+        Value::Number(n) => n,
+        v => panic!("{v:?}"),
+    };
+    assert!((total(&view, cx) - 100.0).abs() < 0.01, "total {}", total(&view, cx));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "B6"), Value::Number(12.0), "undo restores the changing cell");
+    // Solver: maximize F3 = 3*F1 + 5*F2 subject to F1 <= 4, 2*F2 <= 12, 3*F1+2*F2 <= 18.
+    view.update(cx, |s, _| {
+        let cells = [("F1", "0"), ("F2", "0"), ("F3", "=3*F1+5*F2"), ("F4", "=2*F2"), ("F5", "=3*F1+2*F2")];
+        let items: Vec<_> = cells.iter().map(|(c, v)| (s.at(CellRef::parse(c).unwrap()), v.to_string())).collect();
+        s.wb.set_inputs(items);
+        s.select(CellRef::parse("F3").unwrap(), false);
+        s.open_form(FormKind::Solver);
+    });
+    cx.simulate_input("F1:F2");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("F1 <= 4; F4 <= 12; F5 <= 18");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.form.is_none(), "{:?}", s.message));
+    assert_eq!([val(&view, cx, "F1"), val(&view, cx, "F2"), val(&view, cx, "F3")], [Value::Number(2.0), Value::Number(6.0), Value::Number(36.0)]);
+    // A bad constraint keeps the dialog open with an error.
+    view.update(cx, |s, _| s.open_form(FormKind::Solver));
+    cx.simulate_input("F1:F2");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("F1 about 4");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.form.is_some() && s.message.as_ref().is_some_and(|(m, err)| *err && m.contains("needs"))));
+}
