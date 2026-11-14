@@ -136,3 +136,49 @@ fn insert_then_delete_is_identity() {
         }
     }
 }
+
+#[test]
+fn moving_cells_carries_references_along() {
+    use xl_engine::Move;
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let other = wb.add_sheet(Some("Other")).unwrap();
+    wb.set_inputs([
+        (a(s, "A1"), "10".into()),
+        (a(s, "A2"), "20".into()),
+        (a(s, "A3"), "=A1+A2".into()),
+        (a(s, "B1"), "=SUM(A1:A2)".into()),
+        (a(s, "B2"), "=SUM(A1:A5)".into()), // partly outside the block: unchanged
+        (a(s, "D1"), "99".into()),
+        (a(s, "E1"), "=D1".into()),         // D1 gets overwritten
+    ]);
+    wb.set_input(a(other, "A1"), "=Sheet1!A3*2").unwrap();
+    wb.set_format(a(s, "A1"), Some("0.00"));
+    // Move A1:A3 to C1:C3... then onto D1:D3.
+    wb.move_range(Move { from_sheet: s, from: xl_engine::Range::new(CellRef::parse("A1").unwrap(), CellRef::parse("A3").unwrap()), to_sheet: s, dr: 0, dc: 3 });
+    assert_eq!(*wb.value(a(s, "A1")), Value::Empty);
+    assert_eq!(*wb.value(a(s, "D1")), n(10.0));
+    assert_eq!(wb.format_code(a(s, "D1")), Some("0.00"));
+    assert_eq!(wb.format_code(a(s, "A1")), None);
+    assert_eq!(wb.input_text(a(s, "D3")), "=D1+D2", "a moved formula's refs into the block move with it");
+    assert_eq!(wb.input_text(a(s, "B1")), "=SUM(D1:D2)");
+    assert_eq!(wb.input_text(a(s, "B2")), "=SUM(A1:A5)");
+    assert_eq!(wb.input_text(a(s, "E1")), "=#REF!", "the overwritten cell's references break");
+    assert_eq!(wb.input_text(a(other, "A1")), "=Sheet1!D3*2");
+    assert_eq!(*wb.value(a(other, "A1")), n(60.0));
+    // To another sheet: the formula keeps pointing at Sheet1's cells.
+    wb.move_range(Move { from_sheet: s, from: xl_engine::Range::new(CellRef::parse("B1").unwrap(), CellRef::parse("B1").unwrap()), to_sheet: other, dr: 4, dc: 0 });
+    assert_eq!(wb.input_text(a(other, "B5")), "=SUM(Sheet1!D1:D2)");
+    assert_eq!(*wb.value(a(other, "B5")), n(30.0));
+}
+
+#[test]
+fn overlapping_move() {
+    use xl_engine::Move;
+    let (mut wb, s) = book(&[("A1", "1"), ("A2", "2"), ("A3", "3"), ("B1", "=SUM(A1:A3)")]);
+    // Shift A1:A3 down one row (overlapping its own cells).
+    wb.move_range(Move { from_sheet: s, from: xl_engine::Range::new(CellRef::parse("A1").unwrap(), CellRef::parse("A3").unwrap()), to_sheet: s, dr: 1, dc: 0 });
+    assert_eq!((1..=4).map(|r| wb.value(a(s, &format!("A{r}"))).clone()).collect::<Vec<_>>(), vec![Value::Empty, n(1.0), n(2.0), n(3.0)]);
+    assert_eq!(wb.input_text(a(s, "B1")), "=SUM(A2:A4)");
+    assert_eq!(*wb.value(a(s, "B1")), n(6.0));
+}

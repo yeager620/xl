@@ -571,10 +571,13 @@ impl Spreadsheet {
         let cols = plural(sel.cols(), "column", "columns");
         type Action = fn(&mut Spreadsheet, &mut Window, &mut Context<Spreadsheet>);
         let mut items: Vec<Option<(String, &'static str, Action)>> = Vec::new();
-        let clipboard: [Option<(String, &'static str, Action)>; 4] = [
+        let clipboard: [Option<(String, &'static str, Action)>; 7] = [
             Some(("Cut".into(), "Ctrl+X", |s, _, cx| s.cut(cx))),
             Some(("Copy".into(), "Ctrl+C", |s, _, cx| s.copy(cx))),
             Some(("Paste".into(), "Ctrl+V", |s, _, cx| s.paste(cx))),
+            Some(("Paste values".into(), "Ctrl+Shift+V", |s, _, cx| s.paste_with(crate::app::PasteMode::Values, cx))),
+            Some(("Paste formats".into(), "", |s, _, cx| s.paste_with(crate::app::PasteMode::Formats, cx))),
+            Some(("Paste transposed".into(), "", |s, _, cx| s.paste_with(crate::app::PasteMode::Transpose, cx))),
             None,
         ];
         items.extend(clipboard);

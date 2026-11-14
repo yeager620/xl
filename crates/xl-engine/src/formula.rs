@@ -333,6 +333,91 @@ impl Expr {
     }
 }
 
+/// Moving a block of cells (cut and paste): references into the block follow
+/// it; references to cells it lands on (outside the block) break.
+#[derive(Clone, Copy, Debug)]
+pub struct Move {
+    pub from_sheet: SheetId,
+    pub from: Range,
+    pub to_sheet: SheetId,
+    pub dr: i64,
+    pub dc: i64,
+}
+
+impl Move {
+    pub fn to_range(&self) -> Range {
+        let off = |c: CellRef| CellRef::new((c.row as i64 + self.dr) as u32, (c.col as i64 + self.dc) as u32);
+        Range::new(off(self.from.start), off(self.from.end))
+    }
+}
+
+impl Expr {
+    /// Rewrite references for a move, in a formula on sheet `home`.
+    pub fn moved(&self, mv: &Move, home: SheetId) -> Expr {
+        let to = mv.to_range();
+        let relocate = |r: &RefAddr| {
+            let mut out = *r;
+            out.cell = CellRef::new((r.cell.row as i64 + mv.dr) as u32, (r.cell.col as i64 + mv.dc) as u32);
+            out.sheet = if r.sheet.is_none() && mv.to_sheet == home { None } else { Some(mv.to_sheet) };
+            out
+        };
+        let recur = |e: &Expr| Box::new(e.moved(mv, home));
+        match self {
+            Expr::Ref(r) => {
+                let sheet = r.sheet.unwrap_or(home);
+                if sheet == mv.from_sheet && mv.from.contains(r.cell) {
+                    Expr::Ref(relocate(r))
+                } else if sheet == mv.to_sheet && to.contains(r.cell) {
+                    Expr::Error(ErrorKind::Ref)
+                } else {
+                    self.clone()
+                }
+            }
+            Expr::Range(a, b, kind) => {
+                let sheet = a.sheet.unwrap_or(home);
+                let inside = |r: Range| r.contains(a.cell) && r.contains(b.cell);
+                if *kind == RangeKind::Cells && sheet == mv.from_sheet && inside(mv.from) {
+                    Expr::Range(relocate(a), relocate(b), *kind)
+                } else if *kind == RangeKind::Cells && sheet == mv.to_sheet && inside(to) {
+                    Expr::Error(ErrorKind::Ref)
+                } else {
+                    self.clone()
+                }
+            }
+            Expr::Neg(x) => Expr::Neg(recur(x)),
+            Expr::Plus(x) => Expr::Plus(recur(x)),
+            Expr::Percent(x) => Expr::Percent(recur(x)),
+            Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
+            Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.moved(mv, home)).collect()),
+            Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.moved(mv, home)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+        }
+    }
+
+    /// A formula moving from sheet `from` to `to` keeps pointing at the same
+    /// cells: implicit-sheet references get `from` spelled out.
+    pub fn rehomed(&self, from: SheetId, to: SheetId) -> Expr {
+        if from == to {
+            return self.clone();
+        }
+        let fix = |r: &RefAddr| RefAddr { sheet: Some(r.sheet.unwrap_or(from)), ..*r };
+        let recur = |e: &Expr| Box::new(e.rehomed(from, to));
+        match self {
+            Expr::Ref(r) => Expr::Ref(fix(r)),
+            Expr::Range(a, b, k) => Expr::Range(fix(a), fix(b), *k),
+            Expr::Neg(x) => Expr::Neg(recur(x)),
+            Expr::Plus(x) => Expr::Plus(recur(x)),
+            Expr::Percent(x) => Expr::Percent(recur(x)),
+            Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
+            Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.rehomed(from, to)).collect()),
+            Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.rehomed(from, to)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError(pub String);
 

@@ -73,6 +73,8 @@ pub enum Drag {
     Point,
     ResizeCol { col: u32, start_x: f64, start_w: f64 },
     ResizeRow { row: u32, start_y: f64, start_h: f64 },
+    /// Dragging the fill handle of `src`.
+    Fill { src: Range },
     /// Dragging a scrollbar thumb; `grab` is the pointer offset within it.
     Scroll { axis: Axis, grab: f64 },
 }
@@ -102,10 +104,37 @@ pub enum Hit {
     Cell(CellRef),
 }
 
-struct Clip {
-    sheet: SheetId,
-    range: Range,
+pub(crate) struct Clip {
+    pub(crate) sheet: SheetId,
+    pub(crate) range: Range,
     text: String,
+    /// Cut, not copied: pasting moves the cells.
+    pub(crate) cut: bool,
+}
+
+/// What Paste Special brings over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteMode {
+    All,
+    /// Results only, keeping the destination's formatting.
+    Values,
+    /// Number formats and styles only.
+    Formats,
+    /// Inputs (formulas adjusted), keeping the destination's formatting.
+    Formulas,
+    /// Everything, rows and columns swapped.
+    Transpose,
+}
+
+/// A value as typed input that reproduces it exactly.
+fn value_input(v: &Value) -> String {
+    match v {
+        Value::Number(n) => xl_engine::precise(*n),
+        Value::Text(t) if t.starts_with('=') || t.starts_with('\'') || xl_engine::input::classify_literal(t).is_some() => format!("'{t}"),
+        Value::Text(t) => t.to_string(),
+        Value::Empty => String::new(),
+        other => other.display(),
+    }
 }
 
 /// Per-sheet selection and scroll position.
@@ -202,7 +231,7 @@ pub struct Spreadsheet {
     pub(crate) scroll_hover: Option<Axis>,
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
-    clip: Option<Clip>,
+    pub(crate) clip: Option<Clip>,
     pub(crate) last_stats: Option<RecalcStats>,
     pub(crate) message: Option<(String, bool)>,
     pub(crate) path: Option<PathBuf>,
@@ -223,6 +252,8 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// While dragging the fill handle: the range it would fill.
+    pub(crate) fill_target: Option<Range>,
     /// The open filter dropdown.
     pub(crate) filter_menu: Option<crate::data::FilterMenu>,
     /// Layout when a resize drag began, for its undo step.
@@ -294,6 +325,7 @@ impl Spreadsheet {
             menu: None,
             layout_before: None,
             filter_menu: None,
+            fill_target: None,
             context: None,
             loading: None,
             palette: None,
@@ -1059,7 +1091,7 @@ impl Spreadsheet {
         self.apply_inputs(cells);
     }
 
-    fn guard_bulk(&mut self, r: Range) -> bool {
+    pub(crate) fn guard_bulk(&mut self, r: Range) -> bool {
         if r.cell_count() > MAX_BULK {
             self.message = Some((format!("Selection too large ({} cells)", r.cell_count()), true));
             return false;
@@ -1083,46 +1115,108 @@ impl Spreadsheet {
             text.push('\n');
         }
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        self.clip = Some(Clip { sheet: self.cur, range: sel, text });
+        self.clip = Some(Clip { sheet: self.cur, range: sel, text, cut: false });
         self.message = Some((format!("Copied {sel}"), false));
     }
 
     pub(crate) fn paste(&mut self, cx: &mut Context<Self>) {
+        self.paste_with(PasteMode::All, cx);
+    }
+
+    pub(crate) fn paste_with(&mut self, mode: PasteMode, cx: &mut Context<Self>) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
         let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
         let origin = self.selection().start;
         let mut end = origin;
-        if let Some(clip) = self.clip.as_ref().filter(|c| c.text == text && self.wb.sheet_ids().contains(&c.sheet)) {
-            // Internal paste: formulas shift their relative references, formats come along.
-            let (dr, dc) = (origin.row as i64 - clip.range.start.row as i64, origin.col as i64 - clip.range.start.col as i64);
-            let src_sheet = clip.sheet;
-            let mut items = Vec::new();
-            for src in clip.range.iter() {
-                if let Some(dst) = src.offset(dr, dc) {
-                    items.push((self.at(dst), self.wb.snapshot_shifted(Addr::new(src_sheet, src), dr, dc)));
-                    end = dst;
-                }
+        let internal = self.clip.as_ref().filter(|c| c.text == text && self.wb.sheet_ids().contains(&c.sheet)).map(|c| (c.sheet, c.range, c.cut));
+        match internal {
+            Some((src_sheet, range, true)) if mode == PasteMode::All => {
+                self.move_cells(src_sheet, range, origin);
+                return;
             }
-            self.apply_snapshots(items);
-        } else {
-            let text = text.strip_suffix('\n').unwrap_or(&text);
-            let mut changes = Vec::new();
-            for (i, line) in text.split('\n').enumerate() {
-                for (j, field) in line.trim_end_matches('\r').split('\t').enumerate() {
-                    if let Some(dst) = origin.offset(i as i64, j as i64) {
-                        changes.push((self.at(dst), field.to_string()));
-                        end = CellRef::new(end.row.max(dst.row), end.col.max(dst.col));
+            Some((src_sheet, range, _)) => {
+                let transpose = mode == PasteMode::Transpose;
+                let mut items = Vec::new();
+                for src in range.iter() {
+                    let (i, j) = ((src.row - range.start.row) as i64, (src.col - range.start.col) as i64);
+                    let (i, j) = if transpose { (j, i) } else { (i, j) };
+                    let Some(dst) = origin.offset(i, j) else { continue };
+                    let (from, to) = (Addr::new(src_sheet, src), self.at(dst));
+                    let (dr, dc) = (dst.row as i64 - src.row as i64, dst.col as i64 - src.col as i64);
+                    let here = self.wb.snapshot(to);
+                    let snap = match mode {
+                        PasteMode::All | PasteMode::Transpose => self.wb.snapshot_shifted(from, dr, dc),
+                        PasteMode::Values => CellSnapshot { input: value_input(self.wb.value(from)), ..here },
+                        PasteMode::Formulas => CellSnapshot { input: self.wb.input_text_shifted(from, dr, dc), ..here },
+                        PasteMode::Formats => CellSnapshot { input: here.input, ..self.wb.snapshot(from) },
+                    };
+                    items.push((to, snap));
+                    end = CellRef::new(end.row.max(dst.row), end.col.max(dst.col));
+                }
+                self.apply_snapshots(items);
+            }
+            None => {
+                if mode == PasteMode::Formats {
+                    return;
+                }
+                let text = text.strip_suffix('\n').unwrap_or(&text);
+                let mut changes = Vec::new();
+                for (i, line) in text.split('\n').enumerate() {
+                    for (j, field) in line.trim_end_matches('\r').split('\t').enumerate() {
+                        let (i, j) = if mode == PasteMode::Transpose { (j, i) } else { (i, j) };
+                        if let Some(dst) = origin.offset(i as i64, j as i64) {
+                            changes.push((self.at(dst), field.to_string()));
+                            end = CellRef::new(end.row.max(dst.row), end.col.max(dst.col));
+                        }
                     }
                 }
+                self.apply_inputs(changes);
             }
-            self.apply_inputs(changes);
         }
         self.anchor = origin;
         self.active = end;
     }
 
+    /// Paste after a cut: move the cells, carrying references to them along.
+    fn move_cells(&mut self, src_sheet: SheetId, range: Range, to: CellRef) {
+        let (dr, dc) = (to.row as i64 - range.start.row as i64, to.col as i64 - range.start.col as i64);
+        if range.end.row as i64 + dr >= MAX_ROWS as i64 || range.end.col as i64 + dc >= MAX_COLS as i64 {
+            self.message = Some(("The cells don't fit there".into(), true));
+            return;
+        }
+        let mv = xl_engine::Move { from_sheet: src_sheet, from: range, to_sheet: self.cur, dr, dc };
+        if (dr, dc) == (0, 0) && src_sheet == self.cur {
+            self.clip = None;
+            return;
+        }
+        // Undo restores both blocks and every formula (any may have been rewritten).
+        let mut undo = self.wb.region_snapshots(src_sheet, range);
+        undo.extend(self.wb.region_snapshots(self.cur, mv.to_range()));
+        // Cells in the destination that are currently empty must be cleared on undo.
+        for c in mv.to_range().iter() {
+            let a = self.at(c);
+            if !undo.iter().any(|(x, _)| *x == a) {
+                undo.push((a, CellSnapshot::default()));
+            }
+        }
+        let formulas = self.wb.formula_texts();
+        undo.extend(formulas.into_iter().filter(|(a, _)| !undo.iter().any(|(x, _)| x == a)).map(|(a, _)| (a, self.wb.snapshot(a))).collect::<Vec<_>>());
+        self.last_stats = Some(self.wb.move_range(mv));
+        self.push_undo(UndoEntry::Cells(undo));
+        self.mark_dirty();
+        self.clip = None;
+        self.anchor = mv.to_range().end;
+        self.active = mv.to_range().start;
+    }
+
     pub(crate) fn cut(&mut self, cx: &mut Context<Self>) {
         self.copy(cx);
-        self.clear_selection();
+        if let Some(clip) = self.clip.as_mut() {
+            clip.cut = true;
+            self.message = Some((format!("Cut {} — paste to move it", clip.range), false));
+        }
     }
 
     /// Ctrl+D / Ctrl+R: copy the first row/column of the selection across it.
@@ -1772,6 +1866,7 @@ impl Spreadsheet {
                 self.menu = None;
                 self.context = None;
                 self.filter_menu = None;
+                self.clip = None;
             }
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
@@ -1785,6 +1880,7 @@ impl Spreadsheet {
             ("5", true) if !shift => self.toggle_emphasis(Emphasis::Strike),
             ("c", true) => self.copy(cx),
             ("x", true) => self.cut(cx),
+            ("v", true) if shift => self.paste_with(PasteMode::Values, cx),
             ("v", true) => self.paste(cx),
             ("z", true) if shift => self.undo_redo(false),
             ("z", true) => self.undo_redo(true),
@@ -1839,6 +1935,17 @@ impl Spreadsheet {
             return;
         }
         if self.edit.is_some() && !self.commit_edit() {
+            cx.notify();
+            return;
+        }
+        if matches!(hit, Hit::Cell(_)) && self.on_fill_handle(ev.position) {
+            let src = self.selection();
+            if ev.click_count >= 2 {
+                self.fill_down_to_data();
+            } else {
+                self.drag = Some(Drag::Fill { src });
+                self.fill_target = Some(src);
+            }
             cx.notify();
             return;
         }
@@ -1956,6 +2063,17 @@ impl Spreadsheet {
                 self.wb.set_row_height(self.cur, row, Some(h));
                 self.mark_dirty();
             }
+            Drag::Fill { src } => {
+                let vp = self.viewport;
+                let p = point(
+                    ev.position.x.clamp(vp.origin.x + px(HEADER_W as f32 + 1.), vp.origin.x + vp.size.width - px(1.)),
+                    ev.position.y.clamp(vp.origin.y + px(HEADER_H as f32 + 1.), vp.origin.y + vp.size.height - px(1.)),
+                );
+                if let Some(Hit::Cell(c)) = self.hit_test(p) {
+                    self.fill_target = Some(self.fill_target_for(src, c));
+                    self.ensure_visible(c);
+                }
+            }
             Drag::Select | Drag::Point => {
                 let vp = self.viewport;
                 let p = point(
@@ -1974,7 +2092,22 @@ impl Spreadsheet {
         cx.notify();
     }
 
+    /// Is a window position on the selection's fill handle?
+    pub(crate) fn on_fill_handle(&self, pos: Point<Pixels>) -> bool {
+        if self.edit.is_some() {
+            return false;
+        }
+        let sel = self.selection();
+        let end = self.wb.layout(self.cur).merge_at(sel.end).map_or(sel.end, |m| m.end);
+        let x = f64::from(self.viewport.origin.x) + HEADER_W + self.grid_x(end.col) + self.col_w(end.col);
+        let y = f64::from(self.viewport.origin.y) + HEADER_H + self.grid_y(end.row) + self.row_h(end.row);
+        (f64::from(pos.x) - x).abs() <= 5.0 && (f64::from(pos.y) - y).abs() <= 5.0
+    }
+
     pub(crate) fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let (Some(Drag::Fill { src }), Some(target)) = (self.drag, self.fill_target.take()) {
+            self.fill_series(src, target);
+        }
         if let Some((sheet, layout)) = self.layout_before.take()
             && *self.wb.layout(sheet) != layout
         {

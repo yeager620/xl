@@ -502,6 +502,18 @@ impl Spreadsheet {
                 ops.push(Op::Quad(border_quad(rect, 1.0, t.accent, gpui::transparent_black(), BorderStyle::Solid, 0.0), clip));
             }
         }
+        // The range a fill-handle drag would cover.
+        if let Some(target) = self.fill_target {
+            for (rect, clip_bounds) in pieces(target) {
+                ops.push(Op::Quad(border_quad(rect, 1.5, t.ink_muted, gpui::transparent_black(), BorderStyle::Dashed, 0.0), clip_bounds));
+            }
+        }
+        // Copied or cut cells: a dashed outline until the clipboard is used up.
+        if let Some(clip) = self.clip.as_ref().filter(|c| c.sheet == self.cur) {
+            for (rect, clip_bounds) in pieces(clip.range) {
+                ops.push(Op::Quad(border_quad(rect, 1.5, t.accent, gpui::transparent_black(), BorderStyle::Dashed, 0.0), clip_bounds));
+            }
+        }
         let active_pieces = pieces(active_range);
         let ab = active_pieces.first().map_or(b(gx, gy, 0.0, 0.0), |p| p.0);
         if editing.is_none() {

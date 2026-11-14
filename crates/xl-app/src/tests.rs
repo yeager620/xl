@@ -879,3 +879,88 @@ fn filter_hides_rows_and_undoes(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).filter.is_none()));
 }
+
+fn cell_point(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, a1: &str, dx: f64, dy: f64) -> gpui::Point<gpui::Pixels> {
+    let c = CellRef::parse(a1).unwrap();
+    view.read_with(cx, |s, _| {
+        let x = f64::from(s.viewport.origin.x) + crate::app::HEADER_W + s.grid_x(c.col) + dx;
+        let y = f64::from(s.viewport.origin.y) + crate::app::HEADER_H + s.grid_y(c.row) + dy;
+        gpui::point(gpui::px(x as f32), gpui::px(y as f32))
+    })
+}
+
+#[gpui::test]
+fn fill_handle_drag_continues_series(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, _| {
+        s.wb.set_inputs([(s.at(CellRef::parse("F1").unwrap()), "Item 1".to_string()), (s.at(CellRef::parse("G1").unwrap()), "Mon".to_string()), (s.at(CellRef::parse("H1").unwrap()), "=B4*2".to_string())]);
+    });
+    go(&view, cx, "F1");
+    cx.simulate_keystrokes("shift-right shift-right");
+    // Grab the handle at H1's bottom-right corner and drag down to row 4.
+    let w = view.read_with(cx, |s, _| s.col_w(7));
+    let handle = cell_point(&view, cx, "H1", w, crate::app::ROW_H);
+    cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::none());
+    view.read_with(cx, |s, _| assert!(s.fill_target.is_some(), "the drag started on the handle"));
+    let to = cell_point(&view, cx, "H4", 10.0, 10.0);
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    assert_eq!(val(&view, cx, "F4"), Value::text("Item 4"));
+    assert_eq!(val(&view, cx, "G4"), Value::text("Thu"));
+    assert_eq!(input(&view, cx, "H4"), "=B7*2", "formulas copy with shifted references");
+    view.read_with(cx, |s, _| assert_eq!(s.selection(), xl_engine::Range::new(CellRef::parse("F1").unwrap(), CellRef::parse("H4").unwrap())));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(val(&view, cx, "F4"), Value::Empty);
+}
+
+#[gpui::test]
+fn double_click_fill_handle_fills_to_neighbouring_data(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    // E4 = B4*C4 beside the item rows (A4:D6); double-click its handle.
+    go(&view, cx, "E4");
+    cx.simulate_input("=B4+1");
+    cx.simulate_keystrokes("enter");
+    go(&view, cx, "E4");
+    let w = view.read_with(cx, |s, _| s.col_w(4));
+    let handle = cell_point(&view, cx, "E4", w, crate::app::ROW_H);
+    view.read_with(cx, |s, _| assert!(s.on_fill_handle(handle)));
+    view.update(cx, |s, _| s.fill_down_to_data());
+    assert_eq!(input(&view, cx, "E10"), "=B10+1", "down to the end of column D's block");
+    assert_eq!(val(&view, cx, "E11"), Value::Empty);
+}
+
+#[gpui::test]
+fn paste_special_and_cut_move(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    // Copy D4 (=B4*C4, $ format) and paste values into F4: number only.
+    go(&view, cx, "D4");
+    cx.simulate_keystrokes("ctrl-c");
+    go(&view, cx, "F4");
+    cx.simulate_keystrokes("ctrl-shift-v");
+    assert_eq!(input(&view, cx, "F4"), "43.5");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.format_code(s.at(CellRef::parse("F4").unwrap())), None, "values keep the destination's format"));
+    // Paste formats onto F4: now shown as currency.
+    view.update(cx, |s, cx| s.paste_with(crate::app::PasteMode::Formats, cx));
+    assert_eq!(shown(&view, cx, "F4"), "$43.50");
+    // Transpose B4:B6 into a row at F8.
+    go(&view, cx, "B4");
+    cx.simulate_keystrokes("shift-down shift-down ctrl-c");
+    go(&view, cx, "F8");
+    view.update(cx, |s, cx| s.paste_with(crate::app::PasteMode::Transpose, cx));
+    assert_eq!([val(&view, cx, "F8"), val(&view, cx, "G8"), val(&view, cx, "H8")], [Value::Number(3.0), Value::Number(6.0), Value::Number(12.0)]);
+    // Cut the tax rate (D8) and paste it at F1: D9 = ROUND(D7*D8,2) follows it.
+    go(&view, cx, "D8");
+    cx.simulate_keystrokes("ctrl-x");
+    assert_eq!(val(&view, cx, "D8"), Value::Number(0.0825), "cut leaves the cells until pasted");
+    go(&view, cx, "F1");
+    cx.simulate_keystrokes("ctrl-v");
+    assert_eq!(val(&view, cx, "D8"), Value::Empty);
+    assert_eq!(input(&view, cx, "D9"), "=ROUND(D7*F1,2)");
+    assert_eq!(shown(&view, cx, "D9"), "$6.48", "78.60 × 8.25%, the rate now read from F1");
+    view.read_with(cx, |s, _| assert!(s.clip.is_none(), "a move uses up the clipboard"));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(input(&view, cx, "D9"), "=ROUND(D7*D8,2)");
+    assert_eq!(val(&view, cx, "D8"), Value::Number(0.0825));
+    assert_eq!(val(&view, cx, "F1"), Value::Empty);
+}

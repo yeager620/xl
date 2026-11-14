@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use crate::address::{Addr, CellRef, Range, SheetId};
 use crate::eval::{Ctx, Func, eval};
 use crate::format::{Formatted, NumberFormat};
-use crate::formula::{Expr, ParseError, SheetNames, Shift, parse_formula};
+use crate::formula::{Expr, Move, ParseError, SheetNames, Shift, parse_formula};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellInput, CellStore};
 use crate::style::Style;
@@ -897,6 +897,78 @@ impl Workbook {
         }
         for d in &mut self.names.list {
             d.expr = Arc::new(d.expr.shifted(op, d.scope.unwrap_or(target)));
+        }
+        self.rebuild()
+    }
+
+    /// Cut and paste: move a block of cells (contents, formats, styles) so
+    /// that every reference to it — from any sheet, from names, from inside
+    /// the block — follows. References to cells it overwrites become #REF!.
+    pub fn move_range(&mut self, mv: Move) -> RecalcStats {
+        let to = mv.to_range();
+        // What's moving, captured before anything is rewritten.
+        let mut moving: Vec<(CellRef, Option<Cell>, Option<String>, Style)> = Vec::new();
+        for r in mv.from.start.row..=mv.from.end.row {
+            for c in mv.from.start.col..=mv.from.end.col {
+                let cell = CellRef::new(r, c);
+                let a = Addr::new(mv.from_sheet, cell);
+                let input = self.cell(a).cloned();
+                let (format, style) = (self.format_code(a).map(str::to_string), self.style(a).clone());
+                if input.is_some() || format.is_some() || !style.is_default() {
+                    moving.push((cell, input, format, style));
+                }
+            }
+        }
+        for id in self.sheets.order.clone() {
+            let Some(sd) = self.sheets.get_mut(id) else { continue };
+            for (_, cell) in sd.store.cells_mut() {
+                if let CellInput::Formula(e) = &cell.input {
+                    let moved = e.moved(&mv, id);
+                    if moved != **e {
+                        cell.input = CellInput::Formula(Arc::new(moved));
+                    }
+                }
+            }
+        }
+        for d in &mut self.names.list {
+            // Names are written as if on the first sheet; their refs carry sheets.
+            let home = d.scope.unwrap_or(mv.from_sheet);
+            d.expr = Arc::new(d.expr.moved(&mv, home));
+        }
+        let moved_input = |cell: &Option<Cell>| {
+            let mut cell = cell.clone()?;
+            if let CellInput::Formula(e) = &cell.input {
+                cell.input = CellInput::Formula(Arc::new(e.moved(&mv, mv.from_sheet).rehomed(mv.from_sheet, mv.to_sheet)));
+            }
+            Some(cell)
+        };
+        let landed: Vec<(CellRef, Option<Cell>, Option<String>, Style)> =
+            moving.iter().map(|(c, input, f, st)| (CellRef::new((c.row as i64 + mv.dr) as u32, (c.col as i64 + mv.dc) as u32), moved_input(input), f.clone(), st.clone())).collect();
+        // Clear the source (where the block doesn't land on itself) and the
+        // destination, then write the block.
+        let mut clear: Vec<Addr> = Vec::new();
+        for (c, ..) in &moving {
+            clear.push(Addr::new(mv.from_sheet, *c));
+        }
+        if let Some(sd) = self.sheets.get(mv.to_sheet) {
+            clear.extend(sd.store.iter_range(to).map(|(c, _)| Addr::new(mv.to_sheet, c)));
+            clear.extend(sd.formats.keys().filter(|c| to.contains(**c)).map(|c| Addr::new(mv.to_sheet, *c)));
+            clear.extend(sd.styles.keys().filter(|c| to.contains(**c)).map(|c| Addr::new(mv.to_sheet, *c)));
+        }
+        for a in clear {
+            self.set_format(a, None);
+            self.set_style(a, &Style::default());
+            if let Some(sd) = self.sheets.get_mut(a.sheet) {
+                sd.store.remove(a.cell);
+            }
+        }
+        for (c, input, f, st) in landed {
+            let a = Addr::new(mv.to_sheet, c);
+            self.set_format(a, f.as_deref());
+            self.set_style(a, &st);
+            if let (Some(cell), Some(sd)) = (input, self.sheets.get_mut(mv.to_sheet)) {
+                sd.store.insert(c, cell);
+            }
         }
         self.rebuild()
     }

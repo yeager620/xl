@@ -182,7 +182,7 @@ Checklist (tick as each lands with tests):
 - [x] Named ranges (parser, eval, deps), typeable name box (jump / define)
 - [x] xlsx: detect unsupported parts (charts, drawings, comments, pivots, validation, VBA, …) and warn before overwriting
 - [x] Find & replace (find bar), sort (A→Z, Z→A, custom), AutoFilter (header dropdowns, value lists) + xlsx (multi-key custom sort dialog: later)
-- [ ] Fill handle drag + series (numbers, dates, months/weekdays, "Item 1"), double-click fill; paste special (values/formats/formulas/transpose); cut = move with reference updates
+- [x] Fill handle drag + series (numbers, dates, months/weekdays, "Item 1"), double-click fill; paste special (values/formats/formulas/transpose); cut = move with reference updates
 - [ ] Formula autocomplete (functions + names) and argument hints
 - [ ] Conditional formatting (cell rules, text, top/bottom, above average, duplicates, formula, color scales, data bars) + xlsx
 - [ ] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
