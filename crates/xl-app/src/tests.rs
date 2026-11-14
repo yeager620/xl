@@ -964,3 +964,38 @@ fn paste_special_and_cut_move(cx: &mut TestAppContext) {
     assert_eq!(val(&view, cx, "D8"), Value::Number(0.0825));
     assert_eq!(val(&view, cx, "F1"), Value::Empty);
 }
+
+#[gpui::test]
+fn formula_autocomplete_and_hints(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "F1");
+    cx.simulate_input("=rou");
+    view.read_with(cx, |s, _| {
+        let (_, items) = s.completions().expect("suggestions");
+        let labels: Vec<&str> = items.iter().map(|c| c.label()).collect();
+        assert_eq!(labels, ["ROUND", "ROUNDDOWN", "ROUNDUP"]);
+    });
+    cx.simulate_keystrokes("down tab");
+    view.read_with(cx, |s, _| {
+        let e = s.edit.as_ref().unwrap();
+        assert_eq!(e.text, "=ROUNDDOWN(");
+        assert_eq!(e.cursor, e.text.len());
+        assert!(s.completions().is_none());
+        assert_eq!(crate::complete::call_at(&e.text, e.cursor), Some((xl_engine::Func::RoundDown, 0)));
+    });
+    cx.simulate_input("D4,1)");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F1"), Value::Number(43.5));
+    // Escape hides the list without cancelling the edit; names are offered too.
+    view.update(cx, |s, _| {
+        s.wb.define_name("Rate", None, "Welcome!$D$8").unwrap();
+    });
+    go(&view, cx, "F2");
+    cx.simulate_input("=ra");
+    view.read_with(cx, |s, _| assert!(s.completions().unwrap().1.iter().any(|c| c.label() == "Rate")));
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(s.edit.is_some() && s.completions().is_none()));
+    cx.simulate_input("te*2");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F2"), Value::Number(0.165));
+}

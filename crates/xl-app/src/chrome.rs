@@ -962,6 +962,9 @@ impl Render for Spreadsheet {
             .when_some(self.filter_menu.as_ref().map(|m| m.pos), |d, pos| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_filter_menu(cx))).with_priority(2))
             })
+            .when_some(if self.menu.is_none() && self.palette.is_none() { self.render_completion(cx) } else { None }, |d, (pos, el)| {
+                d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
+            })
             .when_some(self.context, |d, (pos, kind)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_context_menu(kind, cx))).with_priority(2))
             })

@@ -120,6 +120,7 @@ impl EntityInputHandler for Spreadsheet {
             cx.notify();
             return;
         };
+        self.ac_selected = 0;
         let r = range.map(|r| range_to_bytes(&e.text, &r)).or_else(|| e.marked.clone()).unwrap_or(e.cursor..e.cursor);
         e.point = None;
         e.text.replace_range(r.clone(), text);

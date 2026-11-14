@@ -252,6 +252,10 @@ pub struct Spreadsheet {
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
+    /// Highlighted formula suggestion.
+    pub(crate) ac_selected: usize,
+    /// Suggestions hidden (Escape) for the word starting at this position.
+    pub(crate) ac_dismissed: Option<usize>,
     /// While dragging the fill handle: the range it would fill.
     pub(crate) fill_target: Option<Range>,
     /// The open filter dropdown.
@@ -326,6 +330,8 @@ impl Spreadsheet {
             layout_before: None,
             filter_menu: None,
             fill_target: None,
+            ac_selected: 0,
+            ac_dismissed: None,
             context: None,
             loading: None,
             palette: None,
@@ -1721,6 +1727,9 @@ impl Spreadsheet {
     fn key_editing(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
         if self.edit.as_ref().is_some_and(|e| e.marked.is_some()) {
             return false;
+        }
+        if !ctrl && !alt && self.key_completion(key) {
+            return true;
         }
         let pointing = self.edit.as_ref().is_some_and(|e| e.can_point());
         let mode = self.edit.as_ref().unwrap().mode;
