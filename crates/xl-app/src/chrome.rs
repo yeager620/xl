@@ -8,7 +8,7 @@ use gpui::{
 };
 use xl_engine::{HAlign, NumberFormat, Rgb, Value, quote_sheet_name};
 
-use crate::app::{BorderPreset, ContextKind, EditMode, Emphasis, Menu, Spreadsheet};
+use crate::app::{BorderPreset, ContextKind, EditMode, Emphasis, Field, Menu, Spreadsheet};
 use crate::paint::paint_ops;
 use crate::refs::scan_refs;
 use crate::theme::Theme;
@@ -626,11 +626,16 @@ impl Spreadsheet {
     fn render_formula_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let sel = self.selection();
-        let name_box = match &self.edit {
-            Some(e) if e.at.sheet != self.cur => format!("{}!{}", quote_sheet_name(self.wb.sheet_name(e.at.sheet)), e.at.cell),
-            Some(e) => e.at.cell.to_string(),
-            None if sel.start == sel.end => self.active.to_string(),
-            None => format!("{} × {}", sel.rows(), sel.cols()),
+        let typing = self.field.as_ref().filter(|(f, _)| *f == Field::NameBox).map(|(_, t)| t.clone());
+        let name_box = match (&typing, &self.edit) {
+            (Some(t), _) => t.clone(),
+            (None, Some(e)) if e.at.sheet != self.cur => format!("{}!{}", quote_sheet_name(self.wb.sheet_name(e.at.sheet)), e.at.cell),
+            (None, Some(e)) => e.at.cell.to_string(),
+            (None, None) => match self.wb.name_for_range(self.cur, sel) {
+                Some(n) => n.to_string(),
+                None if sel.start == sel.end => self.active.to_string(),
+                None => format!("{} × {}", sel.rows(), sel.cols()),
+            },
         };
         let (text, caret) = match &self.edit {
             Some(e) => (e.text.clone(), Some(e.cursor)),
@@ -699,7 +704,18 @@ impl Spreadsheet {
                     .text_color(t.ink)
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(name_box),
+                    .id("name-box")
+                    .cursor_text()
+                    .when(typing.is_some(), |d| d.bg(t.canvas).border_2().border_color(t.accent))
+                    .tooltip(tip(t, "Go to a cell, range or name — or type a new name for the selection", "Ctrl+G"))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        this.focus.focus(window, cx);
+                        this.focus_name_box();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .child(name_box)
+                    .when(typing.is_some(), |d| d.child(div().w(px(1.5)).h(px(16.)).bg(t.accent))),
             )
             .child(div().px(px(8.)).child(icon("square-function", if self.edit.is_some() { t.accent } else { t.ink_faint })))
             .child(
@@ -939,6 +955,7 @@ impl Render for Spreadsheet {
                 d.child(deferred(div().absolute().top(px(64.)).left_0().right_0().flex().justify_center().child(self.render_palette(cx))).with_priority(2))
             });
         let content = content.when(self.pending.is_some(), |d| d.child(deferred(self.render_dialog(cx)).with_priority(3)));
+        let content = content.when(self.lossy_prompt, |d| d.child(deferred(self.render_lossy_dialog(cx)).with_priority(4)));
         self.window_frame(content, window)
     }
 }

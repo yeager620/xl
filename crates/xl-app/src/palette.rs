@@ -42,6 +42,7 @@ pub fn commands() -> Vec<Command> {
         cmd!("Insert columns right", "", |s, w, cx| s.insert_cols(true)),
         cmd!("Delete rows", "Ctrl+-", |s, w, cx| s.delete_rows()),
         cmd!("Delete columns", "", |s, w, cx| s.delete_cols()),
+        cmd!("Go to / name a range…", "Ctrl+G", |s, w, cx| s.focus_name_box()),
         cmd!("Fill down", "Ctrl+D", |s, w, cx| s.fill(true)),
         cmd!("Fill right", "Ctrl+R", |s, w, cx| s.fill(false)),
         cmd!("Clear contents", "Delete", |s, w, cx| s.clear_selection()),

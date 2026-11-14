@@ -596,6 +596,33 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     Ok(())
 }
 
+/// Package parts xl doesn't model, by path prefix.
+const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
+    ("xl/charts/", "charts"),
+    ("xl/drawings/", "drawings and images"),
+    ("xl/media/", "drawings and images"),
+    ("xl/comments", "comments"),
+    ("xl/threadedComments/", "comments"),
+    ("xl/pivotTables/", "pivot tables"),
+    ("xl/pivotCache/", "pivot tables"),
+    ("xl/tables/", "tables"),
+    ("xl/vbaProject.bin", "macros"),
+    ("xl/externalLinks/", "links to other workbooks"),
+    ("xl/slicers/", "slicers"),
+    ("xl/timelines/", "timelines"),
+    ("customXml/", "custom XML"),
+];
+
+/// Worksheet elements xl doesn't model.
+const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
+    ("<dataValidations", "data validation"),
+    ("<conditionalFormatting", "conditional formatting"),
+    ("<hyperlinks", "hyperlinks"),
+    ("<sheetProtection", "sheet protection"),
+    ("<autoFilter", "filters"),
+    ("<x14:sparklineGroups", "sparklines"),
+];
+
 /// "A1:B2" (or a single cell) to a range.
 fn parse_range(s: &str) -> Option<Range> {
     let (a, b) = s.split_once(':').unwrap_or((s, s));
@@ -646,6 +673,18 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         }
     }
     let mut cells = 0;
+    let mut unsupported: Vec<&'static str> = Vec::new();
+    let mut note = |label: &'static str| {
+        if !unsupported.contains(&label) {
+            unsupported.push(label);
+        }
+    };
+    let names: Vec<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
+    for name in names {
+        if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix)) {
+            note(label);
+        }
+    }
     for ((name, rid), id) in list.iter().zip(&ids) {
         let Some(target) = rels.get(rid) else {
             warnings.push(format!("Sheet '{name}' has no data part"));
@@ -657,8 +696,16 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
             warnings.push(format!("Sheet '{name}' isn't a worksheet and was left empty"));
             continue;
         };
+        for &(tag, label) in UNSUPPORTED_SHEET_ELEMENTS {
+            if bytes.windows(tag.len()).any(|w| w == tag.as_bytes()) {
+                note(label);
+            }
+        }
         read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles }, &mut cells, &mut warnings)?;
     }
+    if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
+        note("chart sheets");
+    }
     let stats = wb.recalc_all();
-    Ok(Loaded { workbook: wb, cells, warnings, recalc: stats })
+    Ok(Loaded { workbook: wb, cells, warnings, recalc: stats, unsupported })
 }

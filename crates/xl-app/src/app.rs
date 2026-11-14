@@ -142,6 +142,12 @@ impl UndoEntry {
     }
 }
 
+/// A one-line text field outside the grid that has keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    NameBox,
+}
+
 /// What a right-click menu is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextKind {
@@ -204,6 +210,12 @@ pub struct Spreadsheet {
     pub(crate) last_title: String,
     /// Sheet tab being renamed, with the text typed so far.
     pub(crate) renaming: Option<(SheetId, String)>,
+    /// The focused text field and its contents.
+    pub(crate) field: Option<(Field, String)>,
+    /// Parts of the opened xlsx that xl can't keep ("charts", …).
+    pub(crate) unsupported: Vec<&'static str>,
+    /// Asking whether to overwrite a file and drop those parts.
+    pub(crate) lossy_prompt: bool,
     /// Sheet whose delete button was clicked once (click again to confirm).
     pub(crate) confirm_delete: Option<SheetId>,
     pub(crate) menu: Option<Menu>,
@@ -267,6 +279,9 @@ impl Spreadsheet {
             theme_override: None,
             last_title: String::new(),
             renaming: None,
+            field: None,
+            unsupported: Vec::new(),
+            lossy_prompt: false,
             confirm_delete: None,
             menu: None,
             layout_before: None,
@@ -1389,6 +1404,7 @@ impl Spreadsheet {
                 self.renaming = None;
                 self.menu = None;
                 self.dirty = false;
+                self.unsupported = loaded.unsupported;
                 self.message = Some(match loaded.warnings.first() {
                     Some(w) => (format!("Opened {name} with {} warning(s): {w}", loaded.warnings.len()), true),
                     None => (format!("Opened {name} ({} cells)", loaded.cells), false),
@@ -1404,6 +1420,11 @@ impl Spreadsheet {
             }
             Err(e) => self.message = Some((format!("Could not open {name}: {e}"), true)),
         }
+    }
+
+    /// Saving over the opened file would drop parts xl can't keep.
+    pub(crate) fn would_lose_parts(&self) -> bool {
+        !self.unsupported.is_empty() && self.path.as_deref().and_then(xl_io::FileKind::of) == Some(xl_io::FileKind::Xlsx)
     }
 
     pub(crate) fn save_to(&mut self, path: PathBuf) {
@@ -1428,6 +1449,10 @@ impl Spreadsheet {
 
     pub(crate) fn save(&mut self, save_as: bool, cx: &mut Context<Self>) {
         if let (Some(p), false) = (self.path.clone(), save_as) {
+            if self.would_lose_parts() {
+                self.lossy_prompt = true;
+                return;
+            }
             self.save_to(p);
             return;
         }
@@ -1485,7 +1510,9 @@ impl Spreadsheet {
         let key = ks.key.as_str();
         let ctrl = m.control || m.platform;
         let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
-        let handled = if self.pending.is_some() {
+        let handled = if self.lossy_prompt {
+            self.key_lossy(key, cx)
+        } else if self.pending.is_some() {
             self.key_dialog(key, window, cx)
         } else if ctrl && (key == "q" || key == "w") {
             let after = if key == "q" { crate::lifecycle::After::Quit } else { crate::lifecycle::After::Close };
@@ -1500,6 +1527,8 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
+        } else if self.field.is_some() {
+            self.key_field(key)
         } else if self.edit.is_some() {
             self.key_editing(key, ctrl, m.shift, m.alt)
         } else {
@@ -1508,6 +1537,61 @@ impl Spreadsheet {
         if handled {
             cx.stop_propagation();
             cx.notify();
+        }
+    }
+
+    fn key_field(&mut self, key: &str) -> bool {
+        let Some((kind, text)) = self.field.as_mut() else { return false };
+        match key {
+            "enter" => {
+                let (kind, text) = (*kind, std::mem::take(text));
+                self.field = None;
+                match kind {
+                    Field::NameBox => self.name_box_go(&text),
+                }
+            }
+            "escape" => self.field = None,
+            "backspace" => {
+                text.pop();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Focus the name box (Ctrl+G), ready to type a reference or name.
+    pub(crate) fn focus_name_box(&mut self) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        self.field = Some((Field::NameBox, String::new()));
+    }
+
+    /// Name box Enter: jump to a cell, range or defined name, or define a
+    /// new name for the selection.
+    pub(crate) fn name_box_go(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if let Some((sheet, range)) = self.wb.resolve_reference(text, self.cur) {
+            self.switch_sheet(sheet);
+            self.anchor = range.start;
+            self.active = range.end;
+            self.ensure_visible(range.start);
+            self.active = range.start;
+            self.anchor = range.end;
+            return;
+        }
+        let sel = self.selection();
+        let target = format!("{}!{}", quote_sheet_name(self.wb.sheet_name(self.cur)), absolute_range(sel));
+        match self.wb.define_name(text, None, &target) {
+            Ok(stats) => {
+                self.last_stats = Some(stats);
+                self.mark_dirty();
+                self.message = Some((format!("Defined the name {text} for {}", absolute_range(sel)), false));
+            }
+            Err(e) => self.message = Some((format!("Not a reference or a valid name: {e}"), true)),
         }
     }
 
@@ -1678,6 +1762,7 @@ impl Spreadsheet {
             }
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
+            ("g", true) => self.focus_name_box(),
             ("b", true) => self.toggle_emphasis(Emphasis::Bold),
             ("i", true) => self.toggle_emphasis(Emphasis::Italic),
             ("u", true) => self.toggle_emphasis(Emphasis::Underline),
@@ -1706,6 +1791,7 @@ impl Spreadsheet {
 
     pub(crate) fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        self.field = None;
         if self.renaming.is_some() {
             self.finish_rename(true);
         }
@@ -2035,4 +2121,10 @@ fn last_at_or_before(v: f64, n: u32, offset: impl Fn(u32) -> f64) -> u32 {
         if offset(mid) <= v { lo = mid } else { hi = mid - 1 }
     }
     lo
+}
+
+/// "$A$1" or "$A$1:$C$9".
+pub(crate) fn absolute_range(r: Range) -> String {
+    let one = |c: CellRef| format!("${}${}", xl_engine::col_name(c.col), c.row + 1);
+    if r.start == r.end { one(r.start) } else { format!("{}:{}", one(r.start), one(r.end)) }
 }

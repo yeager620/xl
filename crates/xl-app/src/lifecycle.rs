@@ -172,6 +172,10 @@ impl Spreadsheet {
 
     pub(crate) fn dialog_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(after) = self.pending.clone() else { return };
+        if self.would_lose_parts() {
+            self.lossy_prompt = true;
+            return;
+        }
         match self.path.clone() {
             Some(p) => {
                 self.save_to(p);
@@ -303,6 +307,96 @@ impl Spreadsheet {
                             .child(button("dialog-save", "Save").bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(
                                 |this, _, window, cx| this.dialog_save(window, cx),
                             ))),
+                    ),
+            )
+    }
+
+    /// Overwrite the opened file anyway, dropping what xl can't keep, then
+    /// carry on with a pending close/quit/open.
+    pub(crate) fn lossy_save_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lossy_prompt = false;
+        let Some(p) = self.path.clone() else { return };
+        self.save_to(p);
+        if !self.dirty {
+            self.unsupported.clear();
+            if let Some(after) = self.pending.clone() {
+                self.perform(after, window, cx);
+            }
+        }
+    }
+
+    pub(crate) fn lossy_save_copy(&mut self, cx: &mut Context<Self>) {
+        self.lossy_prompt = false;
+        self.pending = None;
+        self.save(true, cx);
+    }
+
+    /// The dialog is modal: Enter saves a copy, Escape cancels, nothing else gets through.
+    pub(crate) fn key_lossy(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        match key {
+            "enter" => self.lossy_save_copy(cx),
+            "escape" => self.lossy_prompt = false,
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn render_lossy_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let parts = match self.unsupported.as_slice() {
+            [] => String::new(),
+            [one] => one.to_string(),
+            [init @ .., last] => format!("{} and {last}", init.join(", ")),
+        };
+        let button = |id: &'static str, label: &'static str| {
+            div().id(id).flex().items_center().justify_center().h(px(32.)).px(px(14.)).rounded(px(4.)).cursor_pointer().text_size(px(14.)).child(label)
+        };
+        div()
+            .id("lossy-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::hsla(0., 0., 0., if t.dark { 0.45 } else { 0.25 }))
+            .occlude()
+            .child(
+                div()
+                    .id("lossy-dialog")
+                    .w(px(460.))
+                    .p(px(20.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .bg(t.popover)
+                    .border_1()
+                    .border_color(t.divider)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(SharedString::from(format!("“{}” has {parts} that xl can’t keep", self.file_name()))))
+                    .child(div().text_size(px(14.)).text_color(t.ink_muted).child("Saving over it would remove them. Save a copy to keep the original file intact."))
+                    .child(
+                        div()
+                            .mt(px(12.))
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(button("lossy-anyway", "Save Anyway").text_color(t.error).hover(|s| s.bg(t.chrome_hover)).on_click(cx.listener(|this, _, window, cx| {
+                                this.lossy_save_anyway(window, cx);
+                                cx.notify();
+                            })))
+                            .child(div().flex_1())
+                            .child(button("lossy-cancel", "Cancel").text_color(t.ink).border_1().border_color(t.divider).hover(|s| s.bg(t.chrome_hover)).on_click(cx.listener(|this, _, _, cx| {
+                                this.lossy_prompt = false;
+                                cx.notify();
+                            })))
+                            .child(button("lossy-copy", "Save a Copy…").bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
+                                this.lossy_save_copy(cx);
+                                cx.notify();
+                            }))),
                     ),
             )
     }

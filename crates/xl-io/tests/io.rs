@@ -343,3 +343,28 @@ fn layout_roundtrips_through_xlsx() {
     assert_eq!((plain.font_size, plain.font_name.clone()), (None, None), "the default font stays implicit");
     assert_eq!(*back.value(a(s2, "A1")), Value::text("Quarterly report"));
 }
+
+#[test]
+fn reports_parts_it_cannot_keep() {
+    use rust_xlsxwriter::{Chart, ChartType, DataValidation, Note, Workbook as XlsxBook};
+    let p = tmp("lossy.xlsx");
+    let mut book = XlsxBook::new();
+    let ws = book.add_worksheet();
+    ws.write_number(0, 0, 1).unwrap();
+    ws.write_number(1, 0, 2).unwrap();
+    let mut chart = Chart::new(ChartType::Column);
+    chart.add_series().set_values("Sheet1!$A$1:$A$2");
+    ws.insert_chart(3, 3, &chart).unwrap();
+    ws.insert_note(0, 1, &Note::new("check this")).unwrap();
+    ws.add_data_validation(0, 2, 5, 2, &DataValidation::new().allow_whole_number(rust_xlsxwriter::DataValidationRule::Between(1, 10))).unwrap();
+    book.save(&p).unwrap();
+    let loaded = xl_io::open(&p).unwrap();
+    for part in ["charts", "comments", "data validation"] {
+        assert!(loaded.unsupported.contains(&part), "{part} missing from {:?}", loaded.unsupported);
+    }
+    assert_eq!(*loaded.workbook.value(a(loaded.workbook.sheet_ids()[0], "A2")), Value::Number(2.0));
+    // A file xl wrote itself has nothing to lose.
+    let p2 = tmp("plain.xlsx");
+    xl_io::save(&loaded.workbook, &p2, loaded.workbook.sheet_ids()[0]).unwrap();
+    assert!(xl_io::open(&p2).unwrap().unsupported.is_empty());
+}

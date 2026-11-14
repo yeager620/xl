@@ -792,6 +792,25 @@ impl Workbook {
     }
 
     /// The formula a name stands for (without '=').
+    /// Resolve "B7", "Sheet2!A1:C9" or a defined name to a sheet and range,
+    /// relative to `sheet`.
+    pub fn resolve_reference(&self, text: &str, sheet: SheetId) -> Option<(SheetId, Range)> {
+        let expr = parse_formula(text.trim().trim_start_matches('='), &self.sheets).ok()?;
+        match expr {
+            Expr::Name(n) => {
+                let d = self.names.lookup(&n, sheet)?;
+                let (s, r) = d.expr.reference()?;
+                Some((s.or(d.scope).unwrap_or(sheet), r))
+            }
+            e => e.reference().map(|(s, r)| (s.unwrap_or(sheet), r)),
+        }
+    }
+
+    /// The defined name that refers to exactly this range, if any.
+    pub fn name_for_range(&self, sheet: SheetId, range: Range) -> Option<&str> {
+        self.names.iter().find(|d| d.expr.reference().is_some_and(|(s, r)| s.or(d.scope) == Some(sheet) && r == range)).map(|d| d.name.as_str())
+    }
+
     pub fn name_formula(&self, d: &DefinedName) -> String {
         d.expr.to_source(0, 0, &self.sheets)
     }

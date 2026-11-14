@@ -42,6 +42,9 @@ impl Spreadsheet {
         if let Some(p) = &self.palette {
             return &p.query;
         }
+        if let Some((_, text)) = &self.field {
+            return text;
+        }
         match (&self.renaming, &self.edit) {
             (Some((_, name)), _) => name,
             (None, Some(e)) => &e.text,
@@ -64,6 +67,7 @@ impl EntityInputHandler for Spreadsheet {
             return Some(UTF16Selection { range: end..end, reversed: false });
         }
         let caret = match (&self.renaming, &self.edit) {
+            _ if self.field.is_some() => utf16_len(self.ime_text()),
             (Some((_, name)), _) => utf16_len(name),
             (None, Some(e)) => byte_to_utf16(&e.text, e.cursor),
             (None, None) => 0,
@@ -98,6 +102,11 @@ impl EntityInputHandler for Spreadsheet {
             cx.notify();
             return;
         }
+        if let Some((_, field)) = self.field.as_mut() {
+            field.push_str(text);
+            cx.notify();
+            return;
+        }
         let Some(e) = self.edit.as_mut() else {
             // Typing on a selected cell starts an edit that replaces it.
             self.begin_edit(Some(text.to_string()), EditMode::Enter);
@@ -120,7 +129,7 @@ impl EntityInputHandler for Spreadsheet {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.renaming.is_some() || self.palette.is_some() {
+        if self.renaming.is_some() || self.palette.is_some() || self.field.is_some() {
             return;
         }
         if self.edit.is_none() {

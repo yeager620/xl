@@ -19,6 +19,9 @@ pub struct Loaded {
     pub warnings: Vec<String>,
     /// The initial full recalculation.
     pub recalc: RecalcStats,
+    /// Parts of the file xl can't keep (e.g. "charts", "comments"); saving
+    /// over the file would drop them.
+    pub unsupported: Vec<&'static str>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

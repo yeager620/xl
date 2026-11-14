@@ -179,8 +179,8 @@ Checklist (tick as each lands with tests):
 - [x] ~49 high-use functions + one-line descriptions for every function (agent, worktree)
 - [x] Insert/delete rows & columns with formula adjustment (+ formats, styles, widths, later features), undo/redo, context menu, Ctrl+Shift+= / Ctrl+-
 - [x] Row heights (drag + autofit), hidden rows/cols, merged cells, wrap text, vertical alignment, font size/family; freeze panes (paned painter); xlsx read/write for all
-- [ ] Named ranges (parser, eval, deps), typeable name box (jump / define)
-- [ ] xlsx: detect unsupported parts (charts, drawings, comments, pivots, validation, VBA, …) and warn before overwriting
+- [x] Named ranges (parser, eval, deps), typeable name box (jump / define)
+- [x] xlsx: detect unsupported parts (charts, drawings, comments, pivots, validation, VBA, …) and warn before overwriting
 - [ ] Find & replace (find bar), sort (A→Z, Z→A, custom), AutoFilter (header dropdowns, value lists) + xlsx
 - [ ] Fill handle drag + series (numbers, dates, months/weekdays, "Item 1"), double-click fill; paste special (values/formats/formulas/transpose); cut = move with reference updates
 - [ ] Formula autocomplete (functions + names) and argument hints

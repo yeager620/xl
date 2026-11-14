@@ -715,3 +715,60 @@ fn wrapped_text_fits_row_height(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     view.read_with(cx, |s, _| assert_eq!(s.row_h(13), crate::app::ROW_H));
 }
+
+#[gpui::test]
+fn name_box_jumps_and_defines_names(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("D10");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("D10").unwrap()));
+    // Name the tax rate cell, then use the name in a formula.
+    go(&view, cx, "D8");
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("TaxRate");
+    cx.simulate_keystrokes("enter");
+    go(&view, cx, "F1");
+    cx.simulate_input("=TaxRate*100");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F1"), Value::Number(8.25));
+    // Jumping to the name selects its cell; a range jump selects the range.
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("taxrate");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.active, CellRef::parse("D8").unwrap());
+        assert_eq!(s.wb.name_for_range(s.cur, s.selection()), Some("TaxRate"));
+    });
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("A3:D6");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.selection(), xl_engine::Range::new(CellRef::parse("A3").unwrap(), CellRef::parse("D6").unwrap())));
+    // Not a reference and not a valid name: an error, nothing changes.
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("1abc");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.message.as_ref().is_some_and(|(_, err)| *err)));
+}
+
+#[gpui::test]
+fn saving_over_a_file_with_unkept_parts_asks_first(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    let path = std::env::temp_dir().join(format!("xl-lossy-{}.xlsx", std::process::id()));
+    std::fs::remove_file(&path).ok();
+    view.update(cx, |s, _| {
+        s.path = Some(path.clone());
+        s.unsupported = vec!["charts", "comments"];
+        s.dirty = true;
+    });
+    cx.simulate_keystrokes("ctrl-s");
+    view.read_with(cx, |s, _| assert!(s.lossy_prompt && s.dirty));
+    assert!(!path.exists(), "nothing written until the user decides");
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(!s.lossy_prompt));
+    cx.simulate_keystrokes("ctrl-s");
+    cx.update(|window, app| view.update(app, |s, cx| s.lossy_save_anyway(window, cx)));
+    assert!(path.exists());
+    view.read_with(cx, |s, _| assert!(!s.dirty && s.unsupported.is_empty() && !s.lossy_prompt));
+    std::fs::remove_file(&path).ok();
+}
