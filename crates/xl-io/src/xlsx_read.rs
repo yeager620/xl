@@ -447,6 +447,7 @@ enum Capture {
     Formula,
     Inline,
     CfFormula,
+    Sqref,
 }
 
 struct SharedFormula {
@@ -561,6 +562,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     let mut cf_rule: Option<CfRuleXml> = None;
     let mut cf_formula = String::new();
     let mut cf_skipped = false;
+    // Sparklines (an x14 extension): group kind/color, then each one's data and cell.
+    let mut spark_kind = xl_engine::chart::SparkKind::Line;
+    let mut spark_color: Option<Rgb> = None;
+    let mut sqref = String::new();
+    let mut sparklines: Vec<xl_engine::chart::Sparkline> = Vec::new();
 
     loop {
         let ev = r.read_event_into(&mut buf).map_err(|e| e.to_string())?;
@@ -630,6 +636,24 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         if let (Some(rule), Some(c)) = (cf_rule.as_mut(), color_of(e, cx.theme)) {
                             rule.colors.push(c);
                         }
+                    }
+                    "sparklineGroup" => {
+                        spark_kind = match attr(e, "type").as_deref() {
+                            Some("column") => xl_engine::chart::SparkKind::Column,
+                            Some("stacked") => xl_engine::chart::SparkKind::WinLoss,
+                            _ => xl_engine::chart::SparkKind::Line,
+                        };
+                        spark_color = None;
+                    }
+                    // Excel's and rust_xlsxwriter's default series colors mean "automatic".
+                    "colorSeries" => spark_color = color_of(e, cx.theme).filter(|c| !matches!(c, 0x376092 | 0x254061)),
+                    "sparkline" => {
+                        f.clear();
+                        sqref.clear();
+                    }
+                    "sqref" if !empty => {
+                        sqref.clear();
+                        cap = Capture::Sqref;
                     }
                     "autoFilter" => {
                         if let Some(r) = attr(e, "ref").and_then(|s| parse_range(&s)) {
@@ -731,16 +755,25 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                 Capture::Formula => f.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::Inline => v.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::CfFormula => cf_formula.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
+                Capture::Sqref => sqref.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::None => {}
             },
             Event::GeneralRef(ref g) => match cap {
                 Capture::Value | Capture::Inline => push_entity(&mut v, g),
                 Capture::Formula => push_entity(&mut f, g),
                 Capture::CfFormula => push_entity(&mut cf_formula, g),
+                Capture::Sqref => push_entity(&mut sqref, g),
                 Capture::None => {}
             },
             Event::End(ref e) => match local(e.name().as_ref()) {
-                "v" | "f" | "t" => cap = Capture::None,
+                "v" | "f" | "t" | "sqref" => cap = Capture::None,
+                "sparkline" => {
+                    // The data reference was captured like a cell formula.
+                    if let (Some(cell), Ok(data)) = (CellRef::parse(sqref.trim()), parse_formula(f.trim(), wb.sheets())) {
+                        sparklines.push(xl_engine::chart::Sparkline { cell, kind: spark_kind, data: Arc::new(data), color: spark_color });
+                    }
+                    f.clear();
+                }
                 "formula" if cap == Capture::CfFormula => {
                     cap = Capture::None;
                     if let Some(rule) = cf_rule.as_mut() {
@@ -806,6 +839,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         }
         buf.clear();
     }
+    if !sparklines.is_empty()
+        && let Some(l) = wb.layout_mut(cx.id)
+    {
+        l.sparklines = sparklines;
+    }
     if !cf_rules.is_empty()
         && let Some(l) = wb.layout_mut(cx.id)
     {
@@ -854,7 +892,6 @@ const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
     ("<dynamicFilter", "advanced filters"),
     ("<colorFilter", "advanced filters"),
     ("<iconFilter", "advanced filters"),
-    ("<x14:sparklineGroups", "sparklines"),
 ];
 
 /// "A1:B2" (or a single cell) to a range.

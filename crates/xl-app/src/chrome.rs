@@ -525,10 +525,19 @@ impl Spreadsheet {
             }
             Menu::CondFormat => self.render_cf_menu(cx).into_any_element(),
             Menu::Chart => {
+                use xl_engine::chart::SparkKind;
                 let mut panel = menu_panel(&t, 200.);
                 for (i, k) in xl_engine::chart::ChartKind::ALL.into_iter().enumerate() {
                     panel = panel.child(menu_item(&t, ("insert-chart", i), format!("{} chart", k.label()), "").on_click(cx.listener(move |this, _, _, cx| {
                         this.insert_chart(k);
+                        cx.notify();
+                    })));
+                }
+                panel = panel.child(menu_separator(&t));
+                for (i, (k, label)) in [(SparkKind::Line, "Line sparklines"), (SparkKind::Column, "Column sparklines"), (SparkKind::WinLoss, "Win/loss sparklines")].into_iter().enumerate() {
+                    panel = panel.child(menu_item(&t, ("insert-spark", i), label, "").on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.insert_sparklines(k);
                         cx.notify();
                     })));
                 }

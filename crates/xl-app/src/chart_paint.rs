@@ -390,3 +390,66 @@ mod tests {
         assert_eq!(label(0.3), "0.3");
     }
 }
+
+/// A sparkline inside a cell's rectangle.
+pub(crate) fn sparkline_ops(sheet: &Spreadsheet, kind: xl_engine::chart::SparkKind, values: &[Option<f64>], color: Option<u32>, (x, y, w, h): (f64, f64, f64, f64), clip: Bounds<Pixels>) -> Vec<Op> {
+    use xl_engine::chart::SparkKind;
+    let t = sheet.theme;
+    let mut ops = Vec::new();
+    let color: Hsla = color.map_or(t.accent, |c| gpui::rgb(c).into());
+    let negative = t.error;
+    let nums: Vec<f64> = values.iter().flatten().copied().collect();
+    let (Some(mn), Some(mx)) = (nums.iter().copied().reduce(f64::min), nums.iter().copied().reduce(f64::max)) else { return ops };
+    let n = values.len().max(1);
+    let (x0, y0, w0, h0) = (x + 4.0, y + 3.0, (w - 8.0).max(4.0), (h - 6.0).max(4.0));
+    match kind {
+        SparkKind::Line => {
+            let span = if mx > mn { mx - mn } else { 1.0 };
+            let to_y = |v: f64| y0 + h0 - (v - mn) / span * h0;
+            let step = if n > 1 { w0 / (n - 1) as f64 } else { 0.0 };
+            let pts: Vec<(f64, f64)> = values.iter().enumerate().filter_map(|(i, v)| Some((x0 + step * i as f64, to_y((*v)?)))).collect();
+            if pts.len() > 1
+                && let Some(line) = path(
+                    |p| {
+                        p.move_to(pt(pts[0].0, pts[0].1));
+                        for &(px_, py_) in &pts[1..] {
+                            p.line_to(pt(px_, py_));
+                        }
+                    },
+                    Some(1.5),
+                )
+            {
+                ops.push(Op::Path(line, color, clip));
+            }
+            // Mark the last point, like Excel's "high point" emphasis.
+            if let Some(&(lx, ly)) = pts.last() {
+                ops.push(Op::Quad(outline(rect(lx - 2.0, ly - 2.0, 4.0, 4.0), 1.0, color, color, 2.0), clip));
+            }
+        }
+        SparkKind::Column | SparkKind::WinLoss => {
+            let band = w0 / n as f64;
+            let bar = (band * 0.75).max(1.0);
+            let (lo, hi) = (mn.min(0.0), mx.max(0.0));
+            let span = if hi > lo { hi - lo } else { 1.0 };
+            for (i, v) in values.iter().enumerate() {
+                let Some(v) = *v else { continue };
+                let bx = x0 + band * i as f64 + (band - bar) / 2.0;
+                let c = if v < 0.0 { negative } else { color };
+                let r = if kind == SparkKind::WinLoss {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let half = h0 / 2.0;
+                    if v > 0.0 { rect(bx, y0, bar, half - 1.0) } else { rect(bx, y0 + half + 1.0, bar, half - 1.0) }
+                } else {
+                    let zero = y0 + h0 - (0.0 - lo) / span * h0;
+                    let top = y0 + h0 - (v - lo) / span * h0;
+                    let (a, b) = (top.min(zero), top.max(zero));
+                    rect(bx, a, bar, (b - a).max(1.0))
+                };
+                ops.push(Op::Quad(fill(r, c), clip));
+            }
+        }
+    }
+    ops
+}

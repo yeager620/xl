@@ -152,3 +152,60 @@ impl Spreadsheet {
         (cell, ((gx - self.grid_x(cell.col)).max(0.0), (gy - self.grid_y(cell.row)).max(0.0)))
     }
 }
+
+impl Spreadsheet {
+    /// Add sparklines for the selected data: one per row in the column to
+    /// its right (or, for a single column, one below it).
+    pub(crate) fn insert_sparklines(&mut self, kind: xl_engine::chart::SparkKind) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        let Some(range) = self.data_range() else {
+            self.message = Some(("Select the numbers to draw sparklines for".into(), true));
+            return;
+        };
+        let header = self.guess_header(range);
+        let store = self.wb.store(self.cur);
+        let first_row = range.start.row + header as u32;
+        // A leading column of labels isn't data.
+        let labels = range.cols() > 1 && (first_row..=range.end.row).all(|r| !matches!(store.value(CellRef::new(r, range.start.col)), Value::Number(_)));
+        let first_col = range.start.col + labels as u32;
+        let sheet = quote_sheet_name(self.wb.sheet_name(self.cur));
+        let reference = |r: Range| parse_formula(&format!("{sheet}!{}", absolute_range(r)), self.wb.sheets()).ok().map(Arc::new);
+        let mut new = Vec::new();
+        if range.cols() == 1 + labels as u32 && range.rows() > 1 {
+            let data = Range::new(CellRef::new(first_row, first_col), CellRef::new(range.end.row, first_col));
+            if let (Some(data), true) = (reference(data), range.end.row + 1 < xl_engine::MAX_ROWS) {
+                new.push(xl_engine::chart::Sparkline { cell: CellRef::new(range.end.row + 1, first_col), kind, data, color: None });
+            }
+        } else {
+            let col = range.end.col + 1;
+            if col >= xl_engine::MAX_COLS {
+                return;
+            }
+            for r in first_row..=range.end.row {
+                if let Some(data) = reference(Range::new(CellRef::new(r, first_col), CellRef::new(r, range.end.col))) {
+                    new.push(xl_engine::chart::Sparkline { cell: CellRef::new(r, col), kind, data, color: None });
+                }
+            }
+        }
+        let count = new.len();
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                // A cell holds one sparkline: new ones replace old.
+                l.sparklines.retain(|old| !new.iter().any(|n| n.cell == old.cell));
+                l.sparklines.extend(new);
+            }
+        });
+        self.message = Some((format!("Added {count} sparkline{}", if count == 1 { "" } else { "s" }), false));
+    }
+
+    pub(crate) fn clear_sparklines(&mut self) {
+        let sel = self.selection();
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                l.sparklines.retain(|sp| !sel.contains(sp.cell));
+            }
+        });
+    }
+}

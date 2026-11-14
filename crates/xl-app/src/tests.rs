@@ -1161,3 +1161,36 @@ fn group_collapse_and_expand_rows(cx: &mut TestAppContext) {
         assert!((3..=5).all(|r| s.row_h(r) > 0.0));
     });
 }
+
+#[gpui::test]
+fn sparklines_per_row(cx: &mut TestAppContext) {
+    use xl_engine::chart::SparkKind;
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, _| {
+        let rows = [["Region", "Q1", "Q2", "Q3"], ["North", "5", "7", "6"], ["South", "3", "-2", "4"]];
+        let mut items = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                items.push((s.at(CellRef::new(20 + r as u32, c as u32)), v.to_string()));
+            }
+        }
+        s.wb.set_inputs(items);
+    });
+    go(&view, cx, "B22");
+    view.update(cx, |s, _| s.insert_sparklines(SparkKind::Column));
+    view.read_with(cx, |s, _| {
+        let sp = &s.wb.layout(s.cur).sparklines;
+        assert_eq!(sp.iter().map(|x| x.cell).collect::<Vec<_>>(), vec![CellRef::parse("E22").unwrap(), CellRef::parse("E23").unwrap()], "one per data row, right of the table");
+        assert_eq!(s.wb.sparkline_values(s.cur, &sp[1]), vec![Some(3.0), Some(-2.0), Some(4.0)], "labels and headers aren't data");
+    });
+    // Deleting a row drops its sparkline; the other follows.
+    go(&view, cx, "A22");
+    cx.simulate_keystrokes("ctrl--");
+    view.read_with(cx, |s, _| {
+        let sp = &s.wb.layout(s.cur).sparklines;
+        assert_eq!(sp.len(), 1);
+        assert_eq!(sp[0].cell, CellRef::parse("E22").unwrap());
+    });
+    cx.simulate_keystrokes("ctrl-z ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).sparklines.is_empty()));
+}

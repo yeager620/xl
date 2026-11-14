@@ -57,6 +57,7 @@ pub struct SheetLayout {
     pub cond: Vec<crate::cond::CondFormat>,
     /// Charts, back to front.
     pub charts: Vec<crate::chart::Chart>,
+    pub sparklines: Vec<crate::chart::Sparkline>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
@@ -919,6 +920,7 @@ impl Workbook {
                 for chart in &mut sd.layout.charts {
                     chart.apply_shift(op, id);
                 }
+                sd.layout.sparklines.retain_mut(|s| s.apply_shift(op, id));
             }
         }
         self.rebuild()
@@ -957,6 +959,9 @@ impl Workbook {
             if let Some(sd) = self.sheets.get_mut(id) {
                 for chart in &mut sd.layout.charts {
                     chart.apply_move(&mv, id);
+                }
+                for s in &mut sd.layout.sparklines {
+                    s.apply_move(&mv, id);
                 }
             }
         }

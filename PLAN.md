@@ -188,6 +188,6 @@ Checklist (tick as each lands with tests):
 - [x] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
 - [ ] Tables (Format as Table, banding, structured refs) + xlsx
 - [ ] Pivot tables (field panel, sum/count/avg/min/max, refresh)
-- [ ] Sparklines (line/column/win-loss) + xlsx
+- [x] Sparklines (line/column/win-loss) + xlsx
 - [ ] Goal Seek; Solver (min/max/target, constraints)
 - [x] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx

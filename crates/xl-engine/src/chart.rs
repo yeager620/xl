@@ -145,3 +145,49 @@ impl Workbook {
         out
     }
 }
+
+/// A tiny chart drawn inside one cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SparkKind {
+    Line,
+    Column,
+    WinLoss,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sparkline {
+    pub cell: CellRef,
+    pub kind: SparkKind,
+    /// The data: a row or column of cells.
+    pub data: Arc<Expr>,
+    pub color: Option<crate::style::Rgb>,
+}
+
+impl Sparkline {
+    /// False if its cell was deleted.
+    pub(crate) fn apply_shift(&mut self, op: Shift, home: SheetId) -> bool {
+        self.data = Arc::new(self.data.shifted(op, home));
+        if op.sheet() != home {
+            return true;
+        }
+        let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
+        let pos = if rows { self.cell.row } else { self.cell.col };
+        match op.map_pos(pos) {
+            Some(p) if rows => self.cell.row = p,
+            Some(p) => self.cell.col = p,
+            None => return false,
+        }
+        true
+    }
+
+    pub(crate) fn apply_move(&mut self, mv: &Move, home: SheetId) {
+        self.data = Arc::new(self.data.moved(mv, home));
+    }
+}
+
+impl Workbook {
+    /// A sparkline's numbers (blanks and text skipped as gaps).
+    pub fn sparkline_values(&self, home: SheetId, s: &Sparkline) -> Vec<Option<f64>> {
+        cells_of(self, home, &s.data).iter().map(|(v, _)| if let Value::Number(n) = v { Some(*n) } else { None }).collect()
+    }
+}

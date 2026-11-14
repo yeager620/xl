@@ -404,6 +404,22 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for chart in &layout.charts {
             write_chart(ws, wb, id, chart).map_err(err)?;
         }
+        for sp in &layout.sparklines {
+            use rust_xlsxwriter::{Sparkline, SparklineType};
+            use xl_engine::chart::SparkKind;
+            let Some((sheet, r)) = sp.data.reference() else { continue };
+            let name = wb.sheet_name(sheet.unwrap_or(id)).to_string();
+            let ty = match sp.kind {
+                SparkKind::Line => SparklineType::Line,
+                SparkKind::Column => SparklineType::Column,
+                SparkKind::WinLoss => SparklineType::WinLose,
+            };
+            let mut line = Sparkline::new().set_range((name.as_str(), r.start.row, r.start.col as u16, r.end.row, r.end.col as u16)).set_type(ty);
+            if let Some(c) = sp.color {
+                line = line.set_sparkline_color(Color::RGB(c));
+            }
+            ws.add_sparkline(sp.cell.row, sp.cell.col as u16, &line).map_err(err)?;
+        }
         // Merges first: the top-left cell's real contents are written below.
         for m in &layout.merges {
             let a = Addr::new(id, m.start);

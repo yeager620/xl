@@ -430,6 +430,13 @@ impl Spreadsheet {
             }
         }
 
+        // Sparklines, under any text.
+        for sp in &layout.sparklines {
+            let (Some(&(r, y, h)), Some(&(c, x, w))) = (rows.iter().find(|row| row.0 == sp.cell.row), cols.iter().find(|col| col.0 == sp.cell.col)) else { continue };
+            let values = self.wb.sparkline_values(self.cur, sp);
+            ops.extend(crate::chart_paint::sparkline_ops(self, sp.kind, &values, sp.color, (x, y, w, h), clip_of(r, c)));
+        }
+
         // Cell text.
         let mut draw_text = |ops: &mut Vec<Op>, cell: CellRef, x: f64, y: f64, w: f64, h: f64, clip: Bounds<Pixels>, overflow: Option<usize>| {
             let v = store.value(cell);

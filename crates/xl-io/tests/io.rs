@@ -492,3 +492,34 @@ fn outline_levels_roundtrip_through_xlsx() {
     assert_eq!(l.col_levels, wb.layout(s).col_levels);
     assert_eq!(l.hidden_rows, wb.layout(s).hidden_rows);
 }
+
+#[test]
+fn sparklines_roundtrip_through_xlsx() {
+    use std::sync::Arc;
+    use xl_engine::chart::{SparkKind, Sparkline};
+    use xl_engine::formula::parse_formula;
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    for c in 0..5 {
+        wb.set_input(Addr::new(s, CellRef::new(0, c)), &format!("{}", c * c)).unwrap();
+        wb.set_input(Addr::new(s, CellRef::new(1, c)), &format!("{}", 3 - c as i32)).unwrap();
+    }
+    let data = |r: u32| Arc::new(parse_formula(&format!("Sheet1!$A${0}:$E${0}", r + 1), wb.sheets()).unwrap());
+    let lines = vec![
+        Sparkline { cell: CellRef::new(0, 5), kind: SparkKind::Line, data: data(0), color: None },
+        Sparkline { cell: CellRef::new(1, 5), kind: SparkKind::WinLoss, data: data(1), color: Some(0x1F5FBF) },
+    ];
+    wb.layout_mut(s).unwrap().sparklines = lines.clone();
+    let p = tmp("spark.xlsx");
+    xl_io::save(&wb, &p, s).unwrap();
+    let back = xl_io::open(&p).unwrap();
+    assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
+    let mut got = back.workbook.layout(back.workbook.sheet_ids()[0]).sparklines.clone();
+    got.sort_by_key(|s| s.cell);
+    assert_eq!(got.len(), 2);
+    for (g, want) in got.iter().zip(&lines) {
+        assert_eq!((g.cell, g.kind, g.color, g.data.reference()), (want.cell, want.kind, want.color, want.data.reference()));
+    }
+    // Cell formulas elsewhere on the sheet are unaffected by reading sparklines.
+    assert_eq!(*back.workbook.value(Addr::new(back.workbook.sheet_ids()[0], CellRef::new(0, 4))), Value::Number(16.0));
+}
