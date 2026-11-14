@@ -270,11 +270,22 @@ struct DepGraph {
     volatile: FxHashSet<Addr>,
 }
 
+/// Every reference an expression depends on, following defined names.
+fn collect_refs(expr: &Expr, names: &Names, at: Addr, depth: u8, out: &mut impl FnMut(SheetId, Range)) {
+    expr.visit_refs(&mut |sheet, r| out(sheet.unwrap_or(at.sheet), r));
+    if depth < 16 {
+        expr.visit_names(&mut |n| {
+            if let Some(def) = names.lookup(n, at.sheet) {
+                collect_refs(&def.expr, names, at, depth + 1, out);
+            }
+        });
+    }
+}
+
 impl DepGraph {
-    fn add(&mut self, at: Addr, expr: &Expr) {
+    fn add(&mut self, at: Addr, expr: &Expr, names: &Names) {
         let mut p = Precedents::default();
-        expr.visit_refs(&mut |sheet, r| {
-            let sheet = sheet.unwrap_or(at.sheet);
+        collect_refs(expr, names, at, 0, &mut |sheet, r| {
             if r.start == r.end {
                 p.cells.push(Addr::new(sheet, r.start));
             } else {
@@ -322,6 +333,56 @@ impl DepGraph {
     }
 }
 
+// -------------------------------------------------------------------- names
+
+/// A defined name: `TaxRate` → `Rates!$B$2`, workbook-wide or local to a sheet.
+#[derive(Clone, Debug)]
+pub struct DefinedName {
+    pub name: String,
+    /// None = workbook scope.
+    pub scope: Option<SheetId>,
+    pub expr: Arc<Expr>,
+}
+
+#[derive(Default, Clone)]
+pub struct Names {
+    list: Vec<DefinedName>,
+}
+
+impl Names {
+    /// Sheet-local names take precedence over workbook-wide ones.
+    pub fn lookup(&self, name: &str, sheet: SheetId) -> Option<&DefinedName> {
+        let matches = |d: &&DefinedName| d.name.eq_ignore_ascii_case(name);
+        self.list.iter().filter(matches).find(|d| d.scope == Some(sheet)).or_else(|| self.list.iter().filter(matches).find(|d| d.scope.is_none()))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &DefinedName> {
+        self.list.iter()
+    }
+}
+
+/// Excel's rules for defined names.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let first = chars.next().ok_or("A name can't be empty")?;
+    if !(first.is_alphabetic() || first == '_' || first == '\\') {
+        return Err("A name must start with a letter or underscore".into());
+    }
+    if let Some(c) = name.chars().find(|c| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '\\'))) {
+        return Err(format!("A name can't contain '{c}'"));
+    }
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = upper.trim_start_matches('R').trim_start_matches(|c: char| c.is_ascii_digit()).trim_start_matches('C').chars().all(|c| c.is_ascii_digit())
+        && (upper.starts_with('R') || upper.starts_with('C'));
+    if crate::address::parse_a1(name).is_some() || r1c1 || upper == "TRUE" || upper == "FALSE" {
+        return Err(format!("'{name}' looks like a cell reference; pick another name"));
+    }
+    if name.len() > 255 {
+        return Err("Names are limited to 255 characters".into());
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------------- workbook
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -355,6 +416,7 @@ pub struct Workbook {
     graph: DepGraph,
     formats: FormatTable,
     styles: StyleTable,
+    names: Names,
 }
 
 enum Parsed {
@@ -682,6 +744,66 @@ impl Workbook {
         self.sheets.get(sheet).into_iter().flat_map(move |s| s.styles.iter().map(move |(c, id)| (*c, &self.styles.list[id.0 as usize])))
     }
 
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
+    /// The formula a name stands for (without '=').
+    pub fn name_formula(&self, d: &DefinedName) -> String {
+        d.expr.to_source(0, 0, &self.sheets)
+    }
+
+    /// Define (or redefine) a name. `formula` is like `Rates!$B$2` or `0.0825`.
+    pub fn define_name(&mut self, name: &str, scope: Option<SheetId>, formula: &str) -> Result<RecalcStats, String> {
+        let name = name.trim();
+        validate_name(name)?;
+        let expr = parse_formula(formula.trim().trim_start_matches('='), &self.sheets).map_err(|e| e.to_string())?;
+        if let Expr::Name(n) = &expr
+            && n.eq_ignore_ascii_case(name)
+        {
+            return Err("A name can't refer to itself".into());
+        }
+        self.names.list.retain(|d| !(d.name.eq_ignore_ascii_case(name) && d.scope == scope));
+        self.names.list.push(DefinedName { name: name.to_string(), scope, expr: Arc::new(expr) });
+        Ok(self.rebuild())
+    }
+
+    /// Load a name from a file without recalculating (formulas come later).
+    pub fn load_name(&mut self, name: &str, scope: Option<SheetId>, formula: &str) -> bool {
+        match parse_formula(formula, &self.sheets) {
+            Ok(expr) if validate_name(name).is_ok() => {
+                self.names.list.retain(|d| !(d.name.eq_ignore_ascii_case(name) && d.scope == scope));
+                self.names.list.push(DefinedName { name: name.to_string(), scope, expr: Arc::new(expr) });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn delete_name(&mut self, name: &str, scope: Option<SheetId>) -> Option<RecalcStats> {
+        let before = self.names.list.len();
+        self.names.list.retain(|d| !(d.name.eq_ignore_ascii_case(name) && d.scope == scope));
+        (self.names.list.len() != before).then(|| self.rebuild())
+    }
+
+    /// Rebuild the dependency graph from scratch and recalculate everything
+    /// (after structural changes: names, inserted/deleted rows, moves).
+    pub fn rebuild(&mut self) -> RecalcStats {
+        self.graph = DepGraph::default();
+        let mut formulas = Vec::new();
+        for &id in &self.sheets.order {
+            for (c, cell) in self.sheets.store(id).unwrap().iter() {
+                if let CellInput::Formula(e) = &cell.input {
+                    formulas.push((Addr::new(id, c), e.clone()));
+                }
+            }
+        }
+        for (a, e) in formulas {
+            self.graph.add(a, &e, &self.names);
+        }
+        self.recalc_all()
+    }
+
     /// Every cell with an explicit number format (including empty ones).
     pub fn formatted_cells(&self, sheet: SheetId) -> impl Iterator<Item = (CellRef, &str)> + '_ {
         self.sheets.get(sheet).into_iter().flat_map(move |s| s.formats.iter().map(move |(c, id)| (*c, self.formats.get(*id).code())))
@@ -723,7 +845,7 @@ impl Workbook {
                 Ok(Expr::Error(e)) => (CellInput::Value(Value::Error(e)), Value::Error(e)),
                 Ok(e) if !e.has_unknown_func() => {
                     let e = Arc::new(e);
-                    self.graph.add(a, &e);
+                    self.graph.add(a, &e, &self.names);
                     (CellInput::Formula(e), cached)
                 }
                 _ => (CellInput::Opaque(src.into()), cached),
@@ -850,7 +972,7 @@ impl Workbook {
             }
             Some(CellInput::Formula(expr)) => {
                 sheet.store.insert(a.cell, Cell { input: CellInput::Formula(expr.clone()), value: old_value });
-                self.graph.add(a, &expr);
+                self.graph.add(a, &expr, &self.names);
                 seeds.push(a);
                 forced.insert(a);
             }
@@ -860,7 +982,7 @@ impl Workbook {
     fn eval_cell(&self, a: Addr) -> Option<Value> {
         let cell = self.sheets.store(a.sheet)?.get(a.cell)?;
         let CellInput::Formula(expr) = &cell.input else { return None };
-        Some(eval(expr, &Ctx { sheets: &self.sheets, sheet: a.sheet }))
+        Some(eval(expr, &Ctx::new(&self.sheets, &self.names, a.sheet, a.cell)))
     }
 
     fn set_value(&mut self, a: Addr, v: Value) -> bool {

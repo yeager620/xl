@@ -81,10 +81,15 @@ fn read_rels(zip: &mut Zip, name: &str) -> Result<HashMap<String, String>, Strin
     Ok(out)
 }
 
-fn read_sheet_list(zip: &mut Zip) -> Result<Vec<(String, String)>, String> {
+/// A `<definedName>`: (name, index of the sheet it's local to, formula).
+type DefinedNameXml = (String, Option<usize>, String);
+
+fn read_sheet_list(zip: &mut Zip) -> Result<(Vec<(String, String)>, Vec<DefinedNameXml>), String> {
     let bytes = read_entry(zip, "xl/workbook.xml")?.ok_or("not an xlsx file (missing xl/workbook.xml)")?;
     let mut r = xml(&bytes);
     let mut out = Vec::new();
+    let mut names = Vec::new();
+    let mut cur: Option<(String, Option<usize>, String)> = None;
     loop {
         match r.read_event().map_err(|e| e.to_string())? {
             Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == "sheet" => {
@@ -92,11 +97,27 @@ fn read_sheet_list(zip: &mut Zip) -> Result<Vec<(String, String)>, String> {
                     out.push((name, rid));
                 }
             }
+            Event::Start(e) if local(e.name().as_ref()) == "definedName" => {
+                if let Some(name) = attr(&e, "name") {
+                    cur = Some((name, attr(&e, "localSheetId").and_then(|v| v.parse().ok()), String::new()));
+                }
+            }
+            Event::Text(t) => {
+                if let Some(c) = cur.as_mut() {
+                    c.2.push_str(&t.xml_content(XmlVersion::Implicit1_0));
+                }
+            }
+            Event::GeneralRef(g) => {
+                if let Some(c) = cur.as_mut() {
+                    push_entity(&mut c.2, &g);
+                }
+            }
+            Event::End(e) if local(e.name().as_ref()) == "definedName" => names.extend(cur.take()),
             Event::Eof => break,
             _ => {}
         }
     }
-    Ok(out)
+    Ok((out, names))
 }
 
 fn read_shared_strings(zip: &mut Zip) -> Result<Vec<Arc<str>>, String> {
@@ -524,7 +545,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| format!("not an xlsx file: {e}"))?;
     let rels = read_rels(&mut zip, "xl/_rels/workbook.xml.rels")?;
-    let list = read_sheet_list(&mut zip)?;
+    let (list, defined_names) = read_sheet_list(&mut zip)?;
     let shared = read_shared_strings(&mut zip)?;
     let styles = read_styles(&mut zip)?;
 
@@ -544,6 +565,17 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     }
     if ids.is_empty() {
         wb.add_sheet(None)?;
+    }
+    // Names before cells, so formulas that use them get the right dependencies.
+    for (name, local, formula) in defined_names {
+        // Built-ins (print areas, filter ranges) aren't user names.
+        if name.starts_with("_xlnm.") {
+            continue;
+        }
+        let scope = local.and_then(|i| ids.get(i).copied());
+        if !wb.load_name(&name, scope, formula.trim_start_matches('=')) {
+            warnings.push(format!("Name '{name}' couldn't be read and was dropped"));
+        }
     }
     let mut cells = 0;
     for ((name, rid), id) in list.iter().zip(&ids) {

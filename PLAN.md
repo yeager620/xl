@@ -175,7 +175,7 @@ Written but not yet run here: AppImage (needs appimagetool download), Flatpak (n
 ## M5 — Excel feature parity (started 2026-11-13)
 
 Checklist (tick as each lands with tests):
-- [ ] Engine groundwork: formula's own cell in eval context; reference-returning functions (OFFSET/INDIRECT/INDEX) and names resolve as ranges
+- [x] Engine groundwork: formula's own cell in eval context; reference-returning functions (OFFSET/INDIRECT/INDEX) and names resolve as ranges
 - [ ] ~49 high-use functions + one-line descriptions for every function (agent, worktree)
 - [ ] Insert/delete rows & columns with formula adjustment (+ formats, styles, widths, later features), undo/redo, context menu, Ctrl+Shift+= / Ctrl+-
 - [ ] Row heights (drag + autofit), hidden rows/cols, merged cells, wrap text, vertical alignment, font size/family; freeze panes (paned painter); xlsx read/write for all

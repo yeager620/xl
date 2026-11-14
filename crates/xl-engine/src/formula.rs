@@ -116,6 +116,8 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(Func, Vec<Expr>),
     UnknownFunc(Arc<str>, Vec<Expr>),
+    /// A defined name (`TaxRate`), resolved when evaluated.
+    Name(Arc<str>),
 }
 
 impl Expr {
@@ -141,7 +143,21 @@ impl Expr {
                 b.visit_refs(f);
             }
             Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_refs(f)),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {}
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => {}
+        }
+    }
+
+    /// Visit every defined name used in the expression.
+    pub fn visit_names(&self, f: &mut impl FnMut(&str)) {
+        match self {
+            Expr::Name(n) => f(n),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_names(f),
+            Expr::Binary(_, a, b) => {
+                a.visit_names(f);
+                b.visit_names(f);
+            }
+            Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_names(f)),
+            _ => {}
         }
     }
 
@@ -546,7 +562,7 @@ impl Parser<'_> {
         match id.to_ascii_uppercase().as_str() {
             "TRUE" => Ok(Expr::Bool(true)),
             "FALSE" => Ok(Expr::Bool(false)),
-            _ => Ok(Expr::Error(ErrorKind::Name)),
+            _ => Ok(Expr::Name(id.into())),
         }
     }
 }
@@ -621,6 +637,7 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut Stri
         }
         Expr::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
         Expr::Error(err) => out.push_str(err.as_str()),
+        Expr::Name(n) => out.push_str(n),
         Expr::Ref(r) => {
             let mark = out.len();
             match shift_ref(r, dr, dc) {

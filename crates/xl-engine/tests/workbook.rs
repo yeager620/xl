@@ -335,6 +335,74 @@ fn range_dependencies_across_index_blocks() {
     assert_eq!(t.v("B1"), n(8.0));
 }
 
+#[test]
+fn named_ranges() {
+    let mut wb = Workbook::new();
+    let s1 = wb.sheet_ids()[0];
+    let rates = wb.add_sheet(Some("Rates")).unwrap();
+    wb.set_input(a(rates, "B2"), "8.25%").unwrap();
+    wb.set_input(a(s1, "A1"), "100").unwrap();
+    wb.set_input(a(s1, "A2"), "200").unwrap();
+    wb.define_name("TaxRate", None, "Rates!$B$2").unwrap();
+    wb.define_name("Amounts", None, "Sheet1!$A$1:$A$2").unwrap();
+    wb.set_input(a(s1, "B1"), "=SUM(Amounts)*TaxRate").unwrap();
+    assert_eq!(*wb.value(a(s1, "B1")), n(24.75));
+    // Changing the named cell recalculates dependents through the name.
+    wb.set_input(a(rates, "B2"), "10%").unwrap();
+    assert_eq!(*wb.value(a(s1, "B1")), n(30.0));
+    wb.set_input(a(s1, "A2"), "300").unwrap();
+    assert_eq!(*wb.value(a(s1, "B1")), n(40.0));
+    // Constants, undefined names, redefinition, local scope.
+    wb.define_name("Fee", None, "2.5").unwrap();
+    wb.set_input(a(s1, "B2"), "=Fee*2").unwrap();
+    assert_eq!(*wb.value(a(s1, "B2")), n(5.0));
+    wb.set_input(a(s1, "B3"), "=Missing+1").unwrap();
+    assert_eq!(*wb.value(a(s1, "B3")), Value::Error(ErrorKind::Name));
+    wb.define_name("Missing", None, "41").unwrap();
+    assert_eq!(*wb.value(a(s1, "B3")), n(42.0), "defining a name fixes formulas that used it");
+    wb.define_name("Fee", Some(s1), "10").unwrap();
+    assert_eq!(*wb.value(a(s1, "B2")), n(20.0), "sheet-local names win");
+    assert!(wb.define_name("A1", None, "1").is_err());
+    assert!(wb.define_name("R2C3", None, "1").is_err());
+    assert!(wb.define_name("Bad Name", None, "1").is_err());
+    assert_eq!(wb.input_text(a(s1, "B1")), "=SUM(Amounts)*TaxRate");
+    wb.delete_name("TaxRate", None).unwrap();
+    assert_eq!(*wb.value(a(s1, "B1")), Value::Error(ErrorKind::Name));
+}
+
+#[test]
+fn reference_functions_and_intersection() {
+    let mut t = T::new();
+    for (i, v) in [10, 20, 30, 40].iter().enumerate() {
+        t.set(&format!("A{}", i + 1), &v.to_string());
+        t.set(&format!("B{}", i + 1), &(v * 2).to_string());
+    }
+    t.set("D1", "=SUM(OFFSET(A1,1,0,2,1))");
+    t.set("D2", "=OFFSET(A1,3,1)");
+    t.set("D3", "=SUM(INDIRECT(\"A1:A\"&2))");
+    t.set("D4", "=INDIRECT(\"R2C2\",FALSE)");
+    t.set("D5", "=SUM(INDEX(A1:B4,0,2))");
+    t.set("D6", "=ROW()*10+COLUMN()");
+    t.set("D7", "=ROWS(A1:B4)*COLUMNS(A1:B4)");
+    t.set("D8", "=ROW(B3)");
+    t.set("C3", "=A1:A4*2");
+    t.set("D9", "=OFFSET(A1,-1,0)");
+    assert_eq!(t.v("D1"), n(50.0));
+    assert_eq!(t.v("D2"), n(80.0));
+    assert_eq!(t.v("D3"), n(30.0));
+    assert_eq!(t.v("D4"), n(40.0));
+    assert_eq!(t.v("D5"), n(200.0));
+    assert_eq!(t.v("D6"), n(64.0));
+    assert_eq!(t.v("D7"), n(8.0));
+    assert_eq!(t.v("D8"), n(3.0));
+    assert_eq!(t.v("C3"), n(60.0), "implicit intersection picks the formula's row");
+    assert_eq!(t.v("D9"), Value::Error(ErrorKind::Ref));
+    // OFFSET/INDIRECT are volatile: they see edits to cells they don't name statically.
+    t.set("A3", "100");
+    assert_eq!(t.v("D1"), n(120.0));
+    assert_eq!(t.v("D3"), n(30.0));
+}
+
 /// Tiny deterministic PRNG so the property test needs no extra deps.
 struct Lcg(u64);
 impl Lcg {

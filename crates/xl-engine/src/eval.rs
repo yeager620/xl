@@ -12,7 +12,7 @@ use crate::formula::{BinOp, Expr};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellStore};
 use crate::value::{ErrorKind, EvalResult, Value, parse_number};
-use crate::workbook::Sheets;
+use crate::workbook::{Names, Sheets};
 
 macro_rules! funcs {
     ($($variant:ident => $name:literal),* $(,)?) => {
@@ -54,11 +54,14 @@ funcs! {
     Hour => "HOUR", Minute => "MINUTE", Second => "SECOND", Weekday => "WEEKDAY",
     EDate => "EDATE", EOMonth => "EOMONTH",
     Now => "NOW", Today => "TODAY", Rand => "RAND", RandBetween => "RANDBETWEEN",
+    Offset => "OFFSET", Indirect => "INDIRECT", Row => "ROW", Column => "COLUMN", Rows => "ROWS", Columns => "COLUMNS",
 }
 
 impl Func {
     pub fn is_volatile(self) -> bool {
-        matches!(self, Func::Now | Func::Today | Func::Rand | Func::RandBetween)
+        // OFFSET and INDIRECT compute their references at run time, so their
+        // dependencies can't be known statically: recalc them every time (as Excel does).
+        matches!(self, Func::Now | Func::Today | Func::Rand | Func::RandBetween | Func::Offset | Func::Indirect)
     }
 
     /// Short signature shown in the UI.
@@ -102,6 +105,10 @@ impl Func {
             Year | Month | Day | Hour | Minute | Second => "(serial_number)",
             Weekday => "(serial_number, [return_type])",
             EDate | EOMonth => "(start_date, months)",
+            Offset => "(reference, rows, cols, [height], [width])",
+            Indirect => "(ref_text, [a1])",
+            Row | Column => "([reference])",
+            Rows | Columns => "(array)",
         }
     }
 }
@@ -113,24 +120,132 @@ pub struct RangeRef {
     pub range: Range,
 }
 
-/// Evaluation context: the workbook's sheets and the sheet holding the formula.
+/// Evaluation context: the workbook's sheets and names, and the cell holding
+/// the formula (for ROW(), COLUMN() and implicit intersection).
 pub struct Ctx<'a> {
     pub sheets: &'a Sheets,
+    pub names: &'a Names,
     pub sheet: SheetId,
+    pub cell: CellRef,
+    /// Guards against names defined in terms of themselves.
+    depth: std::cell::Cell<u8>,
 }
+
+const MAX_NAME_DEPTH: u8 = 16;
 
 static EMPTY: Value = Value::Empty;
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    pub fn new(sheets: &'a Sheets, names: &'a Names, sheet: SheetId, cell: CellRef) -> Self {
+        Self { sheets, names, sheet, cell, depth: std::cell::Cell::new(0) }
+    }
+
     fn store(&self, sheet: SheetId) -> Option<&CellStore> {
         self.sheets.store(sheet)
     }
 
-    /// Resolve a reference expression. None = not a reference; Err = sheet gone.
+    /// Run `f` one level deeper into name definitions (None past the limit).
+    fn nested<T>(&self, f: impl FnOnce(&Self) -> T) -> Option<T> {
+        let d = self.depth.get();
+        if d >= MAX_NAME_DEPTH {
+            return None;
+        }
+        self.depth.set(d + 1);
+        let out = f(self);
+        self.depth.set(d);
+        Some(out)
+    }
+
+    /// Resolve an expression that denotes a reference: a cell or range, a
+    /// defined name for one, or OFFSET / INDIRECT / INDEX.
+    /// None = not a reference; Err = a reference that's invalid (#REF! etc.).
     fn resolve(&self, e: &Expr) -> Option<EvalResult<RangeRef>> {
-        let (sheet, range) = e.reference()?;
-        let sheet = sheet.unwrap_or(self.sheet);
-        Some(if self.store(sheet).is_some() { Ok(RangeRef { sheet, range }) } else { Err(ErrorKind::Ref) })
+        match e {
+            Expr::Ref(_) | Expr::Range(..) => {
+                let (sheet, range) = e.reference()?;
+                let sheet = sheet.unwrap_or(self.sheet);
+                Some(if self.store(sheet).is_some() { Ok(RangeRef { sheet, range }) } else { Err(ErrorKind::Ref) })
+            }
+            Expr::Paren(x) => self.resolve(x),
+            Expr::Name(n) => {
+                let def = self.names.lookup(n, self.sheet)?;
+                self.nested(|cx| cx.resolve(&def.expr)).unwrap_or(Some(Err(ErrorKind::Name)))
+            }
+            Expr::Call(Func::Offset, args) => Some(self.offset(args)),
+            Expr::Call(Func::Indirect, args) => Some(self.indirect(args)),
+            Expr::Call(Func::Index, args) => Some(self.index_ref(args)),
+            _ => None,
+        }
+    }
+
+    /// A range used where one value is expected: a single cell gives its
+    /// value; otherwise implicit intersection with the formula's row/column.
+    fn scalar_of(&self, rr: RangeRef) -> Value {
+        let r = rr.range;
+        if r.start == r.end {
+            return self.value(rr.sheet, r.start).clone();
+        }
+        if r.cols() == 1 && (r.start.row..=r.end.row).contains(&self.cell.row) {
+            return self.value(rr.sheet, CellRef::new(self.cell.row, r.start.col)).clone();
+        }
+        if r.rows() == 1 && (r.start.col..=r.end.col).contains(&self.cell.col) {
+            return self.value(rr.sheet, CellRef::new(r.start.row, self.cell.col)).clone();
+        }
+        Value::Error(ErrorKind::Value)
+    }
+
+    /// OFFSET(reference, rows, cols, [height], [width])
+    fn offset(&self, args: &[Expr]) -> EvalResult<RangeRef> {
+        arg_count(args, 3, 5)?;
+        let base = self.resolve(&args[0]).unwrap_or(Err(ErrorKind::Value))?;
+        let dr = num_arg(args, 1, self)?.trunc() as i64;
+        let dc = num_arg(args, 2, self)?.trunc() as i64;
+        let h = opt_num(args, 3, self, base.range.rows() as f64)?.trunc() as i64;
+        let w = opt_num(args, 4, self, base.range.cols() as f64)?.trunc() as i64;
+        if h < 1 || w < 1 {
+            return Err(ErrorKind::Ref);
+        }
+        let start = base.range.start.offset(dr, dc).ok_or(ErrorKind::Ref)?;
+        let end = start.offset(h - 1, w - 1).ok_or(ErrorKind::Ref)?;
+        Ok(RangeRef { sheet: base.sheet, range: Range::new(start, end) })
+    }
+
+    /// INDIRECT(ref_text, [a1]): A1 text (with optional sheet) or R1C1 text.
+    fn indirect(&self, args: &[Expr]) -> EvalResult<RangeRef> {
+        arg_count(args, 1, 2)?;
+        let text = text_arg(args, 0, self)?;
+        let a1 = match args.get(1) {
+            Some(e) => eval(e, self).to_bool()?,
+            None => true,
+        };
+        let expr = if a1 {
+            crate::formula::parse_formula(text.trim(), self.sheets).map_err(|_| ErrorKind::Ref)?
+        } else {
+            r1c1_to_expr(text.trim(), self.sheets).ok_or(ErrorKind::Ref)?
+        };
+        self.nested(|cx| cx.resolve(&expr)).flatten().unwrap_or(Err(ErrorKind::Ref))
+    }
+
+    /// INDEX(array, row_num, [column_num]) as a reference: 0 selects a whole
+    /// row or column of the array.
+    fn index_ref(&self, args: &[Expr]) -> EvalResult<RangeRef> {
+        arg_count(args, 2, 3)?;
+        let rr = self.resolve(&args[0]).unwrap_or(Err(ErrorKind::Value))?;
+        let r = rr.range;
+        let a = num_arg(args, 1, self)?.trunc() as i64;
+        let b = opt_num(args, 2, self, 0.0)?.trunc() as i64;
+        // A single row/column array takes the one index as its position.
+        let (row, col) = match (r.rows(), r.cols(), args.len()) {
+            (1, _, 2) => (1, a),
+            (_, 1, 2) => (a, 1),
+            _ => (a, b),
+        };
+        if row < 0 || col < 0 || row > r.rows() as i64 || col > r.cols() as i64 {
+            return Err(ErrorKind::Ref);
+        }
+        let (r0, r1) = if row == 0 { (r.start.row, r.end.row) } else { let x = r.start.row + row as u32 - 1; (x, x) };
+        let (c0, c1) = if col == 0 { (r.start.col, r.end.col) } else { let x = r.start.col + col as u32 - 1; (x, x) };
+        Ok(RangeRef { sheet: rr.sheet, range: Range::new(CellRef::new(r0, c0), CellRef::new(r1, c1)) })
     }
 
     fn value(&self, sheet: SheetId, c: CellRef) -> &Value {
@@ -151,6 +266,29 @@ impl Ctx<'_> {
     }
 }
 
+/// Parse absolute R1C1 text (`R2C3`, `R2C3:R4C5`, optional `Sheet!` prefix).
+fn r1c1_to_expr(text: &str, sheets: &Sheets) -> Option<Expr> {
+    use crate::formula::{RangeKind, RefAddr};
+    let (sheet, body) = match text.rsplit_once('!') {
+        Some((s, b)) => {
+            let name = s.trim_matches('\'');
+            (Some(crate::formula::SheetNames::sheet_id(sheets, name)?), b)
+        }
+        None => (None, text),
+    };
+    let one = |t: &str| -> Option<RefAddr> {
+        let t = t.to_ascii_uppercase();
+        let rest = t.strip_prefix('R')?;
+        let (r, c) = rest.split_once('C')?;
+        let (r, c): (u32, u32) = (r.parse().ok()?, c.parse().ok()?);
+        (r >= 1 && c >= 1).then(|| RefAddr { sheet, cell: CellRef::new(r - 1, c - 1), col_abs: true, row_abs: true })
+    };
+    Some(match body.split_once(':') {
+        Some((a, b)) => Expr::Range(one(a)?, one(b)?, RangeKind::Cells),
+        None => Expr::Ref(one(body)?),
+    })
+}
+
 /// Evaluate an expression in scalar context.
 pub fn eval(e: &Expr, cx: &Ctx) -> Value {
     match e {
@@ -158,11 +296,19 @@ pub fn eval(e: &Expr, cx: &Ctx) -> Value {
         Expr::Text(t) => Value::Text(t.clone()),
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Error(err) => Value::Error(*err),
-        Expr::Ref(_) | Expr::Range(..) => match cx.resolve(e).unwrap() {
-            Err(err) => Value::Error(err),
-            // Multi-cell ranges in scalar context need implicit intersection (not yet).
-            Ok(rr) if rr.range.start == rr.range.end => cx.value(rr.sheet, rr.range.start).clone(),
-            Ok(_) => Value::Error(ErrorKind::Value),
+        Expr::Ref(_) | Expr::Range(..) | Expr::Call(Func::Offset | Func::Indirect | Func::Index, _) => match cx.resolve(e) {
+            Some(Ok(rr)) => cx.scalar_of(rr),
+            Some(Err(err)) => Value::Error(err),
+            None => Value::Error(ErrorKind::Value),
+        },
+        Expr::Name(n) => match cx.resolve(e) {
+            Some(Ok(rr)) => cx.scalar_of(rr),
+            Some(Err(err)) => Value::Error(err),
+            // A name for a constant or formula rather than a range.
+            None => match cx.names.lookup(n, cx.sheet) {
+                Some(def) => cx.nested(|cx| eval(&def.expr, cx)).unwrap_or(Value::Error(ErrorKind::Name)),
+                None => Value::Error(ErrorKind::Name),
+            },
         },
         Expr::Paren(x) | Expr::Plus(x) => eval(x, cx),
         Expr::Neg(x) => match eval(x, cx).to_number() {
@@ -914,21 +1060,24 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             let base = if vertical { r.start.row } else { r.start.col };
             Value::Number((i - base + 1) as f64)
         }
-        Index => {
-            arg_count(args, 2, 3)?;
-            let rr = range_arg(args, 0, cx)?;
-            let r = rr.range;
-            let a = num_arg(args, 1, cx)?.trunc() as i64;
-            let b = opt_num(args, 2, cx, 0.0)?.trunc() as i64;
-            let (row, col) = match (r.rows(), r.cols(), args.len()) {
-                (1, _, 2) => (1, a),
-                (_, 1, 2) => (a, 1),
-                _ => (a, b),
+        Index => cx.scalar_of(cx.index_ref(args)?),
+        Offset | Indirect => {
+            // Reached only via call(); eval() resolves these as references.
+            let rr = if f == Offset { cx.offset(args)? } else { cx.indirect(args)? };
+            cx.scalar_of(rr)
+        }
+        Row | Column => {
+            arg_count(args, 0, 1)?;
+            let c = match args.first() {
+                Some(a) => cx.resolve(a).unwrap_or(Err(ErrorKind::Value))?.range.start,
+                None => cx.cell,
             };
-            if row < 1 || col < 1 || row > r.rows() as i64 || col > r.cols() as i64 {
-                return Err(ErrorKind::Ref);
-            }
-            cx.value(rr.sheet, CellRef::new(r.start.row + row as u32 - 1, r.start.col + col as u32 - 1)).clone()
+            Value::Number(if f == Row { c.row } else { c.col } as f64 + 1.0)
+        }
+        Rows | Columns => {
+            arg_count(args, 1, 1)?;
+            let r = range_arg(args, 0, cx)?.range;
+            Value::Number(if f == Rows { r.rows() } else { r.cols() } as f64)
         }
         Date => {
             arg_count(args, 3, 3)?;

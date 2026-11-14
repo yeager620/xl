@@ -193,6 +193,13 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
             }
         }
     }
+    for d in wb.names().iter() {
+        let name = match d.scope {
+            Some(s) => format!("{}!{}", xl_engine::quote_sheet_name(wb.sheet_name(s)), d.name),
+            None => d.name.clone(),
+        };
+        book.define_name(name, &format!("={}", prefix_future_functions(&wb.name_formula(d)))).map_err(err)?;
+    }
     book.save(path).map_err(err)
 }
 

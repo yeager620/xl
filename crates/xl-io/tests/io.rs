@@ -287,3 +287,24 @@ fn reads_theme_colors_and_excel_styles() {
     assert!(wb.style(a(s, "A1")).color.is_some());
     assert!(wb.style(a(s, "D1")).is_default(), "default font color (dk1) stays automatic");
 }
+
+#[test]
+fn defined_names_roundtrip() {
+    let mut wb = Workbook::new();
+    let s = wb.sheet_ids()[0];
+    let other = wb.add_sheet(Some("Rates")).unwrap();
+    wb.set_input(a(other, "A1"), "0.25").unwrap();
+    wb.define_name("Rate", None, "Rates!$A$1").unwrap();
+    wb.define_name("Local", Some(s), "Sheet1!$B$1:$B$3").unwrap();
+    wb.set_input(a(s, "B1"), "4").unwrap();
+    wb.set_input(a(s, "C1"), "=SUM(Local)*Rate").unwrap();
+    let path = tmp("names.xlsx");
+    xl_io::save(&wb, &path, s).unwrap();
+    let back = xl_io::open(&path).unwrap();
+    assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+    let wb2 = back.workbook;
+    let s2 = wb2.sheet_ids()[0];
+    assert_eq!(*wb2.value(a(s2, "C1")), Value::Number(1.0));
+    let names: Vec<(String, bool)> = wb2.names().iter().map(|d| (d.name.clone(), d.scope.is_some())).collect();
+    assert!(names.contains(&("Rate".into(), false)) && names.contains(&("Local".into(), true)), "{names:?}");
+}
