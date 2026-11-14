@@ -2,3 +2,4 @@
 /vendor
 packaging/flathub/cargo-sources.json
 /.flatpak-builder
+/.claude/
