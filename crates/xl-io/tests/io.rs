@@ -359,7 +359,7 @@ fn reports_parts_it_cannot_keep() {
     ws.add_data_validation(0, 2, 5, 2, &DataValidation::new().allow_whole_number(rust_xlsxwriter::DataValidationRule::Between(1, 10))).unwrap();
     book.save(&p).unwrap();
     let loaded = xl_io::open(&p).unwrap();
-    for part in ["comments", "data validation"] {
+    for part in ["data validation"] {
         assert!(loaded.unsupported.contains(&part), "{part} missing from {:?}", loaded.unsupported);
     }
     let charts = &loaded.workbook.layout(loaded.workbook.sheet_ids()[0]).charts;

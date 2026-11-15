@@ -542,6 +542,16 @@ impl Spreadsheet {
             }
         }
 
+        // Notes: a small triangle in the cell's top-right corner.
+        for (cell, _) in layout.notes.iter() {
+            let (Some(&(r, y, _)), Some(&(c, x, w))) = (rows.iter().find(|row| row.0 == cell.row), cols.iter().find(|col| col.0 == cell.col)) else { continue };
+            let right = merge_at(*cell).map_or(x + w, |m| x_of(m.end.col) + self.col_w(m.end.col));
+            for i in 0..6 {
+                let len = 6.0 - i as f64;
+                ops.push(Op::Quad(fill(b(right - 1.0 - len, y + i as f64, len, 1.0), t.error), clip_of(r, c)));
+            }
+        }
+
         // Filter dropdown buttons in the header row.
         if let Some(f) = &layout.filter
             && let Some(&(r, y, h)) = rows.iter().find(|row| row.0 == f.range.start.row)

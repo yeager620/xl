@@ -1079,6 +1079,124 @@ fn new_sheet(ctx: &mut SheetCtx) -> String {
 
 // ------------------------------------------------------------ package-level parts
 
+const REL_COMMENTS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const REL_VML: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing";
+const CT_COMMENTS: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml";
+const CT_VML: &str = "application/vnd.openxmlformats-officedocument.vmlDrawing";
+
+/// A comments part for a sheet's notes.
+fn comments_xml(notes: &BTreeMap<CellRef, xl_engine::Note>) -> String {
+    let mut authors: Vec<&str> = Vec::new();
+    for n in notes.values() {
+        if !authors.contains(&n.author.as_str()) {
+            authors.push(&n.author);
+        }
+    }
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<comments xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><authors>");
+    for a in &authors {
+        out.push_str(&format!("<author>{}</author>", esc(a)));
+    }
+    out.push_str("</authors><commentList>");
+    for (cell, n) in notes {
+        let id = authors.iter().position(|a| *a == n.author).unwrap_or(0);
+        out.push_str(&format!("<comment ref=\"{cell}\" authorId=\"{id}\"><text><r><rPr><sz val=\"9\"/><color indexed=\"81\"/><rFont val=\"Tahoma\"/><family val=\"2\"/></rPr><t xml:space=\"preserve\">{}</t></r></text></comment>", esc(&n.text)));
+    }
+    out.push_str("</commentList></comments>");
+    out
+}
+
+/// The legacy drawing (VML) Excel uses for note boxes.
+fn notes_vml(notes: &BTreeMap<CellRef, xl_engine::Note>, idmap: u32) -> String {
+    let mut out = format!(
+        "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"{idmap}\"/></o:shapelayout><v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>"
+    );
+    for (i, cell) in notes.keys().enumerate() {
+        let (r, c) = (cell.row, cell.col);
+        out.push_str(&format!(
+            "<v:shape id=\"_x0000_s{}\" type=\"#_x0000_t202\" style=\"position:absolute;margin-left:59.25pt;margin-top:1.5pt;width:108pt;height:59.25pt;z-index:{};visibility:hidden\" fillcolor=\"#ffffe1\" o:insetmode=\"auto\"><v:fill color2=\"#ffffe1\"/><v:shadow on=\"t\" color=\"black\" obscured=\"t\"/><v:path o:connecttype=\"none\"/><v:textbox style=\"mso-direction-alt:auto\"><div style=\"text-align:left\"></div></v:textbox><x:ClientData ObjectType=\"Note\"><x:MoveWithCells/><x:SizeWithCells/><x:Anchor>{}, 15, {}, 2, {}, 15, {}, 16</x:Anchor><x:AutoFill>False</x:AutoFill><x:Row>{r}</x:Row><x:Column>{c}</x:Column></x:ClientData></v:shape>",
+            idmap * 1024 + 1 + i as u32,
+            i + 1,
+            c + 1,
+            r.saturating_sub(1),
+            c + 3,
+            r + 3
+        ));
+    }
+    out.push_str("</xml>");
+    out
+}
+
+/// Put a sheet's notes into the package: rewrite its comments and note
+/// drawing, or create them (with relationships and a `<legacyDrawing>`
+/// link in the sheet). Returns the sheet XML if it had to change.
+#[allow(clippy::too_many_arguments)]
+fn write_notes(
+    wb: &Workbook,
+    pkg: &Package,
+    sheet: SheetId,
+    sheet_part: &str,
+    sheet_doc: Vec<u8>,
+    taken: &mut BTreeSet<String>,
+    next_idmap: &mut u32,
+    replaced: &mut HashMap<String, Vec<u8>>,
+    added_parts: &mut Vec<(String, Vec<u8>)>,
+    ct_adds: &mut Vec<(String, &'static str)>,
+) -> Result<Option<Vec<u8>>, String> {
+    let notes = &wb.layout(sheet).notes;
+    let rels_path = crate::xlsx_charts::rels_of(sheet_part);
+    let rels = match pkg.zip() {
+        Ok(mut z) => read_rels(&mut z, &rels_path).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    };
+    let comments = rels.values().find(|t| t.rsplit('/').next().is_some_and(|f| f.starts_with("comments"))).map(|t| crate::xlsx_charts::resolve(sheet_part, t));
+    let vml = rels.values().find(|t| t.ends_with(".vml")).map(|t| crate::xlsx_charts::resolve(sheet_part, t));
+    if let (Some(c), Some(v)) = (&comments, &vml) {
+        let idmap = pkg.part(v).and_then(|b| String::from_utf8_lossy(&b).split("data=\"").nth(1).and_then(|s| s.split(['"', ',']).next()).and_then(|n| n.parse().ok())).unwrap_or(*next_idmap);
+        replaced.insert(c.clone(), comments_xml(notes).into_bytes());
+        replaced.insert(v.clone(), notes_vml(notes, idmap).into_bytes());
+        return Ok(None);
+    }
+    if notes.is_empty() {
+        return Ok(None);
+    }
+    let mut n = 1;
+    while taken.contains(&format!("xl/comments{n}.xml")) || taken.contains(&format!("xl/drawings/vmlDrawing{n}.vml")) {
+        n += 1;
+    }
+    let (cpart, vpart) = (format!("xl/comments{n}.xml"), format!("xl/drawings/vmlDrawing{n}.vml"));
+    taken.insert(cpart.clone());
+    taken.insert(vpart.clone());
+    added_parts.push((cpart.clone(), comments_xml(notes).into_bytes()));
+    added_parts.push((vpart.clone(), notes_vml(notes, *next_idmap).into_bytes()));
+    *next_idmap += 1;
+    ct_adds.push((format!("/{cpart}"), CT_COMMENTS));
+    ct_adds.push((format!("/{vpart}"), CT_VML));
+    // Relationships from the sheet (targets relative to xl/worksheets/).
+    let adds = vec![("rIdXlNotes".to_string(), REL_COMMENTS, format!("../comments{n}.xml")), ("rIdXlVml".to_string(), REL_VML, format!("../drawings/vmlDrawing{n}.vml"))];
+    match pkg.part(&rels_path).or_else(|| replaced.get(&rels_path).cloned()) {
+        Some(doc) => {
+            replaced.insert(rels_path.clone(), patch_rels(&doc, &adds, &[])?);
+        }
+        None => {
+            let body: String = adds.iter().map(|(id, ty, t)| format!("<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{t}\"/>")).collect();
+            added_parts.push((rels_path.clone(), format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes()));
+        }
+    }
+    // Link the note drawing from the sheet; r:id needs the relationships namespace.
+    let mut doc = sheet_doc;
+    let text = String::from_utf8_lossy(&doc).to_string();
+    let (open_end, _, _, _) = children(&doc)?;
+    let root_start = text[..open_end].rfind("<worksheet").or_else(|| text[..open_end].rfind(":worksheet").and_then(|i| text[..i].rfind('<'))).unwrap_or(0);
+    if !text[root_start..open_end].contains("xmlns:r=") {
+        let tag = &text[root_start..open_end];
+        let fixed = set_attrs(tag, &[("xmlns:r", Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships".into()))]);
+        doc = apply_edits(&doc, vec![(root_start, open_end, fixed)]);
+    }
+    let mut rep: HashMap<&str, Option<String>> = HashMap::new();
+    rep.insert("legacyDrawing", Some("<legacyDrawing r:id=\"rIdXlVml\"/>".into()));
+    Ok(Some(splice(&doc, SHEET_ORDER, rep)?))
+}
+
 const REL_WORKSHEET: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 const REL_SST: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
 const CT_WORKSHEET: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
@@ -1294,8 +1412,9 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     // Sheets new in xl.
     let existing: BTreeSet<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
     let mut new_sheets: Vec<(SheetId, String)> = Vec::new();
+    let mut new_sheet_parts: Vec<(SheetId, String)> = Vec::new();
     let mut rel_adds: Vec<(String, &str, String)> = Vec::new();
-    let mut ct_adds: Vec<(String, &str)> = Vec::new();
+    let mut ct_adds: Vec<(String, &'static str)> = Vec::new();
     let mut n = 1;
     for &id in wb.sheet_ids() {
         if pkg.sheets.iter().any(|s| s.id == id) {
@@ -1307,6 +1426,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         let part = format!("xl/worksheets/sheet{n}.xml");
         let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new() };
         added_parts.push((part.clone(), new_sheet(&mut ctx).into_bytes()));
+        new_sheet_parts.push((id, part.clone()));
         let rid = format!("rIdXl{n}");
         rel_adds.push((rid.clone(), REL_WORKSHEET, format!("worksheets/sheet{n}.xml")));
         ct_adds.push((format!("/{part}"), CT_WORKSHEET));
@@ -1314,6 +1434,39 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         any_data = true;
     }
     // Shared strings: append, or create the part.
+    // Notes that changed (or appeared on new sheets).
+    let mut taken: BTreeSet<String> = existing.clone();
+    taken.extend(added_parts.iter().map(|(p, _)| p.clone()));
+    let mut next_idmap = existing
+        .iter()
+        .filter(|n| n.ends_with(".vml"))
+        .filter_map(|n| pkg.part(n))
+        .filter_map(|b| String::from_utf8_lossy(&b).split("data=\"").nth(1).and_then(|s| s.split(['"', ',']).next()).and_then(|n| n.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let note_sheets: Vec<(SheetId, String)> = pkg
+        .sheets
+        .iter()
+        .filter(|s| wb.sheet_ids().contains(&s.id) && sheet_digest(wb, s.id).notes != s.digest.notes)
+        .map(|s| (s.id, s.part.clone()))
+        .chain(new_sheet_parts.iter().filter(|(id, _)| !wb.layout(*id).notes.is_empty()).cloned())
+        .collect();
+    for (id, sheet_part) in note_sheets {
+        let doc = replaced
+            .get(&sheet_part)
+            .cloned()
+            .or_else(|| added_parts.iter().find(|(p, _)| *p == sheet_part).map(|(_, b)| b.clone()))
+            .or_else(|| part(&sheet_part))
+            .ok_or_else(|| format!("missing {sheet_part}"))?;
+        if let Some(new_doc) = write_notes(wb, pkg, id, &sheet_part, doc, &mut taken, &mut next_idmap, &mut replaced, &mut added_parts, &mut ct_adds)? {
+            if let Some(slot) = added_parts.iter_mut().find(|(p, _)| *p == sheet_part) {
+                slot.1 = new_doc;
+            } else {
+                replaced.insert(sheet_part, new_doc);
+            }
+        }
+    }
     if !strings.added.is_empty() {
         match pkg.part("xl/sharedStrings.xml") {
             Some(doc) => {

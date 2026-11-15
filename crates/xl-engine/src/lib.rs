@@ -23,4 +23,4 @@ pub use formula::{Move, ParseError, Shift, quote_sheet_name};
 pub use store::{Cell, CellInput, CellStore};
 pub use style::{Border, HAlign, LineStyle, Rgb, Style, VAlign};
 pub use value::{ErrorKind, Value, format_general};
-pub use workbook::{AutoFilter, CellSnapshot, DATE1904_OFFSET, StructOp, Table, TableStyle, LoadedCell, RecalcStats, SheetLayout, Workbook, precise, validate_sheet_name};
+pub use workbook::{AutoFilter, CellSnapshot, DATE1904_OFFSET, Note, StructOp, Table, TableStyle, LoadedCell, RecalcStats, SheetLayout, Workbook, precise, validate_sheet_name};

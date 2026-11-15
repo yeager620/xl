@@ -61,9 +61,18 @@ pub struct SheetLayout {
     pub tables: Vec<Table>,
     /// Pivot tables whose output is on this sheet.
     pub pivots: Vec<crate::pivot::Pivot>,
+    /// Notes (Excel's comments) on cells.
+    pub notes: BTreeMap<CellRef, Note>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
+}
+
+/// A note attached to a cell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Note {
+    pub author: String,
+    pub text: String,
 }
 
 /// A table ("Format as Table"): a named range whose first row holds the
@@ -124,6 +133,13 @@ impl SheetLayout {
             shift_levels(&mut self.col_levels);
         }
         self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
+        self.notes = std::mem::take(&mut self.notes)
+            .into_iter()
+            .filter_map(|(c, n)| {
+                let c = if rows { CellRef::new(op.map_pos(c.row)?, c.col) } else { CellRef::new(c.row, op.map_pos(c.col)?) };
+                Some((c, n))
+            })
+            .collect();
         self.tables.retain_mut(|t| match op.map_range(t.range) {
             // A table keeps its header row and at least one data row.
             Some(r) if r.rows() > 1 => {
@@ -1095,6 +1111,18 @@ impl Workbook {
                         cell.input = CellInput::Formula(Arc::new(moved));
                     }
                 }
+            }
+        }
+        // Notes go with their cells; notes where the block lands are replaced.
+        let moving_notes: Vec<(CellRef, Note)> = self.sheets.get(mv.from_sheet).map(|sd| sd.layout.notes.iter().filter(|(c, _)| mv.from.contains(**c)).map(|(c, n)| (*c, n.clone())).collect()).unwrap_or_default();
+        if let Some(sd) = self.sheets.get_mut(mv.from_sheet) {
+            sd.layout.notes.retain(|c, _| !mv.from.contains(*c));
+        }
+        if let Some(sd) = self.sheets.get_mut(mv.to_sheet) {
+            let to = mv.to_range();
+            sd.layout.notes.retain(|c, _| !to.contains(*c));
+            for (c, n) in moving_notes {
+                sd.layout.notes.insert(CellRef::new((c.row as i64 + mv.dr) as u32, (c.col as i64 + mv.dc) as u32), n);
             }
         }
         for id in self.sheets.order.clone() {

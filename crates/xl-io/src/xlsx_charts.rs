@@ -66,6 +66,80 @@ pub(crate) fn read_sheet_tables(zip: &mut Zip, sheet_part: &str, wb: &mut Workbo
     Ok(())
 }
 
+/// Read a worksheet's notes (legacy comments parts).
+pub(crate) fn read_sheet_notes(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<(), String> {
+    let rels = read_rels(zip, &rels_of(sheet_part))?;
+    let parts: Vec<String> = rels.values().filter(|t| t.rsplit('/').next().is_some_and(|f| f.starts_with("comments"))).map(|t| resolve(sheet_part, t)).collect();
+    for part in parts {
+        let Some(bytes) = read_entry(zip, &part)? else { continue };
+        let mut r = xml(&bytes);
+        let mut buf = Vec::new();
+        let mut authors: Vec<String> = Vec::new();
+        let (mut in_author, mut in_text, mut in_t) = (false, false, false);
+        let mut cur: Option<(CellRef, usize)> = None;
+        let mut text = String::new();
+        loop {
+            match r.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+                Event::Start(ref e) => match local(e.name().as_ref()) {
+                    "author" => {
+                        in_author = true;
+                        authors.push(String::new());
+                    }
+                    "comment" => {
+                        cur = attr(e, "ref").and_then(|r| CellRef::parse(r.split(':').next().unwrap_or(&r))).map(|c| (c, attr(e, "authorId").and_then(|v| v.parse().ok()).unwrap_or(0)));
+                        text.clear();
+                    }
+                    "text" => in_text = true,
+                    "t" if in_text => in_t = true,
+                    // Phonetic runs aren't part of the note.
+                    "rPh" => in_text = false,
+                    _ => {}
+                },
+                Event::Text(ref t) => {
+                    let s = t.xml_content(XmlVersion::Implicit1_0);
+                    if in_author {
+                        if let Some(a) = authors.last_mut() {
+                            a.push_str(&s);
+                        }
+                    } else if in_t {
+                        text.push_str(&s);
+                    }
+                }
+                Event::GeneralRef(ref g) => {
+                    if in_author {
+                        if let Some(a) = authors.last_mut() {
+                            push_entity(a, g);
+                        }
+                    } else if in_t {
+                        push_entity(&mut text, g);
+                    }
+                }
+                Event::End(ref e) => match local(e.name().as_ref()) {
+                    "author" => in_author = false,
+                    "t" => in_t = false,
+                    "rPh" => in_text = true,
+                    "text" => in_text = false,
+                    "comment" => {
+                        if let Some((cell, author_id)) = cur.take() {
+                            let author = authors.get(author_id).cloned().unwrap_or_default();
+                            // Older Excel starts the text with a bold "Author:" line.
+                            let body = text.strip_prefix(&format!("{author}:")).map_or(text.as_str(), |t| t.strip_prefix('\n').unwrap_or(t)).to_string();
+                            if let Some(l) = wb.layout_mut(sheet) {
+                                l.notes.insert(cell, xl_engine::Note { author, text: body });
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+    Ok(())
+}
+
 /// What reading a sheet's drawing found besides the charts it loaded.
 #[derive(Default)]
 pub(crate) struct DrawingNotes {

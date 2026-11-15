@@ -462,6 +462,10 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for cf in &layout.cond {
             write_cond(ws, wb, cf).map_err(err)?;
         }
+        for (cell, note) in &layout.notes {
+            let n = rust_xlsxwriter::Note::new(&note.text).set_author(&note.author).add_author_prefix(false);
+            ws.insert_note(cell.row, cell.col as u16, &n).map_err(err)?;
+        }
         for chart in &layout.charts {
             write_chart(ws, wb, id, chart).map_err(err)?;
         }

@@ -1326,3 +1326,36 @@ fn goal_seek_and_solver_dialogs(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |s, _| assert!(s.form.is_some() && s.message.as_ref().is_some_and(|(m, err)| *err && m.contains("needs"))));
 }
+
+#[gpui::test]
+fn notes_insert_edit_hover_delete(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "B4");
+    cx.simulate_keystrokes("shift-f2");
+    cx.simulate_input("Order more");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("by Friday");
+    cx.simulate_keystrokes("enter");
+    let note = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| view.read_with(cx, |s, _| s.note_at(CellRef::parse("B4").unwrap()).map(|n| n.text.clone()));
+    assert_eq!(note(&view, cx).as_deref(), Some("Order more\nby Friday"));
+    assert_eq!(val(&view, cx, "B4"), Value::Number(3.0), "typing went into the note, not the cell");
+    // Hovering the cell shows the card.
+    let p = cell_point(&view, cx, "B4", 10.0, 10.0);
+    cx.simulate_mouse_move(p, None, gpui::Modifiers::none());
+    view.read_with(cx, |s, _| assert_eq!(s.hover_note, Some(CellRef::parse("B4").unwrap())));
+    // Notes move with inserted rows, and undo works.
+    go(&view, cx, "A1");
+    cx.simulate_keystrokes("ctrl-shift-=");
+    view.read_with(cx, |s, _| assert!(s.note_at(CellRef::parse("B5").unwrap()).is_some()));
+    cx.simulate_keystrokes("ctrl-z");
+    go(&view, cx, "B4");
+    view.update(cx, |s, _| s.delete_note());
+    assert_eq!(note(&view, cx), None);
+    cx.simulate_keystrokes("ctrl-z");
+    assert!(note(&view, cx).is_some());
+    // Escape cancels an edit.
+    cx.simulate_keystrokes("shift-f2");
+    cx.simulate_input(" (urgent)");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(note(&view, cx).as_deref(), Some("Order more\nby Friday"));
+}

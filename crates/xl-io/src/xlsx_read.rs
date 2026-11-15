@@ -870,7 +870,6 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
 /// Package parts xl doesn't model, by path prefix.
 const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
     ("xl/media/", "drawings and images"),
-    ("xl/comments", "comments"),
     ("xl/threadedComments/", "comments"),
     ("xl/pivotTables/", "pivot tables"),
     ("xl/pivotCache/", "pivot tables"),
@@ -977,6 +976,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
             note("some kinds of conditional formatting");
         }
         crate::xlsx_charts::read_sheet_tables(&mut zip, &part, &mut wb, *id)?;
+        crate::xlsx_charts::read_sheet_notes(&mut zip, &part, &mut wb, *id)?;
         let drawn = crate::xlsx_charts::read_sheet_charts(&mut zip, &part, &mut wb, *id)?;
         if drawn.other_drawings {
             note("drawings and images");

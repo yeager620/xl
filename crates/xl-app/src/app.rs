@@ -192,6 +192,8 @@ pub enum Field {
     ChartTitle,
     /// A field of the Goal Seek / Solver form.
     Form(u8),
+    /// The note being written.
+    Note,
 }
 
 /// What a right-click menu is about.
@@ -275,6 +277,10 @@ pub struct Spreadsheet {
     /// The selected chart (index on the current sheet).
     pub(crate) selected_chart: Option<usize>,
     pub(crate) chart_title_text: String,
+    /// The note being written: its cell and text.
+    pub(crate) note_edit: Option<(CellRef, String)>,
+    /// The cell whose note the pointer is over.
+    pub(crate) hover_note: Option<CellRef>,
     /// The open Goal Seek / Solver form.
     pub(crate) form: Option<crate::solver_ui::FormDialog>,
     /// The open conditional-formatting rule dialog.
@@ -361,6 +367,8 @@ impl Spreadsheet {
             ac_selected: 0,
             cf_dialog: None,
             form: None,
+            note_edit: None,
+            hover_note: None,
             selected_chart: None,
             chart_title_text: String::new(),
             ac_dismissed: None,
@@ -1731,6 +1739,8 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
+        } else if self.field == Some(Field::Note) {
+            self.key_note(key, m.shift)
         } else if self.field == Some(Field::ChartTitle) {
             self.key_chart_title(key)
         } else if matches!(self.field, Some(Field::Find | Field::Replace)) {
@@ -1965,6 +1975,7 @@ impl Spreadsheet {
             }
             ("enter", _) => self.move_by(if shift { -1 } else { 1 }, 0, false),
             ("tab", _) => self.move_by(0, if shift { -1 } else { 1 }, false),
+            ("f2", _) if shift => self.edit_note(),
             ("f2", _) => self.begin_edit(None, EditMode::Edit),
             ("delete" | "backspace", false) if self.selected_chart.is_some() => self.delete_chart(),
             ("delete" | "backspace", false) => self.clear_selection(),
@@ -2192,6 +2203,15 @@ impl Spreadsheet {
         let hover = if self.drag.is_none() { self.scrollbar_at(ev.position) } else { self.scroll_hover };
         if hover != self.scroll_hover {
             self.scroll_hover = hover;
+            cx.notify();
+        }
+        // Show a cell's note while the pointer is over it.
+        let over_note = match (self.drag, self.hit_test(ev.position)) {
+            (None, Some(Hit::Cell(c))) if self.note_at(c).is_some() => Some(self.wb.layout(self.cur).merge_at(c).map_or(c, |m| m.start)),
+            _ => None,
+        };
+        if over_note != self.hover_note {
+            self.hover_note = over_note;
             cx.notify();
         }
         let Some(drag) = self.drag else { return };

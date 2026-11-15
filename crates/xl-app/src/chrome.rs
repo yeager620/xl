@@ -668,6 +668,12 @@ impl Spreadsheet {
         }
         if kind == ContextKind::Cells {
             items.push(None);
+            let has_note = self.note_at(self.active).is_some();
+            items.push(Some((if has_note { "Edit note…".into() } else { "Insert note…".into() }, "Shift+F2", |s, _, _| s.edit_note())));
+            if has_note {
+                items.push(Some(("Delete note".into(), "", |s, _, _| s.delete_note())));
+            }
+            items.push(None);
             items.push(Some(("Sort A → Z".into(), "", |s, _, _| s.sort_by_active(true))));
             items.push(Some(("Sort Z → A".into(), "", |s, _, _| s.sort_by_active(false))));
             items.push(Some(("Filter".into(), "Ctrl+Shift+L", |s, _, _| s.toggle_filter())));
@@ -1026,6 +1032,9 @@ impl Render for Spreadsheet {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(self.render_filter_menu(cx))).with_priority(2))
             })
             .when_some(if self.menu.is_none() && self.palette.is_none() { self.render_completion(cx) } else { None }, |d, (pos, el)| {
+                d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
+            })
+            .when_some(if self.menu.is_none() && self.context.is_none() { self.render_note_card(cx) } else { None }, |d, (pos, el)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
             })
             .when_some(self.context, |d, (pos, kind)| {

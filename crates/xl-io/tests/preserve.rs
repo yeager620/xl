@@ -274,3 +274,49 @@ fn dates_in_1904_files_show_and_save_correctly() {
     let back = xl_io::open(&out).unwrap();
     assert_eq!(back.workbook.display(Addr::new(back.workbook.sheet_ids()[0], CellRef::parse("A1").unwrap())).text, "1908-01-02");
 }
+
+#[test]
+fn notes_are_read_edited_and_added() {
+    use xl_engine::Note;
+    // Edit the note in a file that has one.
+    let src = tmp("notes1.xlsx");
+    rich_file(&src);
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let a2 = CellRef::parse("A2").unwrap();
+    assert_eq!(loaded.workbook.layout(s).notes.get(&a2).map(|n| n.text.as_str()), Some("Best seller"));
+    assert!(!loaded.unsupported.contains(&"comments"), "notes are modeled now");
+    loaded.workbook.layout_mut(s).unwrap().notes.insert(a2, Note { author: "Ann".into(), text: "Restock & reorder".into() });
+    loaded.workbook.layout_mut(s).unwrap().notes.insert(CellRef::parse("B3").unwrap(), Note { author: "Bo".into(), text: "Check count".into() });
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("notes1-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let back = xl_io::open(&out).unwrap();
+    let notes = &back.workbook.layout(back.workbook.sheet_ids()[0]).notes;
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[&a2], Note { author: "Ann".into(), text: "Restock & reorder".into() });
+    let vml = parts(&out).into_iter().find(|(k, _)| k.ends_with(".vml")).map(|(_, v)| String::from_utf8_lossy(&v).to_string()).unwrap();
+    assert_eq!(vml.matches("ObjectType=\"Note\"").count(), 2, "one note box each");
+    // Add the first note to a file without any.
+    let plain = tmp("notes2.xlsx");
+    {
+        let mut book = XlsxBook::new();
+        book.add_worksheet().write_number(0, 0, 7).unwrap();
+        book.save(&plain).unwrap();
+    }
+    let mut loaded = xl_io::open(&plain).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    loaded.workbook.layout_mut(s).unwrap().notes.insert(CellRef::new(0, 0), Note { author: "Cy".into(), text: "Lucky number".into() });
+    let out = tmp("notes2-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let p = parts(&out);
+    assert!(text(&p, "xl/worksheets/sheet1.xml").contains("<legacyDrawing r:id=\"rIdXlVml\"/>"));
+    assert!(p.contains_key("xl/worksheets/_rels/sheet1.xml.rels"));
+    assert!(text(&p, "[Content_Types].xml").contains("comments1.xml"));
+    let back = xl_io::open(&out).unwrap();
+    assert_eq!(back.workbook.layout(back.workbook.sheet_ids()[0]).notes[&CellRef::new(0, 0)].text, "Lucky number");
+    // Fresh writes keep notes too.
+    let fresh = tmp("notes3.xlsx");
+    xl_io::save(&back.workbook, &fresh, s, None).unwrap();
+    assert_eq!(xl_io::open(&fresh).unwrap().workbook.layout(s).notes.len(), 1);
+}

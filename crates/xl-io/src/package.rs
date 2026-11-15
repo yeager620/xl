@@ -33,6 +33,7 @@ pub struct SheetDigest {
     pub objects: u64,
     /// Where charts and sparklines are, and the cells they read.
     pub object_places: u64,
+    pub notes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +101,7 @@ pub(crate) fn sheet_digest(wb: &Workbook, id: SheetId) -> SheetDigest {
             hash_of(&[&charts, &sparks])
         },
         object_places: hash_of(&[&l.charts, &l.sparklines]),
+        notes: hash_of(&[&l.notes]),
     }
 }
 
@@ -260,6 +262,11 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         if now.object_places != s.digest.object_places && !structural {
             why.push(format!("a chart on “{}” was moved or resized", wb.sheet_name(s.id)));
         }
+        if now.notes != s.digest.notes
+            && let Some(problem) = notes_unpatchable(pkg, s)
+        {
+            why.push(format!("notes on “{}” changed, and {problem}", wb.sheet_name(s.id)));
+        }
         if now.tables != s.digest.tables && !tables_patchable(wb, pkg, s) {
             why.push(format!("tables on “{}” were added, removed or changed columns", wb.sheet_name(s.id)));
         }
@@ -269,6 +276,25 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         why.push(e);
     }
     if why.is_empty() { SavePlan::Patch } else { SavePlan::Rewrite(why) }
+}
+
+/// Why a sheet's notes can't be rewritten in place, if they can't: modern
+/// threaded comments would fall out of step, and other shapes in the note
+/// drawing (form controls) would be lost.
+fn notes_unpatchable(pkg: &Package, s: &PackageSheet) -> Option<&'static str> {
+    let mut zip = pkg.zip().ok()?;
+    let rels = read_rels(&mut zip, &crate::xlsx_charts::rels_of(&s.part)).ok()?;
+    if rels.values().any(|t| t.contains("threadedComment")) {
+        return Some("the sheet also has threaded comments");
+    }
+    for t in rels.values().filter(|t| t.ends_with(".vml")) {
+        let vml = pkg.part(&crate::xlsx_charts::resolve(&s.part, t))?;
+        let text = String::from_utf8_lossy(&vml);
+        if text.split("ObjectType=\"").skip(1).any(|rest| !rest.starts_with("Note\"")) {
+            return Some("its note drawing also holds form controls");
+        }
+    }
+    None
 }
 
 /// Did the sheet's tables only change their row extent (same names, same
