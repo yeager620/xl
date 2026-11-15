@@ -1785,3 +1785,129 @@ fn pictures_are_drawn_and_follow_inserted_rows(cx: &mut TestAppContext) {
     cx.run_until_parked();
     view.read_with(cx, |s, _| assert_eq!(s.picture_cache.len(), 0));
 }
+
+#[gpui::test]
+fn version_history_lists_versions_and_shows_diffs(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    let path = scratch("history-doc").with_extension("xlsx");
+    let at = |a1: &str| CellRef::parse(a1).unwrap();
+    view.update(cx, |s, _| {
+        s.history = crate::history_ui::HistoryState::new(scratch("history"));
+        s.save_to(path.clone());
+    });
+    // Edit, insert a row above the data, and save again: a second version.
+    go(&view, cx, "B4");
+    cx.simulate_input("5");
+    cx.simulate_keystrokes("enter");
+    go(&view, cx, "A2");
+    view.update(cx, |s, _| {
+        s.insert_rows(false);
+        s.save_to(path.clone());
+    });
+    // Opened from the palette.
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("Version history");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let (count, older) = view.read_with(cx, |s, _| {
+        let p = s.history.panel.as_ref().expect("panel open");
+        (p.versions.len(), p.versions[1].id.clone())
+    });
+    assert_eq!(count, 2, "one version per save");
+
+    // Compare with the first version: B4 (now B5) changed, a row inserted.
+    view.update(cx, |s, cx| s.select_version(older.clone(), cx));
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| {
+        let v = s.history.view.as_ref().expect("diff shown");
+        let marks = &v.marks["Welcome"];
+        assert_eq!(marks.cells.get(&at("B5")).map(|m| m.0), Some(crate::history_ui::MarkKind::Modified));
+        assert_eq!(marks.cells.get(&at("D5")).map(|m| m.0), Some(crate::history_ui::MarkKind::Modified), "its total was recomputed");
+        // A blank row next to a blank row: either could be the new one.
+        assert!(v.items.iter().any(|i| i.text == "Welcome row 3 inserted"), "{:?}", v.items);
+        assert!(v.items.iter().all(|i| !i.text.contains("width")), "sizes that survive a save aren't changes: {:?}", v.items);
+        assert!(v.items.iter().any(|i| i.text == "Welcome!B5: 3 → 5"), "{:?}", v.items);
+    });
+    // The overlay builds, and the whole frame with it.
+    let bounds = gpui::Bounds::new(gpui::point(gpui::px(0.), gpui::px(0.)), gpui::size(gpui::px(900.), gpui::px(600.)));
+    let overlay = cx.update(|_, cx| {
+        let all = |_: &xl_engine::Range| true;
+        let pieces = |_: xl_engine::Range| vec![(bounds, bounds)];
+        view.read(cx).diff_ops(&pieces, &all).len()
+    });
+    assert!(overlay >= 3, "B5, D5 and the totals below are highlighted: {overlay}");
+    let frame = cx.update(|window, cx| view.read(cx).build_frame(bounds, window).len());
+    assert!(frame > overlay);
+    // Hovering a changed cell shows old → new.
+    view.update(cx, |s, _| s.history.hover = Some(at("B5")));
+    assert!(view.read_with(cx, |s, _| s.render_diff_card().is_some()));
+    cx.run_until_parked();
+    // Jump to a listed change.
+    let i = view.read_with(cx, |s, _| s.history.view.as_ref().unwrap().items.iter().position(|i| i.text.starts_with("Welcome!B5")).unwrap());
+    view.update(cx, |s, _| s.jump_to_change(i));
+    view.read_with(cx, |s, _| assert_eq!(s.active, at("B5")));
+
+    // Name it.
+    view.update(cx, |s, _| s.start_naming(older.clone()));
+    cx.simulate_input("Before tea");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.history.panel.as_ref().unwrap().versions[1].label.as_deref(), Some("Before tea")));
+
+    // Restore it as an undoable edit.
+    view.update(cx, |s, _| s.restore_shown());
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.wb.value(Addr::new(s.cur, at("B4"))), &Value::Number(3.0));
+        assert_eq!(s.wb.input_text(Addr::new(s.cur, at("A2"))), "", "the inserted row is gone");
+        assert!(s.dirty);
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.value(Addr::new(s.cur, at("B5"))), &Value::Number(5.0), "undo brings the edits back"));
+
+    // Changes since last save: none, then one after an edit.
+    view.update(cx, |s, cx| s.changes_since_save(cx));
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| assert_eq!(s.history.view.as_ref().unwrap().diff.change_count(), 0));
+    go(&view, cx, "A1");
+    cx.simulate_input("Hello");
+    cx.simulate_keystrokes("enter");
+    view.update(cx, |s, _| s.refresh_diff());
+    view.read_with(cx, |s, _| {
+        let v = s.history.view.as_ref().unwrap();
+        assert_eq!(v.diff.change_count(), 1);
+        assert_eq!(v.items[0].text, "Welcome!A1: \"Welcome to xl\" → \"Hello\"");
+    });
+
+    // Compare with another file.
+    let other = scratch("history-other").with_extension("csv");
+    std::fs::write(&other, "x,y\n").unwrap();
+    view.update(cx, |s, cx| s.compare_with_path(other.clone(), cx));
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| assert!(s.history.view.as_ref().unwrap().diff.change_count() > 0));
+
+    // Save As continues the history at the new path.
+    let moved = scratch("history-moved").with_extension("xlsx");
+    view.update(cx, |s, _| s.save_to(moved.clone()));
+    view.read_with(cx, |s, _| assert_eq!(s.history.store.versions(&moved).len(), 3));
+    // With autosave versions turned on, autosave records one too.
+    go(&view, cx, "A1");
+    cx.simulate_input("Autosaved");
+    cx.simulate_keystrokes("enter");
+    view.update(cx, |s, _| {
+        s.history.store.policy.autosave_minutes = 10;
+        s.history.last_auto = None;
+        s.autosave();
+    });
+    view.read_with(cx, |s, _| {
+        let vs = s.history.store.versions(&moved);
+        assert_eq!(vs.len(), 4);
+        assert!(vs[0].auto);
+    });
+    view.update(cx, |s, _| s.autosave());
+    view.read_with(cx, |s, _| assert_eq!(s.history.store.versions(&moved).len(), 4, "not again within the interval"));
+    view.update(cx, |s, _| s.close_history());
+    view.read_with(cx, |s, _| assert!(s.history.panel.is_none() && s.history.view.is_none()));
+    for p in [path, other, moved] {
+        std::fs::remove_file(p).ok();
+    }
+    std::fs::remove_dir_all(view.read_with(cx, |s, _| s.history.store.root().to_path_buf())).ok();
+}

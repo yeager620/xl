@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 xl-engine.workspace = true
 xl-io.workspace = true
+xl-diff.workspace = true
+xl-history.workspace = true
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 gpui = { path = "../../vendor/zed/crates/gpui", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", default-features = false, features = ["wayland", "x11", "font-kit"] }
 

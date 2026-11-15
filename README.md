@@ -84,6 +84,8 @@ scripts/fetch-xlsx-corpus.sh && cargo run -p xl-io --release --example roundtrip
 |---|---|
 | `crates/xl-engine` | Headless core: multi-sheet workbook, formula parser, 77 functions, Excel number formats, dates, dependency graph, incremental recalc |
 | `crates/xl-io` | xlsx read (streaming) / write, CSV/TSV |
+| `crates/xl-diff` | Cell-level workbook diffs (row/column alignment), `xl diff` / `xl textconv` — see `docs/git.md` |
+| `crates/xl-history` | Local version history: deduplicated, compressed snapshots with retention |
 | `crates/xl-app` | The GPUI desktop app (`xl` binary): grid, formula bar, sheet tabs, format & style toolbar, command palette, IME input |
 | `crates/xl-bench` | Recalc benchmarks |
 | `crates/xl-pack` | Packaging helpers (renders the app icon PNGs) |

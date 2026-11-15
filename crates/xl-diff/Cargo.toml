@@ -1,0 +1,10 @@
+[package]
+name = "xl-diff"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Cell-level diffs between workbooks, and the `xl diff` / `xl textconv` command-line modes"
+
+[dependencies]
+xl-engine.workspace = true
+xl-io.workspace = true

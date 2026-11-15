@@ -6553,9 +6553,12 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 name = "xl"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "gpui",
  "gpui_platform",
+ "xl-diff",
  "xl-engine",
+ "xl-history",
  "xl-io",
 ]
 
@@ -6567,11 +6570,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "xl-diff"
+version = "0.3.0"
+dependencies = [
+ "xl-engine",
+ "xl-io",
+]
+
+[[package]]
 name = "xl-engine"
 version = "0.3.0"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
+]
+
+[[package]]
+name = "xl-history"
+version = "0.3.0"
+dependencies = [
+ "flate2",
+ "sha2",
+ "zip",
 ]
 
 [[package]]

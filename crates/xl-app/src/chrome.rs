@@ -577,6 +577,11 @@ impl Spreadsheet {
                         this.save(true, cx);
                         cx.notify();
                     })))
+                    .child(menu_item(&t, "m-history", "Version history…", "").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.open_history();
+                        cx.notify();
+                    })))
                     .child(menu_separator(&t))
                     .child(menu_item(&t, "m-palette", "Search commands…", "Ctrl+K").on_click(cx.listener(move |this, _, _, cx| {
                         close(this);
@@ -1025,7 +1030,8 @@ impl Render for Spreadsheet {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll)),
                 )
-                .children(self.render_pivot_panel(cx)),
+                .children(self.render_pivot_panel(cx))
+                .children(self.render_history_panel(cx)),
             )
             .child(self.render_bottom_bar(cx)))
             .relative()
@@ -1054,7 +1060,7 @@ impl Render for Spreadsheet {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
             })
             .when_some(self.render_dropdown(cx), |d, (pos, el)| d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2)))
-            .when_some(if self.menu.is_none() && self.context.is_none() { self.render_note_card(cx).or_else(|| self.render_prompt()) } else { None }, |d, (pos, el)| {
+            .when_some(if self.menu.is_none() && self.context.is_none() { self.render_note_card(cx).or_else(|| self.render_prompt()).or_else(|| self.render_diff_card()) } else { None }, |d, (pos, el)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
             })
             .when_some(self.context, |d, (pos, kind)| {

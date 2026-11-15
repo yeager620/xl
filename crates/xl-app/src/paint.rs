@@ -450,6 +450,9 @@ impl Spreadsheet {
             }
         }
 
+        // Version-history diff highlights.
+        ops.extend(self.diff_ops(&pieces, &in_view));
+
         // Sparklines, under any text.
         for sp in &layout.sparklines {
             let (Some(&(r, y, h)), Some(&(c, x, w))) = (rows.iter().find(|row| row.0 == sp.cell.row), cols.iter().find(|col| col.0 == sp.cell.col)) else { continue };
