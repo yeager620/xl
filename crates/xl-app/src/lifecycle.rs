@@ -14,6 +14,8 @@ pub enum After {
     Close,
     Quit,
     Open(PathBuf),
+    /// Replace the workbook with a blank one or a template (from Home).
+    New(crate::home::Starter),
 }
 
 /// A recovery copy left behind by an instance that didn't exit cleanly.
@@ -69,7 +71,7 @@ pub fn remove_recovery(file: &Path) {
     std::fs::remove_file(file.with_extension("path")).ok();
 }
 
-fn ago(t: SystemTime) -> String {
+pub(crate) fn ago(t: SystemTime) -> String {
     let secs = SystemTime::now().duration_since(t).map_or(0, |d| d.as_secs());
     match secs {
         0..=59 => "less than a minute ago".into(),
@@ -158,6 +160,10 @@ impl Spreadsheet {
                 self.clear_recovery();
                 self.load(path, cx);
             }
+            After::New(starter) => {
+                self.clear_recovery();
+                self.start_new(starter);
+            }
         }
     }
 
@@ -244,6 +250,7 @@ impl Spreadsheet {
             After::Close => (format!("Save changes to “{name}” before closing?"), "Close Without Saving"),
             After::Quit => (format!("Save changes to “{name}” before quitting?"), "Quit Without Saving"),
             After::Open(_) => (format!("Save changes to “{name}” before opening another file?"), "Open Without Saving"),
+            After::New(_) => (format!("Save changes to “{name}” before starting a new workbook?"), "Don’t Save"),
         };
         let button = |id: &'static str, label: &'static str| {
             div()

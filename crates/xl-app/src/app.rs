@@ -144,7 +144,7 @@ pub(crate) fn value_input(v: &Value) -> String {
 
 /// Per-sheet selection and scroll position.
 #[derive(Clone, Copy, Default)]
-struct View {
+pub(crate) struct View {
     active: CellRef,
     anchor: CellRef,
     scroll_x: f64,
@@ -238,7 +238,7 @@ pub enum Emphasis {
 pub struct Spreadsheet {
     pub(crate) wb: Workbook,
     pub(crate) cur: SheetId,
-    views: HashMap<SheetId, View>,
+    pub(crate) views: HashMap<SheetId, View>,
     pub(crate) focus: FocusHandle,
     pub(crate) active: CellRef,
     pub(crate) anchor: CellRef,
@@ -250,7 +250,7 @@ pub struct Spreadsheet {
     /// Scrollbar under the pointer (drawn wider).
     pub(crate) scroll_hover: Option<Axis>,
     pub(crate) undo: Vec<UndoEntry>,
-    redo: Vec<UndoEntry>,
+    pub(crate) redo: Vec<UndoEntry>,
     pub(crate) clip: Option<Clip>,
     pub(crate) last_stats: Option<RecalcStats>,
     pub(crate) message: Option<(String, bool)>,
@@ -314,6 +314,10 @@ pub struct Spreadsheet {
     /// Bumped on every change; autosave writes only when it moved.
     pub(crate) edit_generation: u64,
     pub(crate) autosaved_generation: Option<u64>,
+    /// The Home page, when it's shown instead of the sheet.
+    pub(crate) home: Option<crate::home::HomeState>,
+    /// Recently opened and saved workbooks.
+    pub(crate) recent: crate::recent::Recent,
     _appearance: Subscription,
 }
 
@@ -383,6 +387,8 @@ impl Spreadsheet {
             recovery_dir: crate::lifecycle::recovery_dir(),
             edit_generation: 0,
             autosaved_generation: None,
+            home: None,
+            recent: crate::recent::Recent::load(&crate::recent::default_dir()),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -391,7 +397,7 @@ impl Spreadsheet {
         this.start_autosave(cx);
         match path {
             Some(p) => this.load(p, cx),
-            None => this.load_welcome(),
+            None => this.home = Some(crate::home::HomeState::new(false)),
         }
         this
     }
@@ -1502,50 +1508,6 @@ impl Spreadsheet {
 
     // ------------------------------------------------------------------ files
 
-    /// A small, real-looking workbook so the first launch shows what xl does.
-    fn load_welcome(&mut self) {
-        let s = self.cur;
-        self.wb.rename_sheet(s, "Q1 Budget").ok();
-        let rows: &[&[&str]] = &[
-            &["Operating budget, Q1 2026"],
-            &[],
-            &["Category", "Jan", "Feb", "Mar", "Q1 total", "Budget", "Variance"],
-            &["Salaries", "$42,000", "$42,000", "$44,500", "=SUM(B4:D4)", "$132,000", "=E4/F4-1"],
-            &["Rent", "$6,200", "$6,200", "$6,200", "=SUM(B5:D5)", "$18,600", "=E5/F5-1"],
-            &["Software", "$1,940", "$2,115", "$2,380", "=SUM(B6:D6)", "$6,000", "=E6/F6-1"],
-            &["Travel", "$3,400", "$1,250", "$4,860", "=SUM(B7:D7)", "$9,000", "=E7/F7-1"],
-            &["Marketing", "$5,000", "$7,500", "$6,100", "=SUM(B8:D8)", "$18,000", "=E8/F8-1"],
-            &["Total", "=SUM(B4:B8)", "=SUM(C4:C8)", "=SUM(D4:D8)", "=SUM(E4:E8)", "=SUM(F4:F8)", "=E9/F9-1"],
-        ];
-        let mut items = Vec::new();
-        for (r, row) in rows.iter().enumerate() {
-            for (c, v) in row.iter().enumerate() {
-                if !v.is_empty() {
-                    items.push((Addr::new(s, CellRef::new(r as u32, c as u32)), v.to_string()));
-                }
-            }
-        }
-        self.last_stats = Some(self.wb.set_inputs(items));
-        let at = |a1: &str| Addr::new(s, CellRef::parse(a1).unwrap());
-        for r in 4..=9 {
-            for c in ["B", "C", "D", "E", "F"] {
-                self.wb.set_format(at(&format!("{c}{r}")), Some("$#,##0"));
-            }
-            // Over budget (positive variance) is the number to notice.
-            self.wb.set_format(at(&format!("G{r}")), Some("[Red]+0.0%;-0.0%;0.0%"));
-        }
-        self.wb.set_style(at("A1"), &Style { bold: true, ..Style::default() });
-        for c in ["A", "B", "C", "D", "E", "F", "G"] {
-            let align = if c == "A" { HAlign::General } else { HAlign::Right };
-            self.wb.set_style(at(&format!("{c}3")), &Style { bold: true, align, bottom: Border::THIN, ..Style::default() });
-            self.wb.set_style(at(&format!("{c}9")), &Style { bold: true, top: Border::THIN, ..Style::default() });
-        }
-        self.wb.set_col_width(s, 0, Some(150.0));
-        self.active = CellRef::new(3, 1);
-        self.anchor = self.active;
-        self.dirty = false;
-    }
-
     /// Open a file, first asking about unsaved changes if there are any.
     pub(crate) fn open_or_ask(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.dirty {
@@ -1601,6 +1563,10 @@ impl Spreadsheet {
                     Some(w) => (format!("Opened {name} with {} warning(s): {w}", loaded.warnings.len()), true),
                     None => (format!("Opened {name} ({} cells)", loaded.cells), false),
                 });
+                if self.restore_as.is_none() {
+                    self.recent.record(&path);
+                }
+                self.home = None;
                 self.path = Some(path);
                 if let Some((original, file)) = self.restore_as.take() {
                     // A restored recovery copy stands in for the original document.
@@ -1649,6 +1615,7 @@ impl Spreadsheet {
                 } else {
                     (format!("Saved {}", path.display()), false)
                 });
+                self.recent.record(&path);
                 self.path = Some(path);
             }
             Err(e) => self.message = Some((format!("Save failed: {e}"), true)),
@@ -1730,6 +1697,12 @@ impl Spreadsheet {
             let after = if key == "q" { crate::lifecycle::After::Quit } else { crate::lifecycle::After::Close };
             self.request(after, window, cx);
             true
+        } else if m.alt && key == "home" {
+            self.go_home();
+            true
+        } else if ctrl && !m.shift && !m.alt && key == "n" {
+            self.request(crate::lifecycle::After::New(crate::home::Starter::Blank), window, cx);
+            true
         } else if palette_key {
             if self.palette.take().is_none() {
                 self.open_palette();
@@ -1737,6 +1710,8 @@ impl Spreadsheet {
             true
         } else if self.palette.is_some() {
             self.key_palette(key, window, cx)
+        } else if self.home.is_some() {
+            self.key_home(key, ctrl, m.shift, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
         } else if self.field == Some(Field::Note) {

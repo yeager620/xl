@@ -42,6 +42,9 @@ impl Spreadsheet {
         if let Some(p) = &self.palette {
             return &p.query;
         }
+        if let Some(h) = &self.home {
+            return &h.filter;
+        }
         match self.field {
             Some(crate::app::Field::NameBox) => return &self.name_text,
             Some(crate::app::Field::Find) => return &self.find.query,
@@ -75,7 +78,7 @@ impl EntityInputHandler for Spreadsheet {
             return Some(UTF16Selection { range: end..end, reversed: false });
         }
         let caret = match (&self.renaming, &self.edit) {
-            _ if self.field.is_some() => utf16_len(self.ime_text()),
+            _ if self.field.is_some() || self.home.is_some() => utf16_len(self.ime_text()),
             (Some((_, name)), _) => utf16_len(name),
             (None, Some(e)) => byte_to_utf16(&e.text, e.cursor),
             (None, None) => 0,
@@ -102,6 +105,11 @@ impl EntityInputHandler for Spreadsheet {
         if let Some(p) = self.palette.as_mut() {
             p.query.push_str(text);
             p.selected = 0;
+            cx.notify();
+            return;
+        }
+        if self.home.is_some() {
+            self.home_filter_push(text);
             cx.notify();
             return;
         }
@@ -163,7 +171,7 @@ impl EntityInputHandler for Spreadsheet {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.renaming.is_some() || self.palette.is_some() || self.field.is_some() {
+        if self.renaming.is_some() || self.palette.is_some() || self.field.is_some() || self.home.is_some() {
             return;
         }
         if self.edit.is_none() {

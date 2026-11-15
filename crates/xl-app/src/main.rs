@@ -8,6 +8,7 @@ mod cond_ui;
 mod data;
 mod fill;
 mod find;
+mod home;
 mod ime;
 mod lifecycle;
 mod notes_ui;
@@ -15,8 +16,10 @@ mod outline;
 mod palette;
 mod paint;
 mod pivot_ui;
+mod recent;
 mod refs;
 mod solver_ui;
+mod templates;
 #[cfg(test)]
 mod tests;
 mod theme;

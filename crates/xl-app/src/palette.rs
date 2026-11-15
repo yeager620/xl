@@ -23,6 +23,8 @@ macro_rules! cmd {
 #[allow(unused_variables)]
 pub fn commands() -> Vec<Command> {
     vec![
+        cmd!("Home", "Alt+Home", |s, w, cx| s.go_home()),
+        cmd!("New blank workbook", "Ctrl+N", |s, w, cx| s.request(crate::lifecycle::After::New(crate::home::Starter::Blank), w, cx)),
         cmd!("Open…", "Ctrl+O", |s, w, cx| s.open(cx)),
         cmd!("Save", "Ctrl+S", |s, w, cx| s.save(false, cx)),
         cmd!("Save as…", "Ctrl+Shift+S", |s, w, cx| s.save(true, cx)),
