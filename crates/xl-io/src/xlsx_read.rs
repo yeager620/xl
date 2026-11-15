@@ -560,6 +560,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     let mut v = String::new();
     let mut f = String::new();
     let mut f_shared: Option<(u32, bool)> = None; // (si, is master with text)
+    // Dynamic arrays: the cell has cell metadata (`cm`, Excel's XLDAPR), and
+    // array formulas carry the range they fill.
+    let mut c_dynamic = false;
+    let mut f_array: Option<Range> = None;
+    let mut spill_anchors: Vec<(CellRef, Range)> = Vec::new();
     let mut cap = Capture::None;
     let mut shared_formulas: HashMap<u32, SharedFormula> = HashMap::new();
     let mut unresolved_shared = 0usize;
@@ -733,6 +738,8 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         v.clear();
                         f.clear();
                         f_shared = None;
+                        c_dynamic = attr(e, "cm").is_some();
+                        f_array = None;
                         if empty {
                             // Formatted but empty cell.
                             if let Some(xf) = style.and_then(|s| cx.styles.get(s)) {
@@ -747,6 +754,9 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                             && let Some(si) = attr(e, "si").and_then(|s| s.parse().ok())
                         {
                             f_shared = Some((si, !empty));
+                        }
+                        if attr(e, "t").as_deref() == Some("array") {
+                            f_array = attr(e, "ref").and_then(|s| parse_range(&s)).or(Some(Range::single(cell)));
                         }
                         if !empty {
                             cap = Capture::Formula;
@@ -873,7 +883,17 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                     }
                     match formula {
                         Some(src) => {
-                            wb.load_cell(addr, LoadedCell::Formula { src, cached: value });
+                            // Array formulas (dynamic, or old Ctrl+Shift+Enter ones)
+                            // evaluate as arrays and spill over their range;
+                            // other formulas keep the old one-value semantics.
+                            if c_dynamic || f_array.is_some() {
+                                wb.load_cell(addr, LoadedCell::Formula { src, cached: value });
+                            } else {
+                                wb.load_cell(addr, LoadedCell::LegacyFormula { src, cached: value });
+                            }
+                            if let Some(r) = f_array.filter(|r| r.start == cell && r.cell_count() > 1) {
+                                spill_anchors.push((cell, r));
+                            }
                             *cells += 1;
                         }
                         None if !value.is_empty() => {
@@ -890,11 +910,15 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         }
         buf.clear();
     }
+    for (anchor, r) in spill_anchors {
+        wb.load_spill(cx.id, anchor, r);
+    }
     if !validations.is_empty()
         && let Some(l) = wb.layout_mut(cx.id)
     {
         l.validations = validations;
     }
+
     if !sparklines.is_empty()
         && let Some(l) = wb.layout_mut(cx.id)
     {

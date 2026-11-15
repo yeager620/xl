@@ -132,3 +132,24 @@ fn opaque_loaded_formulas_come_alive() {
     wb.set_input(a(&wb, "A1"), "10").unwrap();
     assert_eq!(*wb.value(a(&wb, "B1")), Value::Number(5.0));
 }
+
+#[test]
+fn script_functions_spill_and_ignore_case() {
+    let mut wb = Workbook::new();
+    wb.set_user_functions(Some(Arc::new(Fns::default())));
+    wb.set_input(a(&wb, "A1"), "100").unwrap();
+    // Typed in lower case: still the script's DISCOUNT.
+    wb.set_input(a(&wb, "B1"), "=discount(A1, 0.5)").unwrap();
+    assert_eq!(*wb.value(a(&wb, "B1")), Value::Number(50.0));
+    // An array result spills like any dynamic array.
+    wb.set_input(a(&wb, "D1"), "=GRID()").unwrap();
+    assert_eq!(*wb.value(a(&wb, "D1")), Value::Number(7.0));
+    assert_eq!(*wb.value(a(&wb, "E1")), Value::Number(8.0));
+    assert_eq!(*wb.value(a(&wb, "D2")), Value::Number(9.0));
+    assert_eq!(*wb.value(a(&wb, "E2")), Value::Number(10.0));
+    // And feeds spill references and LET.
+    wb.set_input(a(&wb, "G1"), "=SUM(D1#)").unwrap();
+    assert_eq!(*wb.value(a(&wb, "G1")), Value::Number(34.0));
+    wb.set_input(a(&wb, "G2"), "=LET(x, discount(A1, 0.1), x * 2)").unwrap();
+    assert_eq!(*wb.value(a(&wb, "G2")), Value::Number(180.0));
+}

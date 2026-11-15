@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::address::{CellRef, Range, SheetId};
+use crate::address::{CellRef, MAX_COLS, MAX_ROWS, Range, SheetId};
 use crate::datetime::{datetime_from_serial, days_in_month, serial_from_parts};
 use crate::format::NumberFormat;
 use crate::formula::{BinOp, Expr};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellStore};
-use crate::value::{ErrorKind, EvalResult, Value, parse_number};
+use crate::value::{Array, ErrorKind, EvalResult, Value, parse_number};
 use crate::workbook::{Names, Sheets};
 
 macro_rules! funcs {
@@ -65,13 +65,66 @@ funcs! {
     Days => "DAYS", DateDif => "DATEDIF", NetworkDays => "NETWORKDAYS", Workday => "WORKDAY", WeekNum => "WEEKNUM",
     Choose => "CHOOSE", XMatch => "XMATCH", Switch => "SWITCH",
     Ceiling => "CEILING", Floor => "FLOOR", Trunc => "TRUNC", SumSq => "SUMSQ",
+    Filter => "FILTER", Sort => "SORT", SortBy => "SORTBY", Unique => "UNIQUE", Sequence => "SEQUENCE",
+    RandArray => "RANDARRAY", Transpose => "TRANSPOSE", TextSplit => "TEXTSPLIT", VStack => "VSTACK", HStack => "HSTACK",
+    Take => "TAKE", Drop => "DROP", ChooseCols => "CHOOSECOLS", ChooseRows => "CHOOSEROWS", ToCol => "TOCOL", ToRow => "TOROW",
+    WrapRows => "WRAPROWS", WrapCols => "WRAPCOLS", Expand => "EXPAND",
+    Let => "LET", Lambda => "LAMBDA", Map => "MAP", Reduce => "REDUCE", Scan => "SCAN", ByRow => "BYROW", ByCol => "BYCOL",
+    MakeArray => "MAKEARRAY", IsOmitted => "ISOMITTED",
 }
 
 impl Func {
     pub fn is_volatile(self) -> bool {
         // OFFSET and INDIRECT compute their references at run time, so their
         // dependencies can't be known statically: recalc them every time (as Excel does).
-        matches!(self, Func::Now | Func::Today | Func::Rand | Func::RandBetween | Func::Offset | Func::Indirect)
+        matches!(self, Func::Now | Func::Today | Func::Rand | Func::RandBetween | Func::RandArray | Func::Offset | Func::Indirect)
+    }
+
+    /// Functions only dynamic-array Excel has (formulas using them are saved
+    /// as dynamic-array formulas).
+    pub fn is_dynamic(self) -> bool {
+        use Func::*;
+        matches!(
+            self,
+            Filter | Sort | SortBy | Unique | Sequence | RandArray | TextSplit | VStack | HStack | Take | Drop | ChooseCols | ChooseRows | ToCol | ToRow | WrapRows | WrapCols
+                | Expand | Let | Lambda | Map | Reduce | Scan | ByRow | ByCol | MakeArray | IsOmitted
+        )
+    }
+
+    /// Functions that evaluate their arguments as arrays even in
+    /// pre-dynamic-array Excel.
+    pub fn is_array_native(self) -> bool {
+        matches!(self, Func::SumProduct | Func::Transpose)
+    }
+
+    /// Whether argument `i` takes one value, so an array there makes the
+    /// function return an array of results (`=LEN(A1:A3)`).
+    pub fn lifts_arg(self, i: usize) -> bool {
+        use Func::*;
+        match self {
+            Abs | Sqrt | Int | Mod | Power | Round | RoundUp | RoundDown | Exp | Ln | Log10 | Log | Sign | Ceiling | Floor | Trunc => true,
+            Len | Upper | Lower | Trim | Left | Right | Mid | Rept | Exact | Text | ValueFn | Substitute | Find | Search | Replace | Proper | TextBefore
+            | TextAfter | Char | Code => true,
+            IsBlank | IsNumber | IsText | IsError | IsNa | Not | IfError | IfNa | If => true,
+            Date | Time | Year | Month | Day | Hour | Minute | Second | Weekday | EDate | EOMonth | Days | DateDif | WeekNum => true,
+            Pmt | Pv | Fv | Nper => true,
+            VLookup | HLookup | Match | XMatch | XLookup => i == 0,
+            CountIf | SumIf | AverageIf => i == 1,
+            Choose => i == 0,
+            _ => false,
+        }
+    }
+
+    /// The prefix xlsx files put before the name of a newer function.
+    pub fn xlsx_prefix(self) -> &'static str {
+        use Func::*;
+        match self {
+            Filter | Sort => "_xlfn._xlws.",
+            _ if self.is_dynamic() => "_xlfn.",
+            Concat | Ifs | IfNa | XLookup | XMatch | TextJoin | Switch | MaxIfs | MinIfs | TextBefore | TextAfter | Days | StdevS | StdevP | VarS | VarP
+            | PercentileInc | QuartileInc | RankEq | ModeSngl => "_xlfn.",
+            _ => "",
+        }
     }
 
     /// Short signature shown in the UI.
@@ -150,6 +203,30 @@ impl Func {
             Switch => "(expression, value1, result1, …, [default])",
             Ceiling | Floor => "(number, significance)",
             Trunc => "(number, [num_digits])",
+            Filter => "(array, include, [if_empty])",
+            Sort => "(array, [sort_index], [sort_order], [by_col])",
+            SortBy => "(array, by_array1, [sort_order1], …)",
+            Unique => "(array, [by_col], [exactly_once])",
+            Sequence => "(rows, [columns], [start], [step])",
+            RandArray => "([rows], [columns], [min], [max], [integer])",
+            Transpose => "(array)",
+            TextSplit => "(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])",
+            VStack | HStack => "(array1, [array2], …)",
+            Take | Drop => "(array, rows, [columns])",
+            ChooseCols => "(array, col_num1, [col_num2], …)",
+            ChooseRows => "(array, row_num1, [row_num2], …)",
+            ToCol | ToRow => "(array, [ignore], [scan_by_column])",
+            WrapRows => "(vector, wrap_count, [pad_with])",
+            WrapCols => "(vector, wrap_count, [pad_with])",
+            Expand => "(array, rows, [columns], [pad_with])",
+            Let => "(name1, value1, [name2, value2], …, calculation)",
+            Lambda => "([parameter1], …, calculation)",
+            Map => "(array1, [array2], …, lambda)",
+            Reduce => "([initial_value], array, lambda)",
+            Scan => "([initial_value], array, lambda)",
+            ByRow | ByCol => "(array, lambda)",
+            MakeArray => "(rows, columns, lambda)",
+            IsOmitted => "(argument)",
         }
     }
 
@@ -282,7 +359,36 @@ impl Func {
             Floor => "Rounds a number down to the nearest multiple of significance",
             Trunc => "Truncates a number to a given number of digits",
             SumSq => "Returns the sum of the squares of numbers",
+            Filter => "Returns the rows (or columns) of an array that meet a condition",
+            Sort => "Sorts the rows (or columns) of an array",
+            SortBy => "Sorts an array by the values of other arrays",
+            Unique => "Returns the distinct rows (or columns) of an array",
+            Sequence => "Returns an array of sequential numbers",
+            RandArray => "Returns an array of random numbers",
+            Transpose => "Swaps the rows and columns of an array",
+            TextSplit => "Splits text into an array using column and row delimiters",
+            VStack => "Stacks arrays on top of each other",
+            HStack => "Puts arrays side by side",
+            Take => "Returns rows or columns from the start or end of an array",
+            Drop => "Removes rows or columns from the start or end of an array",
+            ChooseCols => "Returns the given columns of an array",
+            ChooseRows => "Returns the given rows of an array",
+            ToCol => "Puts the values of an array into one column",
+            ToRow => "Puts the values of an array into one row",
+            WrapRows => "Wraps a row or column of values into rows of a given length",
+            WrapCols => "Wraps a row or column of values into columns of a given length",
+            Expand => "Pads an array to the given number of rows and columns",
+            Let => "Names intermediate results to use in a calculation",
+            Lambda => "Creates a reusable function with parameters",
+            Map => "Applies a LAMBDA to each value of arrays",
+            Reduce => "Reduces an array to one value by applying a LAMBDA to each value",
+            Scan => "Applies a LAMBDA to each value of an array and returns every intermediate result",
+            ByRow => "Applies a LAMBDA to each row of an array",
+            ByCol => "Applies a LAMBDA to each column of an array",
+            MakeArray => "Builds an array of a given size by calling a LAMBDA for each position",
+            IsOmitted => "Returns TRUE if a LAMBDA parameter was left out",
         }
+
     }
 }
 
@@ -291,6 +397,70 @@ impl Func {
 pub struct RangeRef {
     pub sheet: SheetId,
     pub range: Range,
+}
+
+/// A value during evaluation: one value, an array, a reference (kept as a
+/// reference so functions that take ranges see one), or a LAMBDA.
+#[derive(Clone, Debug)]
+pub enum Val {
+    S(Value),
+    A(Arc<Array>),
+    R(RangeRef),
+    L(Arc<Lambda>),
+    /// A LAMBDA parameter the caller left out.
+    Omitted,
+}
+
+/// A LAMBDA value: parameters, body and the LET names it closed over.
+#[derive(Debug)]
+pub struct Lambda {
+    pub params: Vec<Arc<str>>,
+    pub body: Arc<Expr>,
+    pub env: Vec<(Arc<str>, Val)>,
+}
+
+/// A range or an array, read by position.
+pub(crate) enum Grid {
+    R(RangeRef),
+    A(Arc<Array>),
+}
+
+impl Grid {
+    pub(crate) fn rows(&self) -> usize {
+        match self {
+            Grid::R(r) => r.range.rows() as usize,
+            Grid::A(a) => a.rows,
+        }
+    }
+
+    pub(crate) fn cols(&self) -> usize {
+        match self {
+            Grid::R(r) => r.range.cols() as usize,
+            Grid::A(a) => a.cols,
+        }
+    }
+
+    pub(crate) fn get(&self, cx: &Ctx, r: usize, c: usize) -> Value {
+        match self {
+            Grid::R(rr) => cx.value(rr.sheet, CellRef::new(rr.range.start.row + r as u32, rr.range.start.col + c as u32)).clone(),
+            Grid::A(a) => a.get(r, c).clone(),
+        }
+    }
+
+    /// Rows that can hold anything: a range is clamped to the sheet's used area.
+    pub(crate) fn used_rows(&self, cx: &Ctx) -> usize {
+        match self {
+            Grid::R(rr) => cx.clamp_used(*rr).range.rows() as usize,
+            Grid::A(a) => a.rows,
+        }
+    }
+
+    pub(crate) fn used_cols(&self, cx: &Ctx) -> usize {
+        match self {
+            Grid::R(rr) => cx.clamp_used(*rr).range.cols() as usize,
+            Grid::A(a) => a.cols,
+        }
+    }
 }
 
 /// Evaluation context: the workbook's sheets and names, and the cell holding
@@ -304,21 +474,100 @@ pub struct Ctx<'a> {
     depth: std::cell::Cell<u8>,
     /// Script functions, consulted for names the engine doesn't define.
     pub(crate) udfs: Option<&'a dyn crate::udf::UserFunctions>,
+    /// LET names and LAMBDA parameters in scope, innermost last.
+    locals: std::cell::RefCell<Vec<(Arc<str>, Val)>>,
+    /// How deep LAMBDA calls are nested (recursion guard).
+    calls: std::cell::Cell<u16>,
 }
 
 const MAX_NAME_DEPTH: u8 = 16;
+const MAX_CALL_DEPTH: u16 = 100;
+/// Arrays bigger than this are refused (#NUM!) rather than built.
+pub(crate) const MAX_ARRAY_CELLS: usize = 4_000_000;
 
 static EMPTY: Value = Value::Empty;
 
 impl<'a> Ctx<'a> {
     pub fn new(sheets: &'a Sheets, names: &'a Names, sheet: SheetId, cell: CellRef) -> Self {
-        Self { sheets, names, sheet, cell, depth: std::cell::Cell::new(0), udfs: None }
+        Self { sheets, names, sheet, cell, depth: std::cell::Cell::new(0), locals: Default::default(), calls: std::cell::Cell::new(0), udfs: None }
     }
 
     /// Let formulas call these script functions.
     pub fn with_udfs(mut self, udfs: Option<&'a dyn crate::udf::UserFunctions>) -> Self {
         self.udfs = udfs;
         self
+    }
+
+    /// The value a LET name or LAMBDA parameter is bound to.
+    fn local(&self, name: &str) -> Option<Val> {
+        self.locals.borrow().iter().rev().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
+    }
+
+    /// Run `f` with `name` bound to `v`.
+    pub(crate) fn with_local<T>(&self, name: Arc<str>, v: Val, f: impl FnOnce(&Self) -> T) -> T {
+        self.locals.borrow_mut().push((name, v));
+        let out = f(self);
+        self.locals.borrow_mut().pop();
+        out
+    }
+
+    /// A snapshot of the names in scope (what a LAMBDA closes over).
+    pub(crate) fn env(&self) -> Vec<(Arc<str>, Val)> {
+        self.locals.borrow().clone()
+    }
+
+    /// Call a LAMBDA with already evaluated arguments.
+    pub(crate) fn invoke(&self, l: &Lambda, args: Vec<Val>) -> Val {
+        if args.len() > l.params.len() {
+            return Val::S(Value::Error(ErrorKind::Value));
+        }
+        let depth = self.calls.get();
+        if depth >= MAX_CALL_DEPTH {
+            return Val::S(Value::Error(ErrorKind::Num));
+        }
+        self.calls.set(depth + 1);
+        let mut scope = l.env.clone();
+        let mut args = args.into_iter();
+        for p in &l.params {
+            scope.push((p.clone(), args.next().unwrap_or(Val::Omitted)));
+        }
+        let saved = std::mem::replace(&mut *self.locals.borrow_mut(), scope);
+        let out = eval_val(&l.body, self);
+        *self.locals.borrow_mut() = saved;
+        self.calls.set(depth);
+        out
+    }
+
+    /// Evaluate a defined name's formula: in its own scope (no LET names).
+    fn eval_name_def(&self, e: &Expr) -> Option<Val> {
+        let saved = std::mem::take(&mut *self.locals.borrow_mut());
+        let out = self.nested(|cx| eval_val(e, cx));
+        *self.locals.borrow_mut() = saved;
+        out
+    }
+
+    /// The values of a range as an array (whole rows / columns are clamped
+    /// to the sheet's used area).
+    pub(crate) fn range_array(&self, rr: RangeRef) -> Arc<Array> {
+        let mut r = rr.range;
+        if r.end.row == MAX_ROWS - 1 || r.end.col == MAX_COLS - 1 {
+            let used = self.clamp_used(rr).range;
+            if r.end.row == MAX_ROWS - 1 {
+                r.end.row = used.end.row.max(r.start.row);
+            }
+            if r.end.col == MAX_COLS - 1 {
+                r.end.col = used.end.col.max(r.start.col);
+            }
+        }
+        let (rows, cols) = (r.rows() as usize, r.cols() as usize);
+        if rows.saturating_mul(cols) > MAX_ARRAY_CELLS {
+            return Arc::new(Array::scalar(Value::Error(ErrorKind::Num)));
+        }
+        let mut data = vec![Value::Empty; rows * cols];
+        for (c, cell) in self.iter(RangeRef { range: r, ..rr }) {
+            data[(c.row - r.start.row) as usize * cols + (c.col - r.start.col) as usize] = cell.value.clone();
+        }
+        Arc::new(Array::new(rows, cols, data))
     }
 
     fn store(&self, sheet: SheetId) -> Option<&CellStore> {
@@ -349,16 +598,31 @@ impl<'a> Ctx<'a> {
             }
             Expr::Paren(x) => self.resolve(x),
             Expr::Table(t) => Some(self.sheets.resolve_table(t, self.sheet, self.cell).map(|(sheet, range)| RangeRef { sheet, range })),
+            Expr::SpillRef(r) => {
+                let sheet = r.sheet.unwrap_or(self.sheet);
+                Some(self.sheets.spill_range(sheet, r.cell).map(|range| RangeRef { sheet, range }).ok_or(ErrorKind::Ref))
+            }
             Expr::Name(n) => {
+                if let Some(v) = self.local(n) {
+                    return match v {
+                        Val::R(rr) => Some(Ok(rr)),
+                        _ => None,
+                    };
+                }
                 let def = self.names.lookup(n, self.sheet)?;
-                self.nested(|cx| cx.resolve(&def.expr)).unwrap_or(Some(Err(ErrorKind::Name)))
+                let saved = std::mem::take(&mut *self.locals.borrow_mut());
+                let out = self.nested(|cx| cx.resolve(&def.expr)).unwrap_or(Some(Err(ErrorKind::Name)));
+                *self.locals.borrow_mut() = saved;
+                out
             }
             Expr::Call(Func::Offset, args) => Some(self.offset(args)),
             Expr::Call(Func::Indirect, args) => Some(self.indirect(args)),
-            Expr::Call(Func::Index, args) => Some(self.index_ref(args)),
+            // INDEX of a range is a reference; INDEX of an array is a value.
+            Expr::Call(Func::Index, args) if args.first().is_some_and(|a| self.resolve(a).is_some()) => Some(self.index_ref(args)),
             _ => None,
         }
     }
+
 
     /// A range used where one value is expected: a single cell gives its
     /// value; otherwise implicit intersection with the formula's row/column.
@@ -478,20 +742,30 @@ pub fn eval(e: &Expr, cx: &Ctx) -> Value {
         Expr::Text(t) => Value::Text(t.clone()),
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Error(err) => Value::Error(*err),
-        Expr::Ref(_) | Expr::Range(..) | Expr::Table(_) | Expr::Call(Func::Offset | Func::Indirect | Func::Index, _) => match cx.resolve(e) {
+        Expr::Missing => Value::Empty,
+        Expr::Ref(_) | Expr::Range(..) | Expr::Table(_) | Expr::SpillRef(_) | Expr::Call(Func::Offset | Func::Indirect, _) => match cx.resolve(e) {
             Some(Ok(rr)) => cx.scalar_of(rr),
             Some(Err(err)) => Value::Error(err),
             None => Value::Error(ErrorKind::Value),
         },
+        Expr::Call(Func::Index, args) => match cx.resolve(e) {
+            Some(Ok(rr)) => cx.scalar_of(rr),
+            Some(Err(err)) => Value::Error(err),
+            None => index_array(args, cx).map_or_else(Value::Error, |v| scalar(v, cx)),
+        },
         Expr::Name(n) => match cx.resolve(e) {
             Some(Ok(rr)) => cx.scalar_of(rr),
             Some(Err(err)) => Value::Error(err),
-            // A name for a constant or formula rather than a range.
-            None => match cx.names.lookup(n, cx.sheet) {
-                Some(def) => cx.nested(|cx| eval(&def.expr, cx)).unwrap_or(Value::Error(ErrorKind::Name)),
-                None => Value::Error(ErrorKind::Name),
+            None => match cx.local(n) {
+                Some(v) => scalar(v, cx),
+                // A name for a constant or formula rather than a range.
+                None => match cx.names.lookup(n, cx.sheet) {
+                    Some(def) => cx.eval_name_def(&def.expr).map_or(Value::Error(ErrorKind::Name), |v| scalar(v, cx)),
+                    None => Value::Error(ErrorKind::Name),
+                },
             },
         },
+        Expr::Implicit(_) | Expr::UnknownFunc(..) | Expr::CallExpr(..) | Expr::ArrayLit(_) => scalar(eval_val(e, cx), cx),
         Expr::Paren(x) | Expr::Plus(x) => eval(x, cx),
         Expr::Neg(x) => match eval(x, cx).to_number() {
             Ok(n) => Value::num(-n),
@@ -503,9 +777,375 @@ pub fn eval(e: &Expr, cx: &Ctx) -> Value {
         },
         Expr::Binary(op, a, b) => binary(*op, eval(a, cx), eval(b, cx)),
         Expr::Call(f, args) => call(*f, args, cx).unwrap_or_else(Value::Error),
-        Expr::UnknownFunc(name, args) => crate::udf::call(name, args, cx),
     }
 }
+
+/// One value from an evaluation result: a range gives the cell in the
+/// formula's row or column (implicit intersection), an array its first value.
+pub(crate) fn scalar(v: Val, cx: &Ctx) -> Value {
+    match v {
+        Val::S(v) => v,
+        Val::A(a) => a.data[0].clone(),
+        Val::R(rr) => cx.scalar_of(rr),
+        Val::L(_) => Value::Error(ErrorKind::Calc),
+        Val::Omitted => Value::Empty,
+    }
+}
+
+/// An evaluation result as an array (a single value is a 1×1 array).
+pub(crate) fn to_array(v: Val, cx: &Ctx) -> EvalResult<Arc<Array>> {
+    match v {
+        Val::S(Value::Error(e)) => Err(e),
+        Val::S(v) => Ok(Arc::new(Array::scalar(v))),
+        Val::A(a) => Ok(a),
+        Val::R(rr) => {
+            let a = cx.range_array(rr);
+            match &a.data[..] {
+                [Value::Error(ErrorKind::Num)] if rr.range.cell_count() > 1 => Err(ErrorKind::Num),
+                _ => Ok(a),
+            }
+        }
+        Val::L(_) => Err(ErrorKind::Calc),
+        Val::Omitted => Ok(Arc::new(Array::scalar(Value::Empty))),
+    }
+}
+
+/// Whether a result holds more than one value.
+fn is_multi(v: &Val) -> bool {
+    match v {
+        Val::A(a) => !a.is_scalar(),
+        Val::R(rr) => rr.range.start != rr.range.end,
+        _ => false,
+    }
+}
+
+/// The value of an expression where an array is allowed: what a cell's
+/// formula evaluates to (an array spills), and what array functions,
+/// operators and LET/LAMBDA work with.
+pub fn eval_val(e: &Expr, cx: &Ctx) -> Val {
+    match e {
+        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => Val::S(eval(e, cx)),
+        Expr::ArrayLit(a) => Val::A(a.clone()),
+        Expr::Missing => Val::Omitted,
+        Expr::Ref(_) | Expr::Range(..) | Expr::Table(_) | Expr::SpillRef(_) | Expr::Call(Func::Offset | Func::Indirect, _) => match cx.resolve(e) {
+            Some(Ok(rr)) => Val::R(rr),
+            Some(Err(err)) => Val::S(Value::Error(err)),
+            None => Val::S(Value::Error(ErrorKind::Value)),
+        },
+        Expr::Name(n) => {
+            if let Some(v) = cx.local(n) {
+                return v;
+            }
+            match cx.resolve(e) {
+                Some(Ok(rr)) => Val::R(rr),
+                Some(Err(err)) => Val::S(Value::Error(err)),
+                None => match cx.names.lookup(n, cx.sheet) {
+                    Some(def) => cx.eval_name_def(&def.expr).unwrap_or(Val::S(Value::Error(ErrorKind::Name))),
+                    None => Val::S(Value::Error(ErrorKind::Name)),
+                },
+            }
+        }
+        Expr::Implicit(x) => Val::S(match cx.resolve(x) {
+            Some(Ok(rr)) => cx.scalar_of(rr),
+            Some(Err(err)) => Value::Error(err),
+            None => scalar(eval_val(x, cx), cx),
+        }),
+        Expr::Paren(x) | Expr::Plus(x) => eval_val(x, cx),
+        Expr::Neg(x) => map_val(eval_val(x, cx), cx, |v| match v.to_number() {
+            Ok(n) => Value::num(-n),
+            Err(err) => Value::Error(err),
+        }),
+        Expr::Percent(x) => map_val(eval_val(x, cx), cx, |v| match v.to_number() {
+            Ok(n) => Value::num(n / 100.0),
+            Err(err) => Value::Error(err),
+        }),
+        Expr::Binary(op, a, b) => {
+            let (va, vb) = (eval_val(a, cx), eval_val(b, cx));
+            if !is_multi(&va) && !is_multi(&vb) {
+                return Val::S(binary(*op, scalar(va, cx), scalar(vb, cx)));
+            }
+            match (to_array(va, cx), to_array(vb, cx)) {
+                (Ok(x), Ok(y)) => Val::A(Arc::new(broadcast(&[&x, &y], |v| binary(*op, v[0].clone(), v[1].clone())))),
+                (Err(err), _) | (_, Err(err)) => Val::S(Value::Error(err)),
+            }
+        }
+        Expr::Call(f, args) => call_val(*f, args, cx),
+        Expr::UnknownFunc(n, args) => {
+            let callee = match cx.local(n) {
+                Some(v) => v,
+                None => match cx.names.lookup(n, cx.sheet) {
+                    Some(def) => cx.eval_name_def(&def.expr).unwrap_or(Val::S(Value::Error(ErrorKind::Name))),
+                    // Not a name: maybe a script function.
+                    None => return crate::udf::call(n, args, cx),
+                },
+            };
+            apply(callee, args, cx)
+        }
+        Expr::CallExpr(callee, args) => apply(eval_val(callee, cx), args, cx),
+    }
+}
+
+/// Call what `callee` evaluated to (it must be a LAMBDA) with `args`.
+fn apply(callee: Val, args: &[Expr], cx: &Ctx) -> Val {
+    match callee {
+        Val::L(l) => {
+            let vals = args.iter().map(|a| eval_val(a, cx)).collect();
+            cx.invoke(&l, vals)
+        }
+        Val::S(Value::Error(e)) => Val::S(Value::Error(e)),
+        _ => Val::S(Value::Error(ErrorKind::Value)),
+    }
+}
+
+/// Apply `f` to one value or to each value of an array.
+fn map_val(v: Val, cx: &Ctx, f: impl Fn(Value) -> Value) -> Val {
+    if !is_multi(&v) {
+        return Val::S(f(scalar(v, cx)));
+    }
+    match to_array(v, cx) {
+        Ok(a) => Val::A(Arc::new(Array::new(a.rows, a.cols, a.data.iter().cloned().map(f).collect()))),
+        Err(e) => Val::S(Value::Error(e)),
+    }
+}
+
+/// Combine arrays element by element. A 1-row (1-column) array is repeated
+/// down (across); positions past a smaller array's edge are #N/A.
+pub(crate) fn broadcast(arrays: &[&Array], f: impl Fn(&[Value]) -> Value) -> Array {
+    let dim = |get: fn(&Array) -> usize| arrays.iter().map(|a| get(a)).filter(|&n| n != 1).max().unwrap_or(1);
+    let (rows, cols) = (dim(|a| a.rows), dim(|a| a.cols));
+    let mut data = Vec::with_capacity(rows * cols);
+    let mut vals = Vec::with_capacity(arrays.len());
+    for r in 0..rows {
+        for c in 0..cols {
+            vals.clear();
+            for a in arrays {
+                let rr = if a.rows == 1 { 0 } else { r };
+                let cc = if a.cols == 1 { 0 } else { c };
+                vals.push(if rr < a.rows && cc < a.cols { a.get(rr, cc).clone() } else { Value::Error(ErrorKind::NA) });
+            }
+            data.push(f(&vals));
+        }
+    }
+    Array::new(rows, cols, data)
+}
+
+/// Whether an expression might evaluate to more than one value (so a
+/// function taking one value there may need to return an array).
+fn may_be_array(e: &Expr, cx: &Ctx) -> bool {
+    match e {
+        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Missing | Expr::Ref(_) | Expr::Implicit(_) => false,
+        Expr::Name(n) => match cx.local(n) {
+            Some(v) => is_multi(&v),
+            None => true,
+        },
+        Expr::Neg(x) | Expr::Plus(x) | Expr::Percent(x) | Expr::Paren(x) => may_be_array(x, cx),
+        Expr::Binary(_, a, b) => may_be_array(a, cx) || may_be_array(b, cx),
+        Expr::Call(f, args) => {
+            f.is_dynamic()
+                || matches!(f, Func::Offset | Func::Indirect | Func::Index | Func::Transpose | Func::Row | Func::Column)
+                || args.iter().enumerate().any(|(i, a)| f.lifts_arg(i) && may_be_array(a, cx))
+                || (*f == Func::XLookup && args.len() > 2)
+        }
+        _ => true,
+    }
+}
+
+/// An evaluated value as a literal expression (to call a function on one
+/// element of an array).
+fn literal(v: &Value) -> Expr {
+    match v {
+        Value::Empty => Expr::Missing,
+        Value::Number(n) => Expr::Number(*n),
+        Value::Text(t) => Expr::Text(t.clone()),
+        Value::Bool(b) => Expr::Bool(*b),
+        Value::Error(e) => Expr::Error(*e),
+    }
+}
+
+/// A function taking single values called with arrays: call it once per
+/// position (`=LEN(A1:A3)` gives three lengths). None when no lifted
+/// argument holds an array.
+fn lift(f: Func, args: &[Expr], cx: &Ctx) -> Option<Val> {
+    if !args.iter().enumerate().any(|(i, a)| f.lifts_arg(i) && may_be_array(a, cx)) {
+        return None;
+    }
+    let mut vals: Vec<Option<Val>> = args.iter().enumerate().map(|(i, a)| f.lifts_arg(i).then(|| eval_val(a, cx))).collect();
+    let mut arrays: Vec<(usize, Arc<Array>)> = Vec::new();
+    for (i, v) in vals.iter_mut().enumerate() {
+        if let Some(x) = v
+            && is_multi(x)
+        {
+            match to_array(x.clone(), cx) {
+                Ok(a) => arrays.push((i, a)),
+                Err(e) => return Some(Val::S(Value::Error(e))),
+            }
+        }
+    }
+    let mut call_args: Vec<Expr> = args.to_vec();
+    for (i, v) in vals.iter().enumerate() {
+        if let Some(v) = v
+            && !is_multi(v)
+        {
+            call_args[i] = match v {
+                Val::Omitted => Expr::Missing,
+                Val::L(_) => Expr::Error(ErrorKind::Calc),
+                v => literal(&scalar(v.clone(), cx)),
+            };
+        }
+    }
+    if arrays.is_empty() {
+        return Some(Val::S(call(f, &call_args, cx).unwrap_or_else(Value::Error)));
+    }
+    let refs: Vec<&Array> = arrays.iter().map(|(_, a)| a.as_ref()).collect();
+    let out = broadcast(&refs, |vs| {
+        let mut a = call_args.clone();
+        for ((i, _), v) in arrays.iter().zip(vs) {
+            a[*i] = literal(v);
+        }
+        call(f, &a, cx).unwrap_or_else(Value::Error)
+    });
+    Some(Val::A(Arc::new(out)))
+}
+
+/// A function call where an array result is allowed.
+fn call_val(f: Func, args: &[Expr], cx: &Ctx) -> Val {
+    use Func::*;
+    let out = match f {
+        _ if f.is_dynamic() || f == Transpose => crate::array::call(f, args, cx),
+        Index if args.first().is_some_and(|a| cx.resolve(a).is_some()) => cx.index_ref(args).map(Val::R),
+        Index => index_array(args, cx),
+        If => match args.first().map(|c| eval_val(c, cx)) {
+            Some(cond) if is_multi(&cond) => crate::array::if_array(cond, args, cx),
+            _ if args.len() < 2 || args.len() > 3 => Err(ErrorKind::Value),
+            Some(cond) => match scalar(cond, cx).to_bool() {
+                Ok(true) => Ok(eval_val(&args[1], cx)),
+                Ok(false) => Ok(args.get(2).map_or(Val::S(Value::Bool(false)), |e| match e {
+                    Expr::Missing => Val::S(Value::Number(0.0)),
+                    e => eval_val(e, cx),
+                })),
+                Err(e) => Err(e),
+            },
+            None => Err(ErrorKind::Value),
+        },
+        IfError | IfNa if args.len() == 2 => {
+            let v = eval_val(&args[0], cx);
+            let caught = |e: ErrorKind| f == IfError || e == ErrorKind::NA;
+            match v {
+                Val::S(Value::Error(e)) if caught(e) => Ok(eval_val(&args[1], cx)),
+                v if is_multi(&v) => {
+                    let a = to_array(v, cx);
+                    let fallback = scalar(eval_val(&args[1], cx), cx);
+                    a.map(|a| Val::A(Arc::new(Array::new(a.rows, a.cols, a.data.iter().map(|x| match x {
+                        Value::Error(e) if caught(*e) => fallback.clone(),
+                        x => x.clone(),
+                    }).collect()))))
+                }
+                v => Ok(v),
+            }
+        }
+        Choose if args.len() >= 2 && !may_be_array(&args[0], cx) => {
+            let i = num_arg(args, 0, cx);
+            match i {
+                Ok(i) if i >= 1.0 && (i.trunc() as usize) < args.len() => Ok(eval_val(&args[i.trunc() as usize], cx)),
+                Ok(_) => Err(ErrorKind::Value),
+                Err(e) => Err(e),
+            }
+        }
+        Row | Column if args.len() == 1 => match cx.resolve(&args[0]) {
+            Some(Ok(rr)) if (f == Row && rr.range.rows() > 1) || (f == Column && rr.range.cols() > 1) => {
+                let r = rr.range;
+                let data: Vec<Value> = if f == Row { (r.start.row..=r.end.row).map(|x| Value::Number(x as f64 + 1.0)).collect() } else { (r.start.col..=r.end.col).map(|x| Value::Number(x as f64 + 1.0)).collect() };
+                let n = data.len();
+                Ok(Val::A(Arc::new(if f == Row { Array::new(n, 1, data) } else { Array::new(1, n, data) })))
+            }
+            _ => call(f, args, cx).map(Val::S),
+        },
+        XLookup => xlookup(args, cx),
+        _ => match lift(f, args, cx) {
+            Some(v) => Ok(v),
+            None => call(f, args, cx).map(Val::S),
+        },
+    };
+    out.unwrap_or_else(|e| Val::S(Value::Error(e)))
+}
+
+/// INDEX(array, row_num, [column_num]) on an array value (0 = whole row/column).
+fn index_array(args: &[Expr], cx: &Ctx) -> EvalResult<Val> {
+    arg_count(args, 2, 3)?;
+    let a = to_array(eval_val(&args[0], cx), cx)?;
+    let i = num_arg(args, 1, cx)?.trunc() as i64;
+    let j = opt_num(args, 2, cx, 0.0)?.trunc() as i64;
+    let (row, col) = match (a.rows, a.cols, args.len()) {
+        (1, _, 2) => (1, i),
+        (_, 1, 2) => (i, 1),
+        _ => (i, j),
+    };
+    if row < 0 || col < 0 || row > a.rows as i64 || col > a.cols as i64 {
+        return Err(ErrorKind::Ref);
+    }
+    let rows: Vec<usize> = if row == 0 { (0..a.rows).collect() } else { vec![row as usize - 1] };
+    let cols: Vec<usize> = if col == 0 { (0..a.cols).collect() } else { vec![col as usize - 1] };
+    let data = rows.iter().flat_map(|&r| cols.iter().map(move |&c| (r, c))).map(|(r, c)| a.get(r, c).clone()).collect();
+    let out = Array::new(rows.len(), cols.len(), data);
+    Ok(if out.is_scalar() { Val::S(out.data[0].clone()) } else { Val::A(Arc::new(out)) })
+}
+
+/// A range or array argument.
+pub(crate) fn grid_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<Grid> {
+    let e = args.get(i).ok_or(ErrorKind::Value)?;
+    if let Some(rr) = cx.resolve(e) {
+        return Ok(Grid::R(rr?));
+    }
+    match eval_val(e, cx) {
+        Val::R(rr) => Ok(Grid::R(rr)),
+        v => to_array(v, cx).map(Grid::A),
+    }
+}
+
+/// XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode]):
+/// a multi-row (or multi-column) return array gives the whole matching row (column).
+fn xlookup(args: &[Expr], cx: &Ctx) -> EvalResult<Val> {
+    arg_count(args, 3, 6)?;
+    if let Some(v) = lift(Func::XLookup, args, cx) {
+        return Ok(v);
+    }
+    let target = eval(&args[0], cx);
+    if let Value::Error(e) = target {
+        return Err(e);
+    }
+    let look = grid_arg(args, 1, cx)?;
+    let ret = grid_arg(args, 2, cx)?;
+    let mode = opt_num(args, 4, cx, 0.0)? as i64;
+    let reverse = opt_num(args, 5, cx, 1.0)? < 0.0;
+    let vertical = look.cols() == 1;
+    if (vertical && ret.rows() != look.rows()) || (!vertical && ret.cols() != look.cols()) {
+        return Err(ErrorKind::Value);
+    }
+    match xlookup_find(cx, &target, &look, mode, reverse)? {
+        Some(off) => {
+            let off = off as usize;
+            let n = if vertical { ret.cols() } else { ret.rows() };
+            let row = |k: usize| if vertical { (off, k) } else { (k, off) };
+            if n == 1 {
+                let (r, c) = row(0);
+                return Ok(match &ret {
+                    Grid::R(rr) => Val::R(RangeRef { sheet: rr.sheet, range: Range::single(CellRef::new(rr.range.start.row + r as u32, rr.range.start.col + c as u32)) }),
+                    Grid::A(_) => Val::S(ret.get(cx, r, c)),
+                });
+            }
+            let data: Vec<Value> = (0..n).map(|k| {
+                let (r, c) = row(k);
+                ret.get(cx, r, c)
+            }).collect();
+            Ok(Val::A(Arc::new(if vertical { Array::new(1, n, data) } else { Array::new(n, 1, data) })))
+        }
+        None => Ok(match args.get(3) {
+            Some(Expr::Missing) | None => Val::S(Value::Error(ErrorKind::NA)),
+            Some(e) => eval_val(e, cx),
+        }),
+    }
+}
+
 
 fn binary(op: BinOp, a: Value, b: Value) -> Value {
     if let Value::Error(e) = a {
@@ -563,22 +1203,22 @@ pub fn compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-fn arg_count(args: &[Expr], min: usize, max: usize) -> EvalResult<()> {
+pub(crate) fn arg_count(args: &[Expr], min: usize, max: usize) -> EvalResult<()> {
     if args.len() < min || args.len() > max { Err(ErrorKind::Value) } else { Ok(()) }
 }
 
-fn num_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<f64> {
+pub(crate) fn num_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<f64> {
     eval(&args[i], cx).to_number()
 }
 
-fn opt_num(args: &[Expr], i: usize, cx: &Ctx, default: f64) -> EvalResult<f64> {
+pub(crate) fn opt_num(args: &[Expr], i: usize, cx: &Ctx, default: f64) -> EvalResult<f64> {
     match args.get(i) {
+        Some(Expr::Missing) | None => Ok(default),
         Some(e) => eval(e, cx).to_number(),
-        None => Ok(default),
     }
 }
 
-fn text_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<Arc<str>> {
+pub(crate) fn text_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<Arc<str>> {
     eval(&args[i], cx).to_text()
 }
 
@@ -586,23 +1226,51 @@ fn range_arg(args: &[Expr], i: usize, cx: &Ctx) -> EvalResult<RangeRef> {
     args.get(i).and_then(|e| cx.resolve(e)).unwrap_or(Err(ErrorKind::Value))
 }
 
-/// Visit numbers the way SUM does: references contribute only numeric cells
-/// (errors propagate), direct arguments are coerced.
+/// An argument of a function that takes ranges, arrays or single values (SUM's).
+enum ArgVals {
+    Range(RangeRef),
+    Array(Arc<Array>),
+    Direct(Value),
+}
+
+fn arg_vals(a: &Expr, cx: &Ctx) -> EvalResult<ArgVals> {
+    if let Some(rr) = cx.resolve(a) {
+        return Ok(ArgVals::Range(rr?));
+    }
+    Ok(match eval_val(a, cx) {
+        Val::R(rr) => ArgVals::Range(rr),
+        Val::A(arr) => ArgVals::Array(arr),
+        Val::S(v) => ArgVals::Direct(v),
+        Val::Omitted => ArgVals::Direct(Value::Empty),
+        Val::L(_) => return Err(ErrorKind::Calc),
+    })
+}
+
+/// Visit numbers the way SUM does: references and arrays contribute only
+/// numbers (errors propagate), direct arguments are coerced.
 fn for_each_number(args: &[Expr], cx: &Ctx, mut f: impl FnMut(f64)) -> EvalResult<()> {
     for a in args {
-        if let Some(rr) = cx.resolve(a) {
-            for (_, cell) in cx.iter(rr?) {
-                match &cell.value {
-                    Value::Number(n) => f(*n),
-                    Value::Error(e) => return Err(*e),
-                    _ => {}
+        match arg_vals(a, cx)? {
+            ArgVals::Range(rr) => {
+                for (_, cell) in cx.iter(rr) {
+                    match &cell.value {
+                        Value::Number(n) => f(*n),
+                        Value::Error(e) => return Err(*e),
+                        _ => {}
+                    }
                 }
             }
-        } else {
-            match eval(a, cx) {
-                Value::Empty => {}
-                v => f(v.to_number()?),
+            ArgVals::Array(arr) => {
+                for v in &arr.data {
+                    match v {
+                        Value::Number(n) => f(*n),
+                        Value::Error(e) => return Err(*e),
+                        _ => {}
+                    }
+                }
             }
+            ArgVals::Direct(Value::Empty) => {}
+            ArgVals::Direct(v) => f(v.to_number()?),
         }
     }
     Ok(())
@@ -623,7 +1291,7 @@ fn round_away(x: f64) -> f64 {
 
 static RNG: AtomicU64 = AtomicU64::new(0);
 
-fn random() -> f64 {
+pub(crate) fn random() -> f64 {
     let mut x = RNG.load(AtomicOrdering::Relaxed);
     if x == 0 {
         x = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1;
@@ -831,19 +1499,27 @@ fn cells_row_major<'c>(cx: &'c Ctx, rr: RangeRef) -> Vec<(CellRef, &'c Value)> {
 fn collect_numbers(args: &[Expr], cx: &Ctx) -> EvalResult<Vec<f64>> {
     let mut out = Vec::new();
     for a in args {
-        if let Some(rr) = cx.resolve(a) {
-            for (_, v) in cells_row_major(cx, rr?) {
-                match v {
-                    Value::Number(n) => out.push(*n),
-                    Value::Error(e) => return Err(*e),
-                    _ => {}
+        let mut take = |v: &Value| -> EvalResult<()> {
+            match v {
+                Value::Number(n) => out.push(*n),
+                Value::Error(e) => return Err(*e),
+                _ => {}
+            }
+            Ok(())
+        };
+        match arg_vals(a, cx)? {
+            ArgVals::Range(rr) => {
+                for (_, v) in cells_row_major(cx, rr) {
+                    take(v)?;
                 }
             }
-        } else {
-            match eval(a, cx) {
-                Value::Empty => {}
-                v => out.push(v.to_number()?),
+            ArgVals::Array(arr) => {
+                for v in &arr.data {
+                    take(v)?;
+                }
             }
+            ArgVals::Direct(Value::Empty) => {}
+            ArgVals::Direct(v) => out.push(v.to_number()?),
         }
     }
     Ok(out)
@@ -1007,17 +1683,13 @@ const CP1252_HIGH: [char; 32] = [
 
 /// Position (offset within `look`) of `target` per XLOOKUP/XMATCH match_mode
 /// (0 exact, -1 exact or next smaller, 1 exact or next larger, 2 wildcard).
-fn xlookup_find(cx: &Ctx, target: &Value, look: RangeRef, mode: i64, reverse: bool) -> EvalResult<Option<u32>> {
-    let vertical = look.range.cols() == 1;
-    if !vertical && look.range.rows() != 1 {
+fn xlookup_find(cx: &Ctx, target: &Value, look: &Grid, mode: i64, reverse: bool) -> EvalResult<Option<u32>> {
+    let vertical = look.cols() == 1;
+    if !vertical && look.rows() != 1 {
         return Err(ErrorKind::Value);
     }
-    let used = cx.clamp_used(look);
-    let mut keys: Vec<(u32, Value)> = used
-        .range
-        .iter()
-        .map(|c| (if vertical { c.row - look.range.start.row } else { c.col - look.range.start.col }, cx.value(look.sheet, c).clone()))
-        .collect();
+    let n = if vertical { look.used_rows(cx) } else { look.used_cols(cx) };
+    let mut keys: Vec<(u32, Value)> = (0..n).map(|i| (i as u32, if vertical { look.get(cx, i, 0) } else { look.get(cx, 0, i) })).collect();
     if reverse {
         keys.reverse();
     }
@@ -1109,22 +1781,25 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
         Count | CountA => {
             let mut c = 0u64;
             for a in args {
-                if let Some(rr) = cx.resolve(a) {
-                    for (_, cell) in cx.iter(rr?) {
-                        if f == CountA || cell.value.is_number() {
-                            c += 1;
+                match arg_vals(a, cx)? {
+                    ArgVals::Range(rr) => {
+                        for (_, cell) in cx.iter(rr) {
+                            if f == CountA || cell.value.is_number() {
+                                c += 1;
+                            }
                         }
                     }
-                } else {
-                    let v = eval(a, cx);
-                    let counts = match (&v, f) {
-                        (v, CountA) => !v.is_empty(),
-                        (Value::Number(_) | Value::Bool(_), _) => true,
-                        (Value::Text(t), _) => parse_number(t).is_some(),
-                        _ => false,
-                    };
-                    if counts {
-                        c += 1;
+                    ArgVals::Array(arr) => c += arr.data.iter().filter(|v| if f == CountA { !v.is_empty() } else { v.is_number() }).count() as u64,
+                    ArgVals::Direct(v) => {
+                        let counts = match (&v, f) {
+                            (v, CountA) => !v.is_empty(),
+                            (Value::Number(_) | Value::Bool(_), _) => true,
+                            (Value::Text(t), _) => parse_number(t).is_some(),
+                            _ => false,
+                        };
+                        if counts {
+                            c += 1;
+                        }
                     }
                 }
             }
@@ -1177,6 +1852,27 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
                 _ if count == 0 => Value::Error(ErrorKind::Div0),
                 _ => Value::num(total / count as f64),
             }
+        }
+        SumProduct if args.iter().any(|a| cx.resolve(a).is_none()) => {
+            // Arrays (`SUMPRODUCT((A1:A5>2)*B1:B5)`): multiply position by position.
+            let arrays: Vec<Arc<Array>> = args.iter().map(|a| to_array(eval_val(a, cx), cx)).collect::<EvalResult<_>>()?;
+            let (rows, cols) = (arrays[0].rows, arrays[0].cols);
+            if arrays.iter().any(|a| a.rows != rows || a.cols != cols) {
+                return Err(ErrorKind::Value);
+            }
+            let mut total = 0.0;
+            for i in 0..rows * cols {
+                let mut p = 1.0;
+                for a in &arrays {
+                    match &a.data[i] {
+                        Value::Number(n) => p *= n,
+                        Value::Error(e) => return Err(*e),
+                        _ => p = 0.0,
+                    }
+                }
+                total += p;
+            }
+            Value::num(total)
         }
         SumProduct => {
             if args.is_empty() {
@@ -1250,7 +1946,11 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             if eval(&args[0], cx).to_bool()? {
                 eval(&args[1], cx)
             } else {
-                args.get(2).map_or(Value::Bool(false), |e| eval(e, cx))
+                match args.get(2) {
+                    None => Value::Bool(false),
+                    Some(Expr::Missing) => Value::Number(0.0),
+                    Some(e) => eval(e, cx),
+                }
             }
         }
         Ifs => {
@@ -1275,17 +1975,27 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             let mut acc: Option<bool> = None;
             for a in args {
                 let mut take = |b: bool| acc = Some(if f == And { acc.unwrap_or(true) && b } else { acc.unwrap_or(false) || b });
-                if let Some(rr) = cx.resolve(a) {
-                    for (_, cell) in cx.iter(rr?) {
-                        match &cell.value {
-                            Value::Bool(b) => take(*b),
-                            Value::Number(n) => take(*n != 0.0),
-                            Value::Error(e) => return Err(*e),
-                            _ => {}
+                let mut take_cell = |v: &Value| -> EvalResult<()> {
+                    match v {
+                        Value::Bool(b) => take(*b),
+                        Value::Number(n) => take(*n != 0.0),
+                        Value::Error(e) => return Err(*e),
+                        _ => {}
+                    }
+                    Ok(())
+                };
+                match arg_vals(a, cx)? {
+                    ArgVals::Range(rr) => {
+                        for (_, cell) in cx.iter(rr) {
+                            take_cell(&cell.value)?;
                         }
                     }
-                } else {
-                    take(eval(a, cx).to_bool()?);
+                    ArgVals::Array(arr) => {
+                        for v in &arr.data {
+                            take_cell(v)?;
+                        }
+                    }
+                    ArgVals::Direct(v) => take(v.to_bool()?),
                 }
             }
             Value::Bool(acc.ok_or(ErrorKind::Value)?)
@@ -1329,13 +2039,22 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
         Concat | Concatenate => {
             let mut out = String::new();
             for a in args {
-                match cx.resolve(a) {
-                    Some(rr) if f == Concat => {
-                        for (_, cell) in cx.iter(rr?) {
+                if f == Concatenate {
+                    out.push_str(&eval(a, cx).to_text()?);
+                    continue;
+                }
+                match arg_vals(a, cx)? {
+                    ArgVals::Range(rr) => {
+                        for (_, cell) in cx.iter(rr) {
                             out.push_str(&cell.value.to_text()?);
                         }
                     }
-                    _ => out.push_str(&eval(a, cx).to_text()?),
+                    ArgVals::Array(arr) => {
+                        for v in &arr.data {
+                            out.push_str(&v.to_text()?);
+                        }
+                    }
+                    ArgVals::Direct(v) => out.push_str(&v.to_text()?),
                 }
             }
             Value::text(out)
@@ -1390,6 +2109,32 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
                 _ => v == Value::Error(ErrorKind::NA),
             })
         }
+        VLookup | HLookup if !matches!(args.get(1).map(|a| cx.resolve(a)), Some(Some(_))) => {
+            // A table that's an array value.
+            arg_count(args, 3, 4)?;
+            let target = eval(&args[0], cx);
+            if let Value::Error(e) = target {
+                return Err(e);
+            }
+            let table = grid_arg(args, 1, cx)?;
+            let idx = num_arg(args, 2, cx)?.trunc() as i64;
+            let approx = match args.get(3) {
+                Some(e) => eval(e, cx).to_bool()?,
+                None => true,
+            };
+            let vertical = f == VLookup;
+            let (n, span) = if vertical { (table.rows(), table.cols()) } else { (table.cols(), table.rows()) };
+            if idx < 1 {
+                return Err(ErrorKind::Value);
+            }
+            if idx as usize > span {
+                return Err(ErrorKind::Ref);
+            }
+            let keys = (0..n).map(|i| (i as u32, if vertical { table.get(cx, i, 0) } else { table.get(cx, 0, i) }));
+            let hit = if approx { lookup_approx(&target, keys, false) } else { lookup_exact(&target, keys, true) };
+            let i = hit.ok_or(ErrorKind::NA)? as usize;
+            if vertical { table.get(cx, i, idx as usize - 1) } else { table.get(cx, idx as usize - 1, i) }
+        }
         VLookup | HLookup => {
             arg_count(args, 3, 4)?;
             let target = eval(&args[0], cx);
@@ -1418,27 +2163,23 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             let cell = if vertical { CellRef::new(i, t.start.col + idx as u32 - 1) } else { CellRef::new(t.start.row + idx as u32 - 1, i) };
             cx.value(table.sheet, cell).clone()
         }
-        XLookup => {
-            arg_count(args, 3, 6)?;
+        XLookup => scalar(xlookup(args, cx)?, cx),
+        Match if !matches!(args.get(1).map(|a| cx.resolve(a)), Some(Some(_))) => {
+            arg_count(args, 2, 3)?;
             let target = eval(&args[0], cx);
             if let Value::Error(e) = target {
                 return Err(e);
             }
-            let look = range_arg(args, 1, cx)?;
-            let ret = range_arg(args, 2, cx)?;
-            let mode = opt_num(args, 4, cx, 0.0)? as i64;
-            let reverse = opt_num(args, 5, cx, 1.0)? < 0.0;
-            let vertical = look.range.cols() == 1;
-            match xlookup_find(cx, &target, look, mode, reverse)? {
-                Some(off) => {
-                    let c = if vertical { CellRef::new(ret.range.start.row + off, ret.range.start.col) } else { CellRef::new(ret.range.start.row, ret.range.start.col + off) };
-                    cx.value(ret.sheet, c).clone()
-                }
-                None => match args.get(3) {
-                    Some(e) => eval(e, cx),
-                    None => Value::Error(ErrorKind::NA),
-                },
+            let g = grid_arg(args, 1, cx)?;
+            if g.rows() > 1 && g.cols() > 1 {
+                return Err(ErrorKind::NA);
             }
+            let mt = opt_num(args, 2, cx, 1.0)?;
+            let vertical = g.cols() == 1;
+            let n = if vertical { g.rows() } else { g.cols() };
+            let keys = (0..n).map(|i| (i as u32, if vertical { g.get(cx, i, 0) } else { g.get(cx, 0, i) }));
+            let hit = if mt == 0.0 { lookup_exact(&target, keys, true) } else { lookup_approx(&target, keys, mt < 0.0) };
+            Value::Number(hit.ok_or(ErrorKind::NA)? as f64 + 1.0)
         }
         Match => {
             arg_count(args, 2, 3)?;
@@ -1459,7 +2200,8 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             let base = if vertical { r.start.row } else { r.start.col };
             Value::Number((i - base + 1) as f64)
         }
-        Index => cx.scalar_of(cx.index_ref(args)?),
+        Index if args.first().is_some_and(|a| cx.resolve(a).is_some()) => cx.scalar_of(cx.index_ref(args)?),
+        Index => scalar(index_array(args, cx)?, cx),
         Offset | Indirect => {
             // Reached only via call(); eval() resolves these as references.
             let rr = if f == Offset { cx.offset(args)? } else { cx.indirect(args)? };
@@ -1475,8 +2217,8 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
         }
         Rows | Columns => {
             arg_count(args, 1, 1)?;
-            let r = range_arg(args, 0, cx)?.range;
-            Value::Number(if f == Rows { r.rows() } else { r.cols() } as f64)
+            let g = grid_arg(args, 0, cx)?;
+            Value::Number(if f == Rows { g.rows() } else { g.cols() } as f64)
         }
         Date => {
             arg_count(args, 3, 3)?;
@@ -1614,16 +2356,20 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
                 Ok(())
             };
             for a in &args[2..] {
-                match cx.resolve(a) {
-                    Some(rr) => {
-                        let rr = rr?;
+                match arg_vals(a, cx)? {
+                    ArgVals::Range(rr) => {
                         // Blank cells only matter when kept and separated by a delimiter.
                         let rr = if ignore_empty || delim.is_empty() { cx.clamp_used(rr) } else { rr };
                         for c in rr.range.iter() {
                             push(cx.value(rr.sheet, c).to_text()?)?;
                         }
                     }
-                    None => push(eval(a, cx).to_text()?)?,
+                    ArgVals::Array(arr) => {
+                        for v in &arr.data {
+                            push(v.to_text()?)?;
+                        }
+                    }
+                    ArgVals::Direct(v) => push(v.to_text()?)?,
                 }
             }
             Value::text(parts.join(&delim))
@@ -2028,7 +2774,7 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             if let Value::Error(e) = target {
                 return Err(e);
             }
-            let look = range_arg(args, 1, cx)?;
+            let look = grid_arg(args, 1, cx)?;
             let mode = opt_num(args, 2, cx, 0.0)?.trunc() as i64;
             // Binary search modes (±2) give the same answer on sorted data.
             let reverse = match opt_num(args, 3, cx, 1.0)?.trunc() as i64 {
@@ -2036,7 +2782,7 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
                 -1 | -2 => true,
                 _ => return Err(ErrorKind::Value),
             };
-            let off = xlookup_find(cx, &target, look, mode, reverse)?.ok_or(ErrorKind::NA)?;
+            let off = xlookup_find(cx, &target, &look, mode, reverse)?.ok_or(ErrorKind::NA)?;
             Value::Number(off as f64 + 1.0)
         }
         Switch => {
@@ -2089,8 +2835,11 @@ fn call(f: Func, args: &[Expr], cx: &Ctx) -> EvalResult<Value> {
             for_each_number(args, cx, |n| t += n * n)?;
             Value::num(t)
         }
+        _ if f.is_dynamic() || f == Transpose => scalar(crate::array::call(f, args, cx)?, cx),
+        _ => return Err(ErrorKind::Value),
     })
 }
+
 
 #[cfg(test)]
 mod tests {

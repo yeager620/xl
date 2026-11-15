@@ -739,9 +739,21 @@ impl Spreadsheet {
                 None => format!("{} × {}", sel.rows(), sel.cols()),
             },
         };
+        // A spilled cell shows its anchor's formula, greyed out (it isn't
+        // this cell's input).
+        let mut ghost = false;
         let (text, caret) = match &self.edit {
             Some(e) => (e.text.clone(), Some(e.cursor)),
-            None => (self.wb.input_text(self.at(self.active)), None),
+            None => {
+                let here = self.at(self.active);
+                match self.wb.spill_anchor(here) {
+                    Some(anchor) if anchor != here.cell => {
+                        ghost = true;
+                        (self.wb.input_text(self.at(anchor)), None)
+                    }
+                    _ => (self.wb.input_text(here), None),
+                }
+            }
         };
 
         // Color references; split at the caret.
@@ -758,6 +770,11 @@ impl Spreadsheet {
         }
         if pos < text.len() {
             segments.push((text[pos..].to_string(), t.ink));
+        }
+        if ghost {
+            for s in &mut segments {
+                s.1 = t.ink_faint;
+            }
         }
         let mut children: Vec<AnyElement> = Vec::new();
         let caret_el = || div().w(px(1.5)).h(px(16.)).bg(t.accent).into_any_element();

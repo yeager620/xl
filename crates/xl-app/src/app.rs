@@ -1305,9 +1305,14 @@ impl Spreadsheet {
                     let (from, to) = (Addr::new(src_sheet, src), self.at(dst));
                     let (dr, dc) = (dst.row as i64 - src.row as i64, dst.col as i64 - src.col as i64);
                     let here = self.wb.snapshot(to);
+                    // A spilled value copied along with its formula isn't
+                    // pasted: the pasted formula spills it again.
+                    let respills = self.wb.spill_anchor(from).is_some_and(|a| a != src && range.contains(a));
                     let snap = match mode {
+                        PasteMode::All | PasteMode::Transpose if respills => CellSnapshot { input: String::new(), ..self.wb.snapshot_shifted(from, dr, dc) },
                         PasteMode::All | PasteMode::Transpose => self.wb.snapshot_shifted(from, dr, dc),
                         PasteMode::Values => CellSnapshot { input: value_input(self.wb.value(from)), ..here },
+                        PasteMode::Formulas if respills => CellSnapshot { input: String::new(), ..here },
                         PasteMode::Formulas => CellSnapshot { input: self.wb.input_text_shifted(from, dr, dc), ..here },
                         PasteMode::Formats => CellSnapshot { input: here.input, ..self.wb.snapshot(from) },
                     };

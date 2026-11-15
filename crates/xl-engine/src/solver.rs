@@ -84,7 +84,7 @@ fn constant_value(wb: &Workbook, a: Addr, role: &str) -> Result<f64, String> {
     match wb.cell(a).map(|c| &c.input) {
         None | Some(CellInput::Value(Value::Empty)) => Ok(0.0),
         Some(CellInput::Value(Value::Number(n))) => Ok(*n),
-        Some(CellInput::Formula(_) | CellInput::Opaque(_)) => {
+        Some(CellInput::Formula(_) | CellInput::Opaque(_) | CellInput::Spill(_)) => {
             Err(format!("The {role} {} must contain a constant value, not a formula.", label(wb, a)))
         }
         Some(CellInput::Value(other)) => {

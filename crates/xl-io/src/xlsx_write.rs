@@ -11,7 +11,7 @@ use rust_xlsxwriter::{
     FormatUnderline, Formula, Workbook as XlsxBook, Worksheet,
 };
 use xl_engine::cond::{CfOp, CfRule, CfStyle, CfValue, CondFormat, TextMatch};
-use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Style, VAlign, Value, Workbook, precise};
+use xl_engine::{Addr, Border, CellInput, CellRef, HAlign, LineStyle, Range, Style, VAlign, Value, Workbook, precise};
 
 use crate::{to_excel_height, to_excel_width_px};
 
@@ -544,19 +544,35 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
             let f = fmt(wb.format_code(a), wb.style(a));
             match &c.input {
                 CellInput::Formula(_) | CellInput::Opaque(_) => {
-                    let mut src = prefix_future_functions(&wb.formula_source(a).unwrap_or_default());
+                    let mut src = prefix_future_functions(&wb.formula_source_xlsx(a).unwrap_or_default());
                     if src.contains("[@") {
                         let table = wb.table_at(id, cell).map_or("", |t| t.name.as_str());
                         src = expand_this_row(&src, table);
                     }
                     let formula = Formula::new(format!("={src}")).set_result(result_text(&c.value));
+                    // Dynamic arrays: the anchor holds the formula and the
+                    // range it spills into; the spilled cells (written after
+                    // it, as plain values) keep their cached values.
+                    if wb.is_dynamic_formula(a) {
+                        let r = wb.spill_range(a).unwrap_or(Range::single(cell));
+                        let (r1, c1) = (r.end.row, r.end.col as u16);
+                        match &f {
+                            Some(f) => ws.write_dynamic_array_formula_with_format(row, col, r1, c1, formula, f),
+                            None => ws.write_dynamic_array_formula(row, col, r1, c1, formula),
+                        }
+                        .map_err(err)?;
+                        continue;
+                    }
                     match &f {
                         Some(f) => ws.write_formula_with_format(row, col, formula, f),
                         None => ws.write_formula(row, col, formula),
                     }
                     .map_err(err)?;
                 }
-                CellInput::Value(v) => {
+                // Spilled cells are saved as their values.
+                CellInput::Value(_) | CellInput::Spill(_) => {
+                    let v = &c.value;
+
                     match (v, &f) {
                         (Value::Number(n), Some(f)) => ws.write_number_with_format(row, col, *n, f),
                         (Value::Number(n), None) => ws.write_number(row, col, *n),
@@ -564,6 +580,8 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
                         (Value::Text(t), None) => ws.write_string(row, col, t.as_ref()),
                         (Value::Bool(b), Some(f)) => ws.write_boolean_with_format(row, col, *b, f),
                         (Value::Bool(b), None) => ws.write_boolean(row, col, *b),
+                        // A spilled error stays out (a formula there would block the spill).
+                        (Value::Error(_), _) if c.is_spill() => continue,
                         (Value::Error(e), _) => ws.write_formula(row, col, Formula::new(format!("={e}")).set_result(e.as_str())),
                         (Value::Empty, _) => continue,
                     }
@@ -577,7 +595,7 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
             Some(s) => format!("{}!{}", xl_engine::quote_sheet_name(wb.sheet_name(s)), d.name),
             None => d.name.clone(),
         };
-        book.define_name(name, &format!("={}", prefix_future_functions(&wb.name_formula(d)))).map_err(err)?;
+        book.define_name(name, &format!("={}", prefix_future_functions(&wb.name_formula_xlsx(d)))).map_err(err)?;
     }
     let bytes = book.save_to_buffer().map_err(err)?;
     // xl's pivot definitions ride along in a custom XML part.

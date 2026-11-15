@@ -12,6 +12,10 @@ pub enum ErrorKind {
     Num,
     NA,
     Circ,
+    /// A dynamic array can't spill: cells in the way aren't empty.
+    Spill,
+    /// A calculation Excel can't do yet: an empty array, a lambda used as a value.
+    Calc,
 }
 
 impl ErrorKind {
@@ -24,6 +28,8 @@ impl ErrorKind {
             ErrorKind::Num => "#NUM!",
             ErrorKind::NA => "#N/A",
             ErrorKind::Circ => "#CIRC!",
+            ErrorKind::Spill => "#SPILL!",
+            ErrorKind::Calc => "#CALC!",
         }
     }
 
@@ -35,6 +41,8 @@ impl ErrorKind {
             "#NAME?" => ErrorKind::Name,
             "#NUM!" => ErrorKind::Num,
             "#N/A" => ErrorKind::NA,
+            "#SPILL!" => ErrorKind::Spill,
+            "#CALC!" => ErrorKind::Calc,
             _ => return None,
         })
     }
@@ -57,6 +65,45 @@ pub enum Value {
 }
 
 pub type EvalResult<T> = Result<T, ErrorKind>;
+
+/// A rectangular array of values (row-major), as produced by dynamic-array
+/// functions and array arithmetic. Never empty.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Array {
+    pub rows: usize,
+    pub cols: usize,
+    pub data: Vec<Value>,
+}
+
+impl Array {
+    pub fn new(rows: usize, cols: usize, data: Vec<Value>) -> Self {
+        debug_assert_eq!(rows * cols, data.len());
+        Self { rows, cols, data }
+    }
+
+    pub fn scalar(v: Value) -> Self {
+        Self { rows: 1, cols: 1, data: vec![v] }
+    }
+
+    /// Build from rows of equal length.
+    pub fn from_rows(rows: Vec<Vec<Value>>) -> Self {
+        let cols = rows.first().map_or(0, Vec::len);
+        let n = rows.len();
+        Self { rows: n, cols, data: rows.into_iter().flatten().collect() }
+    }
+
+    pub fn get(&self, r: usize, c: usize) -> &Value {
+        &self.data[r * self.cols + c]
+    }
+
+    pub fn row(&self, r: usize) -> &[Value] {
+        &self.data[r * self.cols..(r + 1) * self.cols]
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        self.rows == 1 && self.cols == 1
+    }
+}
 
 impl Value {
     pub fn text(s: impl Into<Arc<str>>) -> Self {

@@ -612,6 +612,18 @@ impl Spreadsheet {
                 ops.push(Op::Quad(border_quad(rect, 1.0, t.accent, gpui::transparent_black(), BorderStyle::Solid, 0.0), clip));
             }
         }
+        // The dynamic array the active cell is part of: a thin blue outline
+        // around its spill range (dashed around the range a blocked one needs).
+        let here = self.at(self.active);
+        let spill = match self.wb.spill_anchor(here) {
+            Some(anchor) => self.wb.spill_range(self.at(anchor)).map(|r| (r, BorderStyle::Solid)),
+            None => self.wb.blocked_spill(here).map(|r| (r, BorderStyle::Dashed)),
+        };
+        if let Some((range, style)) = spill {
+            for (rect, clip) in pieces(range) {
+                ops.push(Op::Quad(border_quad(rect, 1.0, t.ref_colors[0], gpui::transparent_black(), style, 0.0), clip));
+            }
+        }
         // The range a fill-handle drag would cover.
         if let Some(target) = self.fill_target {
             for (rect, clip_bounds) in pieces(target) {

@@ -55,10 +55,19 @@ pub enum UdfValue {
 }
 
 impl UdfValue {
-    /// The value a single cell shows.
+    /// The value a single cell shows (an array's top-left value).
     ///
-    /// DYNAMIC-ARRAYS HOOK: once `Value` can hold an array, return it here
+    /// Formulas use [`UdfValue::into_val`], which lets arrays spill.
     /// (shape `rows × cols`) so the result spills like `SEQUENCE`.
+    /// As a formula result: arrays spill.
+    pub(crate) fn into_val(self) -> crate::eval::Val {
+        match self {
+            UdfValue::Value(v) => crate::eval::Val::S(v),
+            UdfValue::Array(a) if a.values.is_empty() || a.rows * a.cols != a.values.len() => crate::eval::Val::S(Value::Error(ErrorKind::Value)),
+            UdfValue::Array(a) => crate::eval::Val::A(std::sync::Arc::new(crate::value::Array::new(a.rows, a.cols, a.values))),
+        }
+    }
+
     pub fn into_cell_value(self) -> Value {
         match self {
             UdfValue::Value(v) => v,
@@ -92,27 +101,30 @@ pub struct ScriptModule {
 
 /// Does this formula call a user function the source marks volatile?
 pub(crate) fn calls_volatile(expr: &Expr, udfs: &dyn UserFunctions) -> bool {
-    expr.any(&|e| matches!(e, Expr::UnknownFunc(n, _) if udfs.is_volatile(n)))
+    expr.any(&|e| matches!(e, Expr::UnknownFunc(n, _) if udfs.is_volatile(&n.to_ascii_uppercase())))
 }
 
 /// Do all the unknown functions of this formula exist in `udfs`?
 pub(crate) fn all_known(expr: &Expr, udfs: &dyn UserFunctions) -> bool {
-    !expr.any(&|e| matches!(e, Expr::UnknownFunc(n, _) if !udfs.has(n)))
+    !expr.any(&|e| matches!(e, Expr::UnknownFunc(n, _) if !udfs.has(&n.to_ascii_uppercase())))
 }
 
 /// Evaluate `NAME(args…)` for a name the engine doesn't define.
-pub(crate) fn call(name: &str, args: &[Expr], cx: &Ctx) -> Value {
-    let Some(udfs) = cx.udfs.filter(|u| u.has(name)) else {
-        return Value::Error(ErrorKind::Name);
+/// Script functions are registered upper-cased; formulas keep the case typed.
+pub(crate) fn call(name: &str, args: &[Expr], cx: &Ctx) -> crate::eval::Val {
+    use crate::eval::Val;
+    let name = name.to_ascii_uppercase();
+    let Some(udfs) = cx.udfs.filter(|u| u.has(&name)) else {
+        return Val::S(Value::Error(ErrorKind::Name));
     };
     let mut values = Vec::with_capacity(args.len());
     for a in args {
         match arg(a, cx) {
             Ok(v) => values.push(v),
-            Err(e) => return Value::Error(e),
+            Err(e) => return Val::S(Value::Error(e)),
         }
     }
-    udfs.call(name, &values, Addr::new(cx.sheet, cx.cell)).into_cell_value()
+    udfs.call(&name, &values, Addr::new(cx.sheet, cx.cell)).into_val()
 }
 
 fn arg(e: &Expr, cx: &Ctx) -> Result<UdfArg, ErrorKind> {

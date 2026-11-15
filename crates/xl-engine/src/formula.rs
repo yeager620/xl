@@ -122,6 +122,16 @@ pub enum Expr {
     Name(Arc<str>),
     /// A structured reference to part of a table (`Sales[Amount]`, `[@Qty]`).
     Table(Arc<StructRef>),
+    /// `A1#`: the range the dynamic array anchored at a cell spills into.
+    SpillRef(RefAddr),
+    /// `@x`: implicit intersection (one value from a range or array).
+    Implicit(Box<Expr>),
+    /// An omitted argument (`IF(A1,,2)`, a LAMBDA parameter left out).
+    Missing,
+    /// Calling the result of an expression: `LAMBDA(x, x+1)(5)`.
+    CallExpr(Box<Expr>, Vec<Expr>),
+    /// An array constant: `{1,2;3,4}`.
+    ArrayLit(Arc<crate::value::Array>),
 }
 
 /// Which rows of a table a structured reference means.
@@ -309,13 +319,20 @@ impl Expr {
                 let (s, r) = self.reference().unwrap();
                 f(s, r)
             }
-            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_refs(f),
+            // A spill reference depends on its anchor (which recalculates
+            // whenever the spilled values change).
+            Expr::SpillRef(r) => f(r.sheet, Range::single(r.cell)),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) | Expr::Implicit(e) => e.visit_refs(f),
             Expr::Binary(_, a, b) => {
                 a.visit_refs(f);
                 b.visit_refs(f);
             }
             Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_refs(f)),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => {}
+            Expr::CallExpr(callee, args) => {
+                callee.visit_refs(f);
+                args.iter().for_each(|a| a.visit_refs(f));
+            }
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) | Expr::Missing | Expr::ArrayLit(_) => {}
         }
     }
 
@@ -323,28 +340,80 @@ impl Expr {
     pub fn visit_tables(&self, f: &mut impl FnMut(&StructRef)) {
         match self {
             Expr::Table(t) => f(t),
-            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_tables(f),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) | Expr::Implicit(e) => e.visit_tables(f),
             Expr::Binary(_, a, b) => {
                 a.visit_tables(f);
                 b.visit_tables(f);
             }
             Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_tables(f)),
+            Expr::CallExpr(callee, args) => {
+                callee.visit_tables(f);
+                args.iter().for_each(|a| a.visit_tables(f));
+            }
             _ => {}
         }
     }
 
-    /// Visit every defined name used in the expression.
+    /// Visit every defined name used in the expression (including names
+    /// called like functions, which may be named LAMBDAs).
     pub fn visit_names(&self, f: &mut impl FnMut(&str)) {
         match self {
             Expr::Name(n) => f(n),
-            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.visit_names(f),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) | Expr::Implicit(e) => e.visit_names(f),
             Expr::Binary(_, a, b) => {
                 a.visit_names(f);
                 b.visit_names(f);
             }
-            Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().for_each(|a| a.visit_names(f)),
+            Expr::Call(_, args) => args.iter().for_each(|a| a.visit_names(f)),
+            Expr::UnknownFunc(n, args) => {
+                f(n);
+                args.iter().for_each(|a| a.visit_names(f));
+            }
+            Expr::CallExpr(callee, args) => {
+                callee.visit_names(f);
+                args.iter().for_each(|a| a.visit_names(f));
+            }
             _ => {}
         }
+    }
+
+    /// Names of functions the formula calls that aren't built in, except
+    /// LET / LAMBDA parameters bound around the call.
+    pub fn unknown_funcs(&self) -> Vec<Arc<str>> {
+        fn walk(e: &Expr, bound: &mut Vec<Arc<str>>, out: &mut Vec<Arc<str>>) {
+            match e {
+                Expr::UnknownFunc(n, args) => {
+                    if !bound.iter().any(|b| b.eq_ignore_ascii_case(n)) {
+                        out.push(n.clone());
+                    }
+                    args.iter().for_each(|a| walk(a, bound, out));
+                }
+                Expr::Call(Func::Let | Func::Lambda, args) => {
+                    let mark = bound.len();
+                    for a in args {
+                        if let Expr::Name(n) = a {
+                            bound.push(n.clone());
+                        }
+                    }
+                    args.iter().for_each(|a| walk(a, bound, out));
+                    bound.truncate(mark);
+                }
+                Expr::Call(_, args) => args.iter().for_each(|a| walk(a, bound, out)),
+                Expr::CallExpr(c, args) => {
+                    walk(c, bound, out);
+                    args.iter().for_each(|a| walk(a, bound, out));
+                }
+                Expr::Neg(x) | Expr::Plus(x) | Expr::Percent(x) | Expr::Paren(x) | Expr::Implicit(x) => walk(x, bound, out),
+                Expr::Binary(_, a, b) => {
+                    walk(a, bound, out);
+                    walk(b, bound, out);
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut Vec::new(), &mut out);
+        out
     }
 
     pub(crate) fn any(&self, pred: &impl Fn(&Expr) -> bool) -> bool {
@@ -352,11 +421,18 @@ impl Expr {
             return true;
         }
         match self {
-            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) => e.any(pred),
+            Expr::Neg(e) | Expr::Plus(e) | Expr::Percent(e) | Expr::Paren(e) | Expr::Implicit(e) => e.any(pred),
             Expr::Binary(_, a, b) => a.any(pred) || b.any(pred),
             Expr::Call(_, args) | Expr::UnknownFunc(_, args) => args.iter().any(|a| a.any(pred)),
+            Expr::CallExpr(c, args) => c.any(pred) || args.iter().any(|a| a.any(pred)),
             _ => false,
         }
+    }
+
+    /// Whether the formula uses anything only dynamic-array Excel has:
+    /// array functions, LET/LAMBDA, spill references, explicit `@`.
+    pub fn has_dynamic_construct(&self) -> bool {
+        self.any(&|e| matches!(e, Expr::Call(f, _) if f.is_dynamic()) || matches!(e, Expr::SpillRef(_) | Expr::Implicit(_) | Expr::CallExpr(..)))
     }
 
     pub fn is_volatile(&self) -> bool {
@@ -370,8 +446,77 @@ impl Expr {
     /// Print as formula source (without `=`), shifting relative refs by (dr, dc).
     pub fn to_source(&self, dr: i64, dc: i64, names: &dyn SheetNames) -> String {
         let mut s = String::new();
-        write_expr(self, dr, dc, names, &mut s);
+        Printer { dr, dc, names, xlsx: false, scope: Vec::new() }.write(self, &mut s);
         s
+    }
+
+    /// Print as an xlsx file stores it: newer functions get their `_xlfn.`
+    /// prefixes, LET/LAMBDA parameters `_xlpm.`, `A1#` becomes
+    /// `_xlfn.ANCHORARRAY(A1)` and `@x` becomes `_xlfn.SINGLE(x)`.
+    pub fn to_xlsx_source(&self, names: &dyn SheetNames) -> String {
+        let mut s = String::new();
+        Printer { dr: 0, dc: 0, names, xlsx: true, scope: Vec::new() }.write(self, &mut s);
+        s
+    }
+
+    /// The formula as dynamic-array Excel reads a formula from a file saved
+    /// without dynamic arrays: `@` (implicit intersection) is added where
+    /// the old semantics took one value from a range. `is_range_name` says
+    /// whether a defined name stands for a multi-cell range.
+    pub fn legacy_wrap(&self, is_range_name: &dyn Fn(&str) -> bool) -> Expr {
+        let is_range = |e: &Expr| match e {
+            Expr::Range(..) => true,
+            Expr::Table(t) => t.area != TableArea::ThisRow,
+            Expr::Name(n) => is_range_name(n),
+            _ => false,
+        };
+        legacy(self, Pos::Value, &is_range, true)
+    }
+
+    /// The inverse of [`Expr::legacy_wrap`]: drop the `@`s that the old
+    /// semantics imply, for saving as a plain (non-dynamic) formula.
+    pub fn legacy_unwrap(&self) -> Expr {
+        legacy(self, Pos::Value, &|_| false, false)
+    }
+}
+
+/// Where an expression sits, for the pre-dynamic-array semantics.
+#[derive(Copy, Clone, PartialEq)]
+enum Pos {
+    /// One value is expected: a range here meant implicit intersection.
+    Value,
+    /// A function argument that takes a reference (SUM's).
+    Arg,
+    /// Inside a function that always evaluated arrays (SUMPRODUCT).
+    Array,
+}
+
+/// Add (`wrap`) or remove `@` at the places the old semantics implied it.
+fn legacy(e: &Expr, pos: Pos, is_range: &dyn Fn(&Expr) -> bool, wrap: bool) -> Expr {
+    let inner = |x: &Expr| legacy(x, if pos == Pos::Array { Pos::Array } else { Pos::Value }, is_range, wrap);
+    match e {
+        Expr::Implicit(x) if !wrap && pos == Pos::Value && matches!(**x, Expr::Range(..) | Expr::Table(_) | Expr::Name(_)) => (**x).clone(),
+        Expr::Implicit(x) => Expr::Implicit(Box::new(legacy(x, Pos::Arg, is_range, wrap))),
+        _ if wrap && pos == Pos::Value && is_range(e) => Expr::Implicit(Box::new(e.clone())),
+        Expr::Neg(x) => Expr::Neg(Box::new(inner(x))),
+        Expr::Plus(x) => Expr::Plus(Box::new(inner(x))),
+        Expr::Percent(x) => Expr::Percent(Box::new(inner(x))),
+        Expr::Paren(x) => Expr::Paren(Box::new(legacy(x, pos, is_range, wrap))),
+        Expr::Binary(o, a, b) => Expr::Binary(*o, Box::new(inner(a)), Box::new(inner(b))),
+        Expr::Call(f, args) => {
+            let arg_pos = |i: usize| {
+                if pos == Pos::Array || f.is_array_native() {
+                    Pos::Array
+                } else if f.lifts_arg(i) {
+                    Pos::Value
+                } else {
+                    Pos::Arg
+                }
+            };
+            Expr::Call(*f, args.iter().enumerate().map(|(i, a)| legacy(a, arg_pos(i), is_range, wrap)).collect())
+        }
+        Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| legacy(a, Pos::Arg, is_range, wrap)).collect()),
+        _ => e.clone(),
     }
 }
 
@@ -507,14 +652,17 @@ impl Expr {
                     }
                 }
             }
+            Expr::SpillRef(r) => map_ref(r).map_or(Expr::Error(ErrorKind::Ref), Expr::SpillRef),
             Expr::Neg(x) => Expr::Neg(recur(x)),
             Expr::Plus(x) => Expr::Plus(recur(x)),
             Expr::Percent(x) => Expr::Percent(recur(x)),
             Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Implicit(x) => Expr::Implicit(recur(x)),
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.shifted(op, home)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.shifted(op, home)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
+            Expr::CallExpr(c, args) => Expr::CallExpr(recur(c), args.iter().map(|a| a.shifted(op, home)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) | Expr::Missing | Expr::ArrayLit(_) => self.clone(),
         }
     }
 }
@@ -551,14 +699,17 @@ impl Expr {
                 (Some(a), Some(b)) => Expr::Range(a, b, *kind),
                 _ => Expr::Error(ErrorKind::Ref),
             },
+            Expr::SpillRef(r) => shift_ref(r, dr, dc).map_or(Expr::Error(ErrorKind::Ref), Expr::SpillRef),
             Expr::Neg(x) => Expr::Neg(recur(x)),
             Expr::Plus(x) => Expr::Plus(recur(x)),
             Expr::Percent(x) => Expr::Percent(recur(x)),
             Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Implicit(x) => Expr::Implicit(recur(x)),
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.offset(dr, dc)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.offset(dr, dc)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
+            Expr::CallExpr(c, args) => Expr::CallExpr(recur(c), args.iter().map(|a| a.offset(dr, dc)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) | Expr::Missing | Expr::ArrayLit(_) => self.clone(),
         }
     }
 
@@ -594,14 +745,20 @@ impl Expr {
                     self.clone()
                 }
             }
+            Expr::SpillRef(r) => match Expr::Ref(*r).moved(mv, home) {
+                Expr::Ref(m) => Expr::SpillRef(m),
+                other => other,
+            },
             Expr::Neg(x) => Expr::Neg(recur(x)),
             Expr::Plus(x) => Expr::Plus(recur(x)),
             Expr::Percent(x) => Expr::Percent(recur(x)),
             Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Implicit(x) => Expr::Implicit(recur(x)),
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.moved(mv, home)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.moved(mv, home)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
+            Expr::CallExpr(c, args) => Expr::CallExpr(recur(c), args.iter().map(|a| a.moved(mv, home)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) | Expr::Missing | Expr::ArrayLit(_) => self.clone(),
         }
     }
 
@@ -616,14 +773,17 @@ impl Expr {
         match self {
             Expr::Ref(r) => Expr::Ref(fix(r)),
             Expr::Range(a, b, k) => Expr::Range(fix(a), fix(b), *k),
+            Expr::SpillRef(r) => Expr::SpillRef(fix(r)),
             Expr::Neg(x) => Expr::Neg(recur(x)),
             Expr::Plus(x) => Expr::Plus(recur(x)),
             Expr::Percent(x) => Expr::Percent(recur(x)),
             Expr::Paren(x) => Expr::Paren(recur(x)),
+            Expr::Implicit(x) => Expr::Implicit(recur(x)),
             Expr::Binary(o, x, y) => Expr::Binary(*o, recur(x), recur(y)),
             Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| a.rehomed(from, to)).collect()),
             Expr::UnknownFunc(n, args) => Expr::UnknownFunc(n.clone(), args.iter().map(|a| a.rehomed(from, to)).collect()),
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) => self.clone(),
+            Expr::CallExpr(c, args) => Expr::CallExpr(recur(c), args.iter().map(|a| a.rehomed(from, to)).collect()),
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) | Expr::Table(_) | Expr::Missing | Expr::ArrayLit(_) => self.clone(),
         }
     }
 }
@@ -665,6 +825,12 @@ enum Tok {
     RParen,
     Comma,
     Colon,
+    /// `@` (implicit intersection).
+    At,
+    /// `;`: an argument separator, or the row separator in `{1,2;3,4}`.
+    Semi,
+    LBrace,
+    RBrace,
     /// A structured reference: optional table name and the bracket contents.
     Struct(Option<String>, String),
 }
@@ -685,6 +851,10 @@ impl Tok {
             Tok::RParen => "')'".into(),
             Tok::Comma => "','".into(),
             Tok::Colon => "':'".into(),
+            Tok::At => "'@'".into(),
+            Tok::Semi => "';'".into(),
+            Tok::LBrace => "'{'".into(),
+            Tok::RBrace => "'}'".into(),
             Tok::Struct(t, s) => format!("'{}[{s}]'", t.as_deref().unwrap_or("")),
         }
     }
@@ -810,6 +980,10 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'.' | b'$') || b[i] >= 0x80) {
                     i += 1;
                 }
+                // `A1#`: a spill reference (the `#` stays on the identifier).
+                if b.get(i) == Some(&b'#') && !b.get(i + 1).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'/') {
+                    i += 1;
+                }
                 let id = &src[s..i];
                 if b.get(i) == Some(&b'!') {
                     i += 1;
@@ -881,12 +1055,28 @@ fn lex(src: &str) -> Result<Vec<Tok>, ParseError> {
                 out.push(Tok::RParen);
                 i += 1;
             }
-            b',' | b';' => {
+            b',' => {
                 out.push(Tok::Comma);
+                i += 1;
+            }
+            b';' => {
+                out.push(Tok::Semi);
+                i += 1;
+            }
+            b'{' => {
+                out.push(Tok::LBrace);
+                i += 1;
+            }
+            b'}' => {
+                out.push(Tok::RBrace);
                 i += 1;
             }
             b':' => {
                 out.push(Tok::Colon);
+                i += 1;
+            }
+            b'@' => {
+                out.push(Tok::At);
                 i += 1;
             }
             _ => {
@@ -945,6 +1135,12 @@ impl Parser<'_> {
                     let rhs = self.expr(r)?;
                     lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
                 }
+                // Calling a LAMBDA in place: `LAMBDA(x, x+1)(5)`.
+                Some(Tok::LParen) if is_callable(&lhs) => {
+                    self.pos += 1;
+                    let args = self.args()?;
+                    lhs = Expr::CallExpr(Box::new(lhs), args);
+                }
                 _ => break,
             }
         }
@@ -978,6 +1174,8 @@ impl Parser<'_> {
             Some(Tok::Str(s)) => Ok(Expr::Text(s.into())),
             Some(Tok::Err(e)) => Ok(Expr::Error(e)),
             Some(Tok::Minus) => Ok(Expr::Neg(Box::new(self.expr(PREFIX_BP)?))),
+            Some(Tok::At) => Ok(Expr::Implicit(Box::new(self.expr(PREFIX_BP)?))),
+            Some(Tok::LBrace) => self.array_lit(),
             Some(Tok::PlusSign) => Ok(Expr::Plus(Box::new(self.expr(PREFIX_BP)?))),
             Some(Tok::LParen) => {
                 let e = self.expr(0)?;
@@ -1006,6 +1204,9 @@ impl Parser<'_> {
 
     /// Try to parse a cell / range / column-range reference starting with `id`.
     fn reference(&mut self, id: String, sheet: Option<SheetId>) -> Option<Result<Expr, ParseError>> {
+        if let Some(anchor) = id.strip_suffix('#') {
+            return Some(parse_a1(anchor).map(|a| Expr::SpillRef(RefAddr::new(a, sheet))).ok_or_else(|| ParseError(format!("bad spill reference {id}"))));
+        }
         if let Some(a) = parse_a1(&id) {
             if self.peek() == Some(&Tok::Colon) {
                 self.pos += 1;
@@ -1041,41 +1242,112 @@ impl Parser<'_> {
         {
             return r;
         }
+        // Newer functions (and LAMBDA parameters) carry a prefix in xlsx files.
+        let mut name = id.as_str();
+        while let Some(rest) = name.strip_prefix("_xlfn.").or_else(|| name.strip_prefix("_xlws.")).or_else(|| name.strip_prefix("_xlpm.")) {
+            name = rest;
+        }
         if self.peek() == Some(&Tok::LParen) {
             self.pos += 1;
-            let mut args = Vec::new();
-            if self.peek() != Some(&Tok::RParen) {
-                loop {
-                    args.push(self.expr(0)?);
-                    match self.next() {
-                        Some(Tok::Comma) => continue,
-                        Some(Tok::RParen) => break,
-                        Some(t) => return Err(ParseError(format!("expected , or ) but found {}", t.describe()))),
-                        None => return Err(ParseError("missing )".into())),
-                    }
-                }
-            } else {
-                self.pos += 1;
-            }
-            // Newer functions are stored with a prefix in xlsx files.
-            let name = id.strip_prefix("_xlfn.").or_else(|| id.strip_prefix("_xlws.")).unwrap_or(&id);
-            return Ok(match Func::from_name(name) {
-                Some(f) => Expr::Call(f, args),
-                None => Expr::UnknownFunc(name.to_ascii_uppercase().into(), args),
+            let mut args = self.args()?;
+            let up = name.to_ascii_uppercase();
+            return Ok(match up.as_str() {
+                "ANCHORARRAY" if args.len() == 1 => match args.pop() {
+                    Some(Expr::Ref(r)) => Expr::SpillRef(r),
+                    _ => return Err(ParseError("ANCHORARRAY needs a cell reference".into())),
+                },
+                "SINGLE" if args.len() == 1 => Expr::Implicit(Box::new(args.pop().unwrap())),
+                _ => match Func::from_name(name) {
+                    Some(f) => Expr::Call(f, args),
+                    // A named LAMBDA or LET-bound lambda keeps its spelling;
+                    // other unknown functions (add-ins) are uppercased.
+                    None if id.starts_with("_xlpm.") || !name.contains('.') => Expr::UnknownFunc(name.into(), args),
+                    None => Expr::UnknownFunc(up.into(), args),
+                },
             });
         }
         if let Some(r) = self.reference(id.clone(), None) {
             return r;
         }
-        match id.to_ascii_uppercase().as_str() {
+        match name.to_ascii_uppercase().as_str() {
             "TRUE" => Ok(Expr::Bool(true)),
             "FALSE" => Ok(Expr::Bool(false)),
-            _ => Ok(Expr::Name(id.into())),
+            _ => Ok(Expr::Name(name.into())),
         }
+    }
+
+    /// Arguments after `(` through the closing `)`; empty ones are [`Expr::Missing`].
+    fn args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        if self.peek() == Some(&Tok::RParen) {
+            self.pos += 1;
+            return Ok(args);
+        }
+        loop {
+            if matches!(self.peek(), Some(Tok::Comma | Tok::Semi | Tok::RParen)) {
+                args.push(Expr::Missing);
+            } else {
+                args.push(self.expr(0)?);
+            }
+            match self.next() {
+                Some(Tok::Comma | Tok::Semi) => continue,
+                Some(Tok::RParen) => break,
+                Some(t) => return Err(ParseError(format!("expected , or ) but found {}", t.describe()))),
+                None => return Err(ParseError("missing )".into())),
+            }
+        }
+        Ok(args)
+    }
+
+    /// An array constant after `{`: values, `,` between columns, `;` between rows.
+    fn array_lit(&mut self) -> Result<Expr, ParseError> {
+        use crate::value::Value;
+        let bad = |what: &str| ParseError(format!("bad array constant: {what}"));
+        let mut rows: Vec<Vec<Value>> = vec![Vec::new()];
+        loop {
+            let neg = if self.peek() == Some(&Tok::Minus) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            };
+            let v = match self.next() {
+                Some(Tok::Num(n)) => Value::Number(if neg { -n } else { n }),
+                Some(Tok::Str(s)) if !neg => Value::text(s),
+                Some(Tok::Err(e)) if !neg => Value::Error(e),
+                Some(Tok::Ident(id)) if !neg && id.eq_ignore_ascii_case("TRUE") => Value::Bool(true),
+                Some(Tok::Ident(id)) if !neg && id.eq_ignore_ascii_case("FALSE") => Value::Bool(false),
+                Some(t) => return Err(bad(&t.describe())),
+                None => return Err(bad("missing }")),
+            };
+            rows.last_mut().unwrap().push(v);
+            match self.next() {
+                Some(Tok::Comma) => {}
+                Some(Tok::Semi) => rows.push(Vec::new()),
+                Some(Tok::RBrace) => break,
+                Some(t) => return Err(bad(&t.describe())),
+                None => return Err(bad("missing }")),
+            }
+        }
+        let cols = rows[0].len();
+        if rows.iter().any(|r| r.len() != cols) {
+            return Err(bad("rows of different lengths"));
+        }
+        Ok(Expr::ArrayLit(Arc::new(crate::value::Array::from_rows(rows))))
+    }
+}
+
+/// Whether `(...)` right after this expression calls it (a LAMBDA).
+fn is_callable(e: &Expr) -> bool {
+    match e {
+        Expr::Call(Func::Lambda, _) | Expr::CallExpr(..) => true,
+        Expr::Paren(x) => is_callable(x),
+        _ => false,
     }
 }
 
 fn parse_col_abs(s: &str) -> Option<(u32, bool)> {
+
     match s.strip_prefix('$') {
         Some(rest) => parse_col(rest).map(|c| (c, true)),
         None => parse_col(s).map(|c| (c, false)),
@@ -1135,99 +1407,209 @@ fn write_number(n: f64, out: &mut String) {
     }
 }
 
-fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut String) {
-    match e {
-        Expr::Number(n) => write_number(*n, out),
-        Expr::Text(s) => {
-            out.push('"');
-            out.push_str(&s.replace('"', "\"\""));
-            out.push('"');
+/// Formula printer: display form (optionally shifted for copy/fill), or the
+/// form xlsx files store.
+struct Printer<'a> {
+    dr: i64,
+    dc: i64,
+    names: &'a dyn SheetNames,
+    xlsx: bool,
+    /// LET / LAMBDA parameters in scope (printed `_xlpm.x` in files).
+    scope: Vec<Arc<str>>,
+}
+
+impl Printer<'_> {
+    fn local(&self, n: &str) -> bool {
+        self.xlsx && self.scope.iter().any(|s| s.eq_ignore_ascii_case(n))
+    }
+
+    fn args(&mut self, args: &[Expr], out: &mut String) {
+        out.push('(');
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            self.write(a, out);
         }
-        Expr::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
-        Expr::Error(err) => out.push_str(err.as_str()),
-        Expr::Name(n) => out.push_str(n),
-        Expr::Table(t) => t.write(out),
-        Expr::Ref(r) => {
-            let mark = out.len();
-            match shift_ref(r, dr, dc) {
-                Some(r) if write_sheet(r.sheet, names, out) => write_ref(&r, out),
-                _ => {
-                    out.truncate(mark);
-                    out.push_str("#REF!")
+        out.push(')');
+    }
+
+    fn write(&mut self, e: &Expr, out: &mut String) {
+        let (dr, dc, names) = (self.dr, self.dc, self.names);
+        match e {
+            Expr::Number(n) => write_number(*n, out),
+            Expr::Text(s) => {
+                out.push('"');
+                out.push_str(&s.replace('"', "\"\""));
+                out.push('"');
+            }
+            Expr::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
+            Expr::Error(err) => out.push_str(err.as_str()),
+            Expr::Missing => {}
+            Expr::ArrayLit(a) => {
+                out.push('{');
+                for r in 0..a.rows {
+                    if r > 0 {
+                        out.push(';');
+                    }
+                    for c in 0..a.cols {
+                        if c > 0 {
+                            out.push(',');
+                        }
+                        match a.get(r, c) {
+                            crate::value::Value::Number(n) => write_number(*n, out),
+                            crate::value::Value::Text(s) => {
+                                out.push('"');
+                                out.push_str(&s.replace('"', "\"\""));
+                                out.push('"');
+                            }
+                            v => out.push_str(&v.display()),
+                        }
+                    }
+                }
+                out.push('}');
+            }
+            Expr::Name(n) => {
+
+                if self.local(n) {
+                    out.push_str("_xlpm.");
+                }
+                out.push_str(n)
+            }
+            Expr::Table(t) => t.write(out),
+            Expr::Ref(r) | Expr::SpillRef(r) => {
+                let mark = out.len();
+                let spill = matches!(e, Expr::SpillRef(_));
+                if spill && self.xlsx {
+                    out.push_str("_xlfn.ANCHORARRAY(");
+                }
+                match shift_ref(r, dr, dc) {
+                    Some(r) if write_sheet(r.sheet, names, out) => write_ref(&r, out),
+                    _ => {
+                        out.truncate(mark);
+                        out.push_str("#REF!");
+                        return;
+                    }
+                }
+                if spill {
+                    out.push_str(if self.xlsx { ")" } else { "#" });
                 }
             }
-        }
-        Expr::Range(a, b, kind) => {
-            let (sa, sb) = match kind {
-                RangeKind::Cells => (shift_ref(a, dr, dc), shift_ref(b, dr, dc)),
-                RangeKind::Columns => (shift_ref(a, 0, dc), shift_ref(b, 0, dc)),
-                RangeKind::Rows => (shift_ref(a, dr, 0), shift_ref(b, dr, 0)),
-            };
-            let mark = out.len();
-            match (sa, sb) {
-                (Some(a), Some(b)) if write_sheet(a.sheet, names, out) => match kind {
-                    RangeKind::Cells => {
-                        write_ref(&a, out);
-                        out.push(':');
-                        write_ref(&b, out);
+            Expr::Range(a, b, kind) => {
+                let (sa, sb) = match kind {
+                    RangeKind::Cells => (shift_ref(a, dr, dc), shift_ref(b, dr, dc)),
+                    RangeKind::Columns => (shift_ref(a, 0, dc), shift_ref(b, 0, dc)),
+                    RangeKind::Rows => (shift_ref(a, dr, 0), shift_ref(b, dr, 0)),
+                };
+                let mark = out.len();
+                match (sa, sb) {
+                    (Some(a), Some(b)) if write_sheet(a.sheet, names, out) => match kind {
+                        RangeKind::Cells => {
+                            write_ref(&a, out);
+                            out.push(':');
+                            write_ref(&b, out);
+                        }
+                        RangeKind::Columns => {
+                            let _ = write!(
+                                out,
+                                "{}{}:{}{}",
+                                if a.col_abs { "$" } else { "" },
+                                col_name(a.cell.col),
+                                if b.col_abs { "$" } else { "" },
+                                col_name(b.cell.col)
+                            );
+                        }
+                        RangeKind::Rows => {
+                            let _ = write!(out, "{}{}:{}{}", if a.row_abs { "$" } else { "" }, a.cell.row + 1, if b.row_abs { "$" } else { "" }, b.cell.row + 1);
+                        }
+                    },
+                    _ => {
+                        out.truncate(mark);
+                        out.push_str("#REF!")
                     }
-                    RangeKind::Columns => {
-                        let _ = write!(
-                            out,
-                            "{}{}:{}{}",
-                            if a.col_abs { "$" } else { "" },
-                            col_name(a.cell.col),
-                            if b.col_abs { "$" } else { "" },
-                            col_name(b.cell.col)
-                        );
-                    }
-                    RangeKind::Rows => {
-                        let _ = write!(out, "{}{}:{}{}", if a.row_abs { "$" } else { "" }, a.cell.row + 1, if b.row_abs { "$" } else { "" }, b.cell.row + 1);
-                    }
-                },
-                _ => {
-                    out.truncate(mark);
-                    out.push_str("#REF!")
                 }
             }
-        }
-        Expr::Neg(x) => {
-            out.push('-');
-            write_expr(x, dr, dc, names, out);
-        }
-        Expr::Plus(x) => {
-            out.push('+');
-            write_expr(x, dr, dc, names, out);
-        }
-        Expr::Percent(x) => {
-            write_expr(x, dr, dc, names, out);
-            out.push('%');
-        }
-        Expr::Paren(x) => {
-            out.push('(');
-            write_expr(x, dr, dc, names, out);
-            out.push(')');
-        }
-        Expr::Binary(op, a, b) => {
-            write_expr(a, dr, dc, names, out);
-            out.push_str(op.as_str());
-            write_expr(b, dr, dc, names, out);
-        }
-        Expr::Call(_, args) | Expr::UnknownFunc(_, args) => {
-            let name = match e {
-                Expr::Call(f, _) => f.name(),
-                Expr::UnknownFunc(n, _) => n,
-                _ => unreachable!(),
-            };
-            out.push_str(name);
-            out.push('(');
-            for (i, a) in args.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_expr(a, dr, dc, names, out);
+            Expr::Neg(x) => {
+                out.push('-');
+                self.write(x, out);
             }
-            out.push(')');
+            Expr::Plus(x) => {
+                out.push('+');
+                self.write(x, out);
+            }
+            Expr::Percent(x) => {
+                self.write(x, out);
+                out.push('%');
+            }
+            Expr::Paren(x) => {
+                out.push('(');
+                self.write(x, out);
+                out.push(')');
+            }
+            Expr::Implicit(x) => {
+                if self.xlsx {
+                    out.push_str("_xlfn.SINGLE(");
+                    self.write(x, out);
+                    out.push(')');
+                } else if matches!(**x, Expr::Binary(..) | Expr::Percent(_)) {
+                    out.push_str("@(");
+                    self.write(x, out);
+                    out.push(')');
+                } else {
+                    out.push('@');
+                    self.write(x, out);
+                }
+            }
+            Expr::Binary(op, a, b) => {
+                self.write(a, out);
+                out.push_str(op.as_str());
+                self.write(b, out);
+            }
+            Expr::Call(f, args) => {
+                if self.xlsx {
+                    out.push_str(f.xlsx_prefix());
+                }
+                out.push_str(f.name());
+                let mark = self.scope.len();
+                match f {
+                    // Parameters are in scope in the body.
+                    Func::Lambda if self.xlsx => {
+                        for a in args {
+                            if let Expr::Name(n) = a {
+                                self.scope.push(n.clone());
+                            }
+                        }
+                        self.args(args, out);
+                    }
+                    // Each name is in scope from its own definition on.
+                    Func::Let if self.xlsx => {
+                        out.push('(');
+                        for (i, a) in args.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            if let (true, Expr::Name(n)) = (i % 2 == 0 && i + 1 < args.len(), a) {
+                                self.scope.push(n.clone());
+                            }
+                            self.write(a, out);
+                        }
+                        out.push(')');
+                    }
+                    _ => self.args(args, out),
+                }
+                self.scope.truncate(mark);
+            }
+            Expr::UnknownFunc(n, args) => {
+                if self.local(n) {
+                    out.push_str("_xlpm.");
+                }
+                out.push_str(n);
+                self.args(args, out);
+            }
+            Expr::CallExpr(callee, args) => {
+                self.write(callee, out);
+                self.args(args, out);
+            }
         }
     }
 }

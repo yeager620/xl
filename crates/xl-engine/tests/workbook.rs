@@ -385,7 +385,7 @@ fn reference_functions_and_intersection() {
     t.set("D6", "=ROW()*10+COLUMN()");
     t.set("D7", "=ROWS(A1:B4)*COLUMNS(A1:B4)");
     t.set("D8", "=ROW(B3)");
-    t.set("C3", "=A1:A4*2");
+    t.set("C3", "=@A1:A4*2");
     t.set("D9", "=OFFSET(A1,-1,0)");
     assert_eq!(t.v("D1"), n(50.0));
     assert_eq!(t.v("D2"), n(80.0));
@@ -395,7 +395,7 @@ fn reference_functions_and_intersection() {
     assert_eq!(t.v("D6"), n(64.0));
     assert_eq!(t.v("D7"), n(8.0));
     assert_eq!(t.v("D8"), n(3.0));
-    assert_eq!(t.v("C3"), n(60.0), "implicit intersection picks the formula's row");
+    assert_eq!(t.v("C3"), n(60.0), "@ (implicit intersection) picks the formula's row");
     assert_eq!(t.v("D9"), Value::Error(ErrorKind::Ref));
     // OFFSET/INDIRECT are volatile: they see edits to cells they don't name statically.
     t.set("A3", "100");

@@ -2,6 +2,7 @@
 //! number formats and incremental recalculation.
 
 pub mod address;
+pub mod array;
 pub mod chart;
 pub mod cond;
 pub mod datetime;
@@ -28,5 +29,5 @@ pub use formula::{Move, ParseError, Shift, quote_sheet_name};
 pub use store::{Cell, CellInput, CellStore};
 pub use udf::{ScriptModule, UdfArg, UdfValue, UserFunctions};
 pub use style::{Border, HAlign, LineStyle, Rgb, Style, VAlign};
-pub use value::{ErrorKind, Value, format_general};
+pub use value::{Array, ErrorKind, Value, format_general};
 pub use workbook::{AutoFilter, CellSnapshot, DATE1904_OFFSET, Link, Note, StructOp, Table, TableStyle, LoadedCell, RecalcStats, SheetLayout, Workbook, precise, validate_sheet_name};
