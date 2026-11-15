@@ -1,0 +1,127 @@
+#0 xlsx-out: FAIL
+    open FAIL: No such file or directory (os error 2)
+#1 calamine-EMSI_JobChange_UK.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=pass]
+#2 calamine-date_1904.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#3 calamine-date_east_asian.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#4 calamine-errors.xlsx: FAIL  [noop=pass edit-new=FAIL edit-middle=n/a style=pass add-sheet=FAIL rename=pass insert-row=fell back]
+    edit-new FAIL: panicked: end byte index 18446744073709551615 is out of bounds for string of length 0 at crates/xl-io/src/xlsx_patch.rs:159
+    add-sheet FAIL: panicked: end byte index 18446744073709551615 is out of bounds for string of length 0 at crates/xl-io/src/xlsx_patch.rs:159
+    insert-row fell back: the file has links to other workbooks, which xl can't adjust yet
+#5 calamine-hyperlinks.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#6 calamine-inventory-table.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#7 calamine-issues.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: a formula xl can't read (Sheet1!#REF!): expected a cell reference after Sheet1!
+#8 calamine-merge_cells.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#9 calamine-nonstandard-xml-ns-prefix.xlsx: FAIL  [noop=pass edit-new=pass edit-middle=pass style=FAIL add-sheet=pass rename=pass insert-row=pass]
+    style FAIL: bold on B2 didn't survive
+#10 calamine-picture.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#11 calamine-pivots.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#12 calamine-rich_text_shared_strings.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#13 calamine-richtext-namespaced.xlsx: FAIL  [noop=pass edit-new=FAIL edit-middle=FAIL style=FAIL add-sheet=FAIL rename=pass insert-row=pass]
+    edit-new FAIL: malformed XML ["xl/sharedStrings.xml", "xl/worksheets/sheet1.xml"]; doesn't reopen: ill-formed document: expected `</x:si>`, but `</x:<x:si>` was found
+    edit-middle FAIL: malformed XML ["xl/sharedStrings.xml", "xl/worksheets/sheet1.xml"]; doesn't reopen: ill-formed document: expected `</x:si>`, but `</x:<x:si>` was found
+    style FAIL: malformed XML ["xl/worksheets/sheet1.xml"]; doesn't reopen: syntax error: attribute value not closed: `"` not found before end of input
+    add-sheet FAIL: malformed XML ["xl/sharedStrings.xml"]; doesn't reopen: ill-formed document: expected `</x:si>`, but `</x:<x:si>` was found
+#14 calamine-styles.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#15 calamine-table-multiple.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#16 calamine-temperature-table.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#17 calamine-workbook_properties.xlsx: FAIL  [noop=pass edit-new=pass edit-middle=pass style=FAIL add-sheet=pass rename=pass insert-row=pass]
+    style FAIL: bold on A1 didn't survive
+#18 lo-ExternalRefChart.xlsx: fell back  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: a formula xl can't read ('[1]Data'!$B$1:$B$3): no sheet named '[1]Data'
+#19 lo-PivotTable_CachedDefinitionAndDataInSync.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#20 lo-Sparklines.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#21 lo-Spill.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#22 lo-TableStyleTest.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#23 lo-autofilter.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=pass]
+#24 lo-cell-borders.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#25 lo-cell-note.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#26 lo-checkbox-form-control.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#27 lo-colorscale.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#28 lo-complex_icon_set.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#29 lo-data_validation_test.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#30 lo-databar.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#31 lo-enhanced-protection.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#32 lo-external-refs.xlsx: fell back  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: the file has links to other workbooks, which xl can't adjust yet
+#33 lo-freezePaneStartCell.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#34 lo-functions-excel-2010.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#35 lo-groupShape.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#36 lo-hidden_sheets.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#37 lo-hyperlinks.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#38 lo-named-ranges-global.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=fell back]
+    insert-row fell back: a formula xl can't read ({1,2,3;4,5,6}): unexpected character '{'
+#39 lo-pivottable_tabular_mode.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#40 lo-sheet-tab-color.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#41 lo-strike-through.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#42 lo-tdf144642_RowHeight_10mm_SavedByCalc.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#43 lo-tdf162963_TableWithTotalsEnabled.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#44 lo-tdf165180_date1904.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#45 lo-threadedComment.xlsx: fell back  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: notes on “…” changed, and the sheet also has threaded comments
+#46 lo-totalsRowFunction.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=pass]
+#47 lo-universal-content.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#48 poi-123233_charts.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#49 poi-50784-font_theme_colours.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#50 poi-55906-MultiSheetRefs.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#51 poi-57893-many-merges.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#52 poi-ConditionalFormattingSamples.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#53 poi-DataValidations-49244.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#54 poi-DateFormatTests.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#55 poi-ExcelPivotTableSample.xlsx: FAIL  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=FAIL insert-row=pass]
+    rename FAIL: unexpected changes ["xl/pivotCache/pivotCacheDefinition1.xml"]
+#56 poi-ExcelTables.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=pass]
+#57 poi-FormulaEvalTestData_Copy.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#58 poi-GroupTest.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#59 poi-InlineStrings.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#60 poi-NewStyleConditionalFormattings.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#61 poi-RepeatingRowsCols.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: a formula xl can't read (Sheet4!$A:$B,Sheet4!$2:$3): unexpected ','
+#62 poi-SampleSS.strict.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#63 poi-SampleSS.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#64 poi-SheetTabColors.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#65 poi-SimpleWithComments.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#66 poi-StructuredReferences.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#67 poi-Tables.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#68 poi-Themes.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#69 poi-WidthsAndHeights.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#70 poi-WithChart.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#71 poi-WithChartSheet.xlsx: FAIL  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=FAIL insert-row=pass]
+    rename FAIL: unexpected changes ["xl/pivotCache/pivotCacheDefinition1.xml", "xl/pivotCache/pivotCacheDefinition2.xml", "xl/pivotCache/pivotCacheDefinition3.xml"]
+#72 poi-WithConditionalFormatting.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#73 poi-WithDrawing.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#74 poi-WithTextBox.xlsx: pass  [noop=pass edit-new=pass edit-middle=n/a style=pass add-sheet=pass rename=pass insert-row=pass]
+#75 poi-WithThreeCharts.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#76 poi-comments.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#77 poi-customIndexedColors.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: a formula xl can't read ('1'!#REF!): expected a cell reference after 1!
+#78 poi-headerFooterTest.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#79 poi-picture.xlsx: FAIL  [noop=pass edit-new=FAIL edit-middle=FAIL style=FAIL add-sheet=FAIL rename=FAIL insert-row=pass]
+    edit-new FAIL: malformed XML ["xl/sharedStrings.xml", "xl/worksheets/sheet1.xml"]; doesn't reopen: ill-formed document: expected `</si>`, but `</<si>` was found
+    edit-middle FAIL: malformed XML ["xl/sharedStrings.xml", "xl/worksheets/sheet1.xml"]; doesn't reopen: ill-formed document: expected `</si>`, but `</<si>` was found
+    style FAIL: malformed XML ["xl/worksheets/sheet1.xml"]; doesn't reopen: ill-formed document: expected `</cols>`, but `</co<sheetData>` was found
+    add-sheet FAIL: malformed XML ["xl/sharedStrings.xml", "xl/workbook.xml"]; doesn't reopen: ill-formed document: expected `</bookViews>`, but `</bookVie<sheets>` was found
+    rename FAIL: malformed XML ["xl/workbook.xml"]; doesn't reopen: ill-formed document: expected `</bookViews>`, but `</bookVie<sheets>` was found
+#80 poi-right-to-left.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=fell back]
+    insert-row fell back: notes on “…” changed, and the sheet also has threaded comments
+#81 poi-shared_formulas.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#82 poi-sharedhyperlink.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#83 poi-simple-monthly-budget.xlsx: fell back  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=fell back]
+    insert-row fell back: an extension's cells were all deleted
+#84 poi-unicodeSheetName.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=n/a insert-row=pass]
+#85 poi-workbookProtection_worksheet_protected.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+#86 poi-xlookup.xlsx: pass  [noop=pass edit-new=pass edit-middle=pass style=pass add-sheet=pass rename=pass insert-row=pass]
+
+87 files: 65 pass, 14 fell back, 8 fail (0 known)
+  noop           86 pass    0 fell back    0 fail    0 n/a
+  edit-new       83 pass    0 fell back    3 fail    0 n/a
+  edit-middle    71 pass    0 fell back    2 fail   13 n/a
+  style          82 pass    0 fell back    4 fail    0 n/a
+  add-sheet      83 pass    0 fell back    3 fail    0 n/a
+  rename         75 pass    0 fell back    3 fail    8 n/a
+  insert-row     71 pass   15 fell back    0 fail    0 n/a

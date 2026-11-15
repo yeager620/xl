@@ -51,7 +51,38 @@ struct Child {
 
 /// The root's start tag end, its end tag start, the namespace prefix it
 /// uses ("x:" or ""), and its direct children.
-fn children(doc: &[u8]) -> Result<(usize, usize, String, Vec<Child>), String> {
+fn children(full: &[u8]) -> Result<(usize, usize, String, Vec<Child>), String> {
+    // The reader skips a byte-order mark and counts positions after it.
+    let bom = if full.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+    let (open, close, prefix, kids) = children_after_bom(&full[bom..])?;
+    let kids = kids.into_iter().map(|k| Child { start: k.start + bom, end: k.end + bom, ..k }).collect();
+    Ok((open + bom, close + bom, prefix, kids))
+}
+
+/// A root written as `<sst .../>` can't take children; spell it out as
+/// `<sst ...></sst>` first.
+fn expand_root(doc: &[u8]) -> Vec<u8> {
+    let bom = if doc.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+    let mut r = xml(&doc[bom..]);
+    let mut buf = Vec::new();
+    loop {
+        let before = r.buffer_position() as usize;
+        match r.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) | Ok(Event::Eof) | Err(_) => return doc.to_vec(),
+            Ok(Event::Empty(e)) => {
+                let after = r.buffer_position() as usize;
+                let name = e.name().as_ref().to_string();
+                let tag = String::from_utf8_lossy(&doc[bom + before..bom + after]).to_string();
+                let open = format!("{}>", tag.trim_end_matches("/>").trim_end());
+                return apply_edits(doc, vec![(bom + before, bom + after, format!("{open}</{name}>"))]);
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn children_after_bom(doc: &[u8]) -> Result<(usize, usize, String, Vec<Child>), String> {
     let mut r = xml(doc);
     let mut buf = Vec::new();
     let mut depth = 0usize;
@@ -210,6 +241,7 @@ fn apply_edits(doc: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
 /// Replace, remove or insert root children by local name, keeping the
 /// schema's element order (`order` lists the names in sequence).
 fn splice(doc: &[u8], order: &[&str], mut replace: HashMap<&str, Option<String>>) -> Result<Vec<u8>, String> {
+    let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let mut edits = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -364,6 +396,7 @@ impl Styles {
         if self.added.is_empty() && self.dxf_added.is_empty() {
             return Ok(None);
         }
+        let doc = &expand_root(doc);
         let (_, _, _, kids) = children(doc)?;
         let text = String::from_utf8_lossy(doc).to_string();
         let count_in = |name: &str| -> usize {
@@ -515,6 +548,7 @@ fn strip_prefix_tag(tag: &str) -> String {
 /// Like `splice`, but a replacement may carry a raw (already prefixed)
 /// middle section between \u{1} markers that must not be re-prefixed.
 fn splice_keeping_raw(doc: &[u8], order: &[&str], replace: HashMap<&str, Option<String>>) -> Result<Vec<u8>, String> {
+    let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let fix = |s: &str| -> String {
         let parts: Vec<&str> = s.split('\u{1}').collect();
@@ -1197,6 +1231,11 @@ fn write_notes(
     Ok(Some(splice(&doc, SHEET_ORDER, rep)?))
 }
 
+const REL_STYLES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
+const CT_STYLES: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml";
+/// What a package without a styles part gets before xl's formats are added.
+const MINIMAL_STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"1\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts><fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills><borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs><cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>";
+
 const REL_WORKSHEET: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 const REL_SST: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
 const CT_WORKSHEET: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
@@ -1204,6 +1243,7 @@ const CT_SST: &str = "application/vnd.openxmlformats-officedocument.spreadsheetm
 
 /// Add and remove relationships in a .rels part (by target).
 fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[String]) -> Result<Vec<u8>, String> {
+    let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let text = String::from_utf8_lossy(doc).to_string();
     let mut edits = Vec::new();
@@ -1219,6 +1259,7 @@ fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[Stri
 }
 
 fn patch_content_types(doc: &[u8], add: &[(String, &str)], remove: &[String]) -> Result<Vec<u8>, String> {
+    let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let text = String::from_utf8_lossy(doc).to_string();
     let mut edits = Vec::new();
@@ -1357,6 +1398,10 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     let part = |name: &str| rewritten.get(name).cloned().or_else(|| pkg.part(name));
     let (xfs, dxfs, _) = crate::xlsx_read::read_styles(&mut zip)?;
     let styles_xml = pkg.part("xl/styles.xml");
+    // Index 0 is the default format; a package without styles still gets one.
+    // An empty stylesheet is treated like a missing one (rebuilt from the minimal one).
+    let has_formats = !xfs.is_empty();
+    let xfs = if xfs.is_empty() { vec![Xf::default()] } else { xfs };
     let mut styles = Styles::new(xfs, dxfs, styles_xml.as_deref());
     let shared = crate::xlsx_read::read_shared_strings(&mut zip)?;
     let mut strings = Strings::new(&shared);
@@ -1448,7 +1493,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     let note_sheets: Vec<(SheetId, String)> = pkg
         .sheets
         .iter()
-        .filter(|s| wb.sheet_ids().contains(&s.id) && sheet_digest(wb, s.id).notes != s.digest.notes)
+        .filter(|s| wb.sheet_ids().contains(&s.id) && pkg.notes_changed(wb, s.id))
         .map(|s| (s.id, s.part.clone()))
         .chain(new_sheet_parts.iter().filter(|(id, _)| !wb.layout(*id).notes.is_empty()).cloned())
         .collect();
@@ -1470,6 +1515,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     if !strings.added.is_empty() {
         match pkg.part("xl/sharedStrings.xml") {
             Some(doc) => {
+                let doc = expand_root(&doc);
                 let (_, root_close, prefix, _) = children(&doc)?;
                 let text = String::from_utf8_lossy(&doc).to_string();
                 let (tag_end, _, _, _) = children(&doc)?;
@@ -1492,10 +1538,23 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             }
         }
     }
-    if let Some(doc) = styles_xml.as_deref()
-        && let Some(patched) = styles.patch(doc)?
-    {
-        replaced.insert("xl/styles.xml".into(), patched);
+    match styles_xml.as_deref().filter(|_| has_formats) {
+        Some(doc) => {
+            if let Some(patched) = styles.patch(doc)? {
+                replaced.insert("xl/styles.xml".into(), patched);
+            }
+        }
+        None => {
+            if let Some(created) = styles.patch(MINIMAL_STYLES.as_bytes())? {
+                if styles_xml.is_some() {
+                    replaced.insert("xl/styles.xml".into(), created);
+                } else {
+                    added_parts.push(("xl/styles.xml".into(), created));
+                    rel_adds.push(("rIdXlStyles".into(), REL_STYLES, "styles.xml".into()));
+                    ct_adds.push(("/xl/styles.xml".into(), CT_STYLES));
+                }
+            }
+        }
     }
     // Excel rebuilds the calculation chain; a stale one makes it repair the file.
     let mut rel_removes = Vec::new();

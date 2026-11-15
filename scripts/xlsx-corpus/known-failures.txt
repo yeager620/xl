@@ -1,10 +1,3 @@
 # Corpus files whose roundtrip failures are known bugs: the checker still
 # reports them, but they don't fail CI. Remove a line once its file passes
 # (the checker says so). One basename per line; '#' starts a comment.
-calamine-errors.xlsx                     # edit-new, add-sheet: panic in set_attrs on an empty tag (xlsx_patch.rs:159); the package has no _rels/.rels
-calamine-nonstandard-xml-ns-prefix.xlsx  # style: bold lost on a patched save (styles.xml uses a non-default namespace prefix)
-calamine-richtext-namespaced.xlsx        # every edit: prefixed (x:) sharedStrings/sheet XML gets spliced at wrong offsets -> malformed XML
-calamine-workbook_properties.xlsx        # style: bold lost; the package has no styles.xml and the patch doesn't add one
-lo-hyperlinks.xlsx                       # insert-row (rewrite fallback): column D's text cells are lost
-poi-FormulaEvalTestData_Copy.xlsx        # insert-row (rewrite fallback): 28 cells reopen with different values
-poi-picture.xlsx                         # every patched edit: parts with a UTF-8 BOM are spliced 3 bytes off -> malformed XML

@@ -527,7 +527,8 @@ fn rename(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
                 .original
                 .iter()
                 .filter(|(k, _)| is_xml(k) && k.as_str() != "docProps/app.xml" && k.as_str() != "xl/sharedStrings.xml")
-                .any(|(_, v)| contains(v, quoted.as_bytes()) || contains(v, plain.as_bytes()))
+                // Pivot caches name their source sheet in an attribute.
+                .any(|(_, v)| contains(v, quoted.as_bytes()) || contains(v, plain.as_bytes()) || contains(v, format!("sheet=\"{name}\"").as_bytes()))
     };
     let s = wb.sheet_ids().iter().copied().find(|&s| !referenced(wb.sheet_name(s))).ok_or("every sheet is referenced by name")?;
     let new = (1..).map(|i| format!("xl renamed {i}")).find(|n| wb.sheet_id(n).is_none()).unwrap();

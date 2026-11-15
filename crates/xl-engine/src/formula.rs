@@ -987,6 +987,8 @@ impl Parser<'_> {
             Some(Tok::Sheet(name)) => {
                 let id = self.names.sheet_id(&name).ok_or_else(|| ParseError(format!("no sheet named '{name}'")))?;
                 match self.next() {
+                    // What Excel writes for a reference that was deleted: Sheet1!#REF!
+                    Some(Tok::Err(e)) => Ok(Expr::Error(e)),
                     Some(Tok::Num(n)) => self.row_range(n, false, Some(id)).ok_or_else(|| ParseError(format!("bad reference after {name}!")))?,
                     Some(Tok::Ident(r)) if r.starts_with('$') && r[1..].bytes().all(|b| b.is_ascii_digit()) && !r[1..].is_empty() => {
                         self.row_range(r[1..].parse().unwrap_or(0.0), true, Some(id)).ok_or_else(|| ParseError(format!("bad reference after {name}!")))?

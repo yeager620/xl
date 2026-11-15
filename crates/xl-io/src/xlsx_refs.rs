@@ -68,11 +68,33 @@ impl<'a> Edits<'a> {
 
     /// A formula (no leading '=') on sheet `home`, adjusted for the edits.
     pub fn formula(&self, src: &str, home: SheetId) -> Result<String, String> {
+        self.formula_in(src, home, false)
+    }
+
+    /// `qualified`: references always name their sheet (charts, defined
+    /// names), so the home sheet doesn't matter.
+    pub fn formula_in(&self, src: &str, home: SheetId, qualified: bool) -> Result<String, String> {
         let renamed = self.renamed(src);
         if self.shifts.is_empty() {
             return Ok(renamed);
         }
-        let mut expr = parse_formula(&renamed, self.wb.sheets()).map_err(|e| format!("a formula xl can't read ({src}): {e}"))?;
+        let mut expr = match parse_formula(&renamed, self.wb.sheets()) {
+            Ok(e) => e,
+            Err(e) => {
+                // A formula xl can't parse is safe to leave alone if it can't
+                // refer to a shifted sheet: none is named in it, and its
+                // unqualified references (if any) are to an unshifted sheet.
+                let shifted: Vec<SheetId> = self.shifts.iter().map(|s| s.sheet()).collect();
+                let names_one = shifted.iter().any(|&id| {
+                    let name = self.wb.sheet_name(id);
+                    renamed.contains(&format!("{name}!")) || renamed.contains(&format!("{}!", quote_sheet_name(name)))
+                });
+                if !names_one && (qualified || !shifted.contains(&home)) {
+                    return Ok(renamed);
+                }
+                return Err(format!("a formula xl can't read ({src}): {e}"));
+            }
+        };
         for op in &self.shifts {
             expr = expr.shifted(*op, home);
         }
@@ -88,16 +110,32 @@ impl<'a> Edits<'a> {
         self.on_sheet(sheet).try_fold(r, |r, op| op.map_range(r))
     }
 
-    /// A space-separated range list ("A1:B2 D4"); None if all of it was deleted.
+    /// A space-separated range list ("A1:B2 D4", "A:A", "3:5"); None if all
+    /// of it was deleted. Unchanged (text and all) when nothing shifted here.
     pub fn sqref(&self, s: &str, sheet: SheetId) -> Option<String> {
+        if self.on_sheet(sheet).next().is_none() {
+            return Some(s.to_string());
+        }
         let out: Vec<String> = s
             .split_whitespace()
             .filter_map(|part| {
                 let clean = part.replace('$', "");
                 let (a, b) = clean.split_once(':').unwrap_or((&clean, &clean));
-                let r = Range::new(CellRef::parse(a)?, CellRef::parse(b)?);
-                let r = self.range(r, sheet)?;
-                Some(if r.start == r.end { r.start.to_string() } else { format!("{}:{}", r.start, r.end) })
+                if let (Some(a), Some(b)) = (CellRef::parse(a), CellRef::parse(b)) {
+                    let r = self.range(Range::new(a, b), sheet)?;
+                    return Some(if r.start == r.end { r.start.to_string() } else { format!("{}:{}", r.start, r.end) });
+                }
+                // Whole columns ("A:C") or whole rows ("3:5").
+                if let (Some(c1), Some(c2)) = (xl_engine::parse_col(a), xl_engine::parse_col(b)) {
+                    let r = self.range(Range::new(CellRef::new(0, c1), CellRef::new(xl_engine::MAX_ROWS - 1, c2)), sheet)?;
+                    return Some(format!("{}:{}", xl_engine::col_name(r.start.col), xl_engine::col_name(r.end.col)));
+                }
+                if let (Ok(r1), Ok(r2)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    let r = self.range(Range::new(CellRef::new(r1.saturating_sub(1), 0), CellRef::new(r2.saturating_sub(1), xl_engine::MAX_COLS - 1)), sheet)?;
+                    return Some(format!("{}:{}", r.start.row + 1, r.end.row + 1));
+                }
+                // Something else (a name?): leave it.
+                Some(part.to_string())
             })
             .collect();
         (!out.is_empty()).then(|| out.join(" "))
@@ -333,6 +371,8 @@ impl Edits<'_> {
                 match el {
                     "formula1" | "formula2" | "f" if stack.iter().any(|s| s == "dataValidation" || s == "extLst") => Some(self.formula(text, sheet)),
                     "formula" if stack.iter().any(|s| s == "extLst") => Some(self.formula(text, sheet)),
+                    // (Called with empty text first, to ask whether to collect it.)
+                    "sqref" if shifted && text.is_empty() => Some(Ok(String::new())),
                     "sqref" if shifted => Some(match self.sqref(text, sheet) {
                         Some(n) => Ok(n),
                         None => {
@@ -436,7 +476,7 @@ impl Edits<'_> {
 
     /// Chart series formulas (they name their sheets).
     pub fn chart_xml(&self, doc: &[u8], home: SheetId) -> Result<Option<Vec<u8>>, String> {
-        rewrite(doc, |_, _, _| Action::Keep, |el, text, _| (el == "f").then(|| self.formula(text, home)))
+        rewrite(doc, |_, _, _| Action::Keep, |el, text, _| (el == "f").then(|| self.formula_in(text, home, true)))
     }
 
     /// Pivot cache source: `<worksheetSource ref="A1:D10" sheet="Data"/>`.
@@ -469,7 +509,7 @@ impl Edits<'_> {
     /// Defined names in workbook.xml (built-in ones survive the rewrite).
     pub fn workbook_xml(&self, doc: &[u8]) -> Result<Option<Vec<u8>>, String> {
         let first = self.wb.sheet_ids().first().copied().unwrap_or(0);
-        rewrite(doc, |_, _, _| Action::Keep, |el, text, _| (el == "definedName").then(|| self.formula(text, first)))
+        rewrite(doc, |_, _, _| Action::Keep, |el, text, _| (el == "definedName").then(|| self.formula_in(text, first, true)))
     }
 }
 
@@ -530,7 +570,7 @@ pub(crate) fn rewrite_preserved(wb: &Workbook, pkg: &Package) -> Result<HashMap<
         out.insert("xl/workbook.xml".into(), new);
     }
     // Parts that refer to cells in ways not handled above.
-    for (prefix, what) in [("xl/externalLinks/", "links to other workbooks"), ("xl/slicerCaches/", "slicers"), ("xl/timelineCaches/", "timelines")] {
+    for (prefix, what) in [("xl/slicerCaches/", "slicers"), ("xl/timelineCaches/", "timelines")] {
         if !edits.shifts.is_empty() && names.iter().any(|n| n.starts_with(prefix)) {
             return Err(format!("the file has {what}, which xl can't adjust yet"));
         }
