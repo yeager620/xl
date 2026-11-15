@@ -4,27 +4,27 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Fri, 13 Nov 2026 23:58:41 +0000
+Date: Sun, 15 Nov 2026 09:17:00 +0000
 Description: xl spreadsheet
 Label: xl
 Origin: xl
 Suite: stable
 MD5Sum:
- ddd7ba72ed400c5924f14cd489c4fbc3             2026 main/binary-amd64/Packages
- e47508fdde9848d0a876e0fc505c814b              882 main/binary-amd64/Packages.gz
+ 39409f10ee4cefbec42cdf1e7186a79e             3039 main/binary-amd64/Packages
+ c348d505c6a88c1c9af988a792e867fa             1081 main/binary-amd64/Packages.gz
 SHA1:
- 1e5164e81326ec3a0853bc05c1c2b1c79e537901             2026 main/binary-amd64/Packages
- bf952d3a3a0bb4df842ec8be9eb468b83b650c84              882 main/binary-amd64/Packages.gz
+ 7aafa25697005e9a8afe4fa530fe54d006e89ad5             3039 main/binary-amd64/Packages
+ 6d1548bdb637022bf739a0155e2803044a2170e5             1081 main/binary-amd64/Packages.gz
 SHA256:
- 140cea91ab50887de03b7381cda44fcda7f1b58219556f90a59996d5d8bfe8fa             2026 main/binary-amd64/Packages
- cbdecf36a2a2a8718869750e26fff49ebff0197e50d6e36246ebd51a40b5e0cb              882 main/binary-amd64/Packages.gz
+ f056e5b6d08f00a3b3f95b8e8c79280784d232e0118a180f7dc26bcfe8d6c821             3039 main/binary-amd64/Packages
+ e1e3080b11c66f06de581f40631a43055751bd05c35b6c743193b98f9831995e             1081 main/binary-amd64/Packages.gz
 SHA512:
- f235aa6db4cf955af49cb103d8397b6e4b7b232cce166088a068eeba07cd775fc383d8916470d8ee10c8cf42770ec6aab0ef47aed2d9f499b42b084cfaed8d56             2026 main/binary-amd64/Packages
- d115dbce31480925fbc2399bb3dc8423f5717079264ba0a4185bc7a707f0fef174c7d6fd32d91d64f5cd5ba1569feed6222d1e69b364ac883b406e1a0e201a48              882 main/binary-amd64/Packages.gz
+ 9901277aa81998b4a559aac842992cb77766b2d6162f51a32afca0fa7c9048450fdde17e6b4eb20ce32899f2b60dc9e91a46d8b93cc2bb239e9f6087e8d814e2             3039 main/binary-amd64/Packages
+ eafbeed5d8cee50479b95dcf169860823ea6316f7a3ba2676199dae9b3acfca50740f184a36507661f14cbfaa5b133c7626326441990c122b3636648f6a3f6e2             1081 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCavekMQAKCRD8DLAncLzv
-iO17AQD5tcweVcSovAzpDKclHBuV3SY8IGBVuW5M5eRtP4TewQD+PZk75HJKq7SL
-Uy1Bq14SoQjSb7Ak+OxNFyuKXs4xcA8=
-=I4cw
+iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCavl4jAAKCRD8DLAncLzv
+iFgqAP4qYGrHNQnfWVucw/hlr+fnM1d0+WGpR0RMtkwgPpiCoQEA85nanbqkEcse
+SOmQ2BEaxVnt1yFd3Wzd8Kget6VU4Qc=
+=UpfS
 -----END PGP SIGNATURE-----
