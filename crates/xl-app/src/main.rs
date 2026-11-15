@@ -8,6 +8,7 @@ mod cond_ui;
 mod data;
 mod fill;
 mod find;
+mod history_ui;
 mod home;
 mod ime;
 mod lifecycle;
@@ -52,6 +53,10 @@ pub fn load_fonts(cx: &App) {
 }
 
 fn main() {
+    // `xl diff …` / `xl textconv …` print and exit without starting the GUI.
+    if let Some(code) = xl_diff::cli::run(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     let path = std::env::args().nth(1).map(PathBuf::from);
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         load_fonts(cx);

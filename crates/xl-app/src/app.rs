@@ -201,6 +201,8 @@ pub enum Field {
     Note,
     /// The script editor.
     Script,
+    /// The name of a version in the history panel.
+    VersionLabel,
 }
 
 /// What a right-click menu is about.
@@ -331,6 +333,8 @@ pub struct Spreadsheet {
     pub(crate) recent: crate::recent::Recent,
     /// Scripts: running functions, consent, the editor.
     pub(crate) scripts: crate::scripts_ui::ScriptState,
+    /// Version history: the store, its panel and the diff being shown.
+    pub(crate) history: crate::history_ui::HistoryState,
     _appearance: Subscription,
 }
 
@@ -405,6 +409,7 @@ impl Spreadsheet {
             home: None,
             recent: crate::recent::Recent::load(&crate::recent::default_dir()),
             scripts: crate::scripts_ui::ScriptState::new(),
+            history: Default::default(),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -643,7 +648,7 @@ impl Spreadsheet {
         }
     }
 
-    fn hit_test(&self, pos: Point<Pixels>) -> Option<Hit> {
+    pub(crate) fn hit_test(&self, pos: Point<Pixels>) -> Option<Hit> {
         let x = f64::from(pos.x - self.viewport.origin.x);
         let y = f64::from(pos.y - self.viewport.origin.y);
         if x < 0.0 || y < 0.0 || x > f64::from(self.viewport.size.width) || y > f64::from(self.viewport.size.height) {
@@ -959,7 +964,7 @@ impl Spreadsheet {
     }
 
     /// Apply an undo (or redo) step and return the step that reverses it.
-    fn invert(&mut self, entry: UndoEntry) -> UndoEntry {
+    pub(crate) fn invert(&mut self, entry: UndoEntry) -> UndoEntry {
         match entry {
             // Steps run last-first; listing the inverses in the order they ran
             // makes the inverse group run them last-first too, i.e. reversed.
@@ -1589,7 +1594,7 @@ impl Spreadsheet {
         .detach();
     }
 
-    fn finish_load(&mut self, path: PathBuf, result: Result<xl_io::Loaded, String>) {
+    pub(crate) fn finish_load(&mut self, path: PathBuf, result: Result<xl_io::Loaded, String>) {
         self.loading = None;
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         match result {
@@ -1672,6 +1677,7 @@ impl Spreadsheet {
                     (format!("Saved {}", path.display()), false)
                 });
                 self.recent.record(&path);
+                self.record_history(&path);
                 self.path = Some(path);
             }
             Err(e) => self.message = Some((format!("Save failed: {e}"), true)),
@@ -1782,6 +1788,8 @@ impl Spreadsheet {
             self.key_chart_title(key)
         } else if matches!(self.field, Some(Field::Find | Field::Replace)) {
             self.key_find(key, m.shift)
+        } else if self.field == Some(Field::VersionLabel) {
+            self.key_version_label(key)
         } else if self.field.is_some() {
             self.key_field(key)
         } else if self.edit.is_some() {
@@ -2259,6 +2267,9 @@ impl Spreadsheet {
         };
         if over_note != self.hover_note {
             self.hover_note = over_note;
+            cx.notify();
+        }
+        if self.diff_hover_at(ev.position) {
             cx.notify();
         }
         let Some(drag) = self.drag else { return };

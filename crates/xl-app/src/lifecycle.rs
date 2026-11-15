@@ -119,6 +119,7 @@ impl Spreadsheet {
             let original = self.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             std::fs::write(file.with_extension("path"), original).ok();
             self.autosaved_generation = Some(self.edit_generation);
+            self.history_autosave(&file);
         }
     }
 

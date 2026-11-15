@@ -55,6 +55,7 @@ impl Spreadsheet {
             Some(crate::app::Field::Note) => return self.note_edit.as_ref().map_or("", |(_, t)| t.as_str()),
             Some(crate::app::Field::Form(i)) => return self.form.as_ref().and_then(|f| f.fields.get(i as usize)).map_or("", |f| &f.2),
             Some(crate::app::Field::Script) => return self.scripts.editor.as_ref().map_or("", |e| e.text()),
+            Some(crate::app::Field::VersionLabel) => return &self.history.label_text,
             None => {}
         }
         match (&self.renaming, &self.edit) {
@@ -154,6 +155,7 @@ impl EntityInputHandler for Spreadsheet {
                         d.value2.push_str(text);
                     }
                 }
+                crate::app::Field::VersionLabel => self.history.label_text.push_str(text),
             }
             cx.notify();
             return;
