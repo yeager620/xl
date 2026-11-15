@@ -543,7 +543,7 @@ impl Spreadsheet {
         }
 
         // Notes: a small triangle in the cell's top-right corner.
-        for (cell, _) in layout.notes.iter() {
+        for cell in layout.notes.keys() {
             let (Some(&(r, y, _)), Some(&(c, x, w))) = (rows.iter().find(|row| row.0 == cell.row), cols.iter().find(|col| col.0 == cell.col)) else { continue };
             let right = merge_at(*cell).map_or(x + w, |m| x_of(m.end.col) + self.col_w(m.end.col));
             for i in 0..6 {
