@@ -276,6 +276,8 @@ pub struct Spreadsheet {
     pub(crate) menu: Option<Menu>,
     /// The selected chart (index on the current sheet).
     pub(crate) selected_chart: Option<usize>,
+    /// Decoded-image handles for the pictures on the sheets.
+    pub(crate) picture_cache: crate::pictures::PictureCache,
     pub(crate) chart_title_text: String,
     /// The open list of choices for a validated cell: cell, choices, where.
     pub(crate) dropdown: Option<(CellRef, Vec<String>, Point<Pixels>)>,
@@ -377,6 +379,7 @@ impl Spreadsheet {
             dropdown: None,
             hover_note: None,
             selected_chart: None,
+            picture_cache: Default::default(),
             chart_title_text: String::new(),
             ac_dismissed: None,
             context: None,

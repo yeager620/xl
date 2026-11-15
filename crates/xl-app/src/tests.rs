@@ -1695,3 +1695,93 @@ fn data_validation_dropdown_and_refusal(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(val(&view, cx, "G1"), Value::Number(12.0));
 }
+
+/// A 2×2 red PNG.
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00,
+    0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x44, 0x0c, 0x10, 0x0a, 0x00, 0x1f, 0xee, 0x03, 0xfd, 0x8b, 0x5f, 0x14, 0xd4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+/// Pictures are laid out over their cells, painted (pixels can't be checked
+/// here), move with inserted rows and aren't touched by Delete.
+#[gpui::test]
+fn pictures_are_drawn_and_follow_inserted_rows(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+    use xl_engine::picture::{Picture, PictureFormat};
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, cx| {
+        let data: Arc<[u8]> = Arc::from(TINY_PNG);
+        let pic = |anchor: &str, end: Option<(&str, (f64, f64))>, format| Picture {
+            anchor: CellRef::parse(anchor).unwrap(),
+            offset: (4.0, 2.0),
+            end: end.map(|(c, o)| (CellRef::parse(c).unwrap(), o)),
+            size: (80.0, 40.0),
+            data: data.clone(),
+            format,
+            name: "Picture 1".into(),
+            alt: None,
+        };
+        let cur = s.cur;
+        let l = s.wb.layout_mut(cur).unwrap();
+        l.pictures.push(pic("C3", Some(("D5", (10.0, 4.0))), PictureFormat::Png));
+        l.pictures.push(pic("F2", None, PictureFormat::Png));
+        // EMF and the like get a placeholder box.
+        l.pictures.push(pic("H8", None, PictureFormat::Other));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    view.update(cx, |_, cx| {
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, TINY_PNG.to_vec());
+        let decoded = image.to_image_data(cx.svg_renderer()).expect("GPUI decodes the PNG");
+        assert_eq!(decoded.size(0), gpui::size(gpui::DevicePixels(2), gpui::DevicePixels(2)));
+    });
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.picture_cache.len(), 1, "both PNG pictures were painted from one image");
+        let p = &s.wb.layout(s.cur).pictures[0];
+        let (x, y, w, h) = s.picture_rect(p);
+        let left = f64::from(s.viewport.origin.x) + s.hw() + s.grid_x(2);
+        let top = f64::from(s.viewport.origin.y) + s.hh() + s.grid_y(2);
+        assert_eq!((x, y), (left + 4.0, top + 2.0));
+        // Spans C3+offset to D5+(10, 4): one column and two rows, less the offsets.
+        let squash = xl_io::from_excel_height(0.75) / xl_io::from_excel_width_px(1.0);
+        assert!((w - (s.col_w(2) - 4.0 + 10.0) * squash).abs() < 1e-9, "{w}");
+        assert_eq!(h, s.row_h(2) + s.row_h(3) - 2.0 + 4.0);
+    });
+    // A row inserted above moves them; one inside the span stretches it.
+    go(&view, cx, "A1");
+    view.update(cx, |s, _| s.insert_rows(false));
+    go(&view, cx, "A5");
+    view.update(cx, |s, _| s.insert_rows(false));
+    view.read_with(cx, |s, _| {
+        let l = s.wb.layout(s.cur);
+        assert_eq!(l.pictures[0].anchor, CellRef::parse("C4").unwrap());
+        assert_eq!(l.pictures[0].end.map(|e| e.0), CellRef::parse("D7"));
+        assert_eq!(l.pictures[1].anchor, CellRef::parse("F3").unwrap());
+    });
+    // Delete clears the cell under a picture, not the picture.
+    go(&view, cx, "C4");
+    cx.simulate_keystrokes("delete");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).pictures.len(), 3));
+    cx.simulate_keystrokes("ctrl-z ctrl-z ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).pictures[0].anchor, CellRef::parse("C3").unwrap(), "undo puts them back"));
+    // Frozen panes and scrolling: the frame still builds and paints.
+    view.update(cx, |s, cx| {
+        let cur = s.cur;
+        s.wb.layout_mut(cur).unwrap().freeze = (4, 3);
+        s.scroll_y = 200.0;
+        s.scroll_x = 150.0;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // Closing the workbook lets the decoded image go.
+    view.update(cx, |s, cx| {
+        let cur = s.cur;
+        s.wb.layout_mut(cur).unwrap().pictures.clear();
+        s.undo.clear();
+        s.redo.clear();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| assert_eq!(s.picture_cache.len(), 0));
+}

@@ -14,6 +14,7 @@ mod lifecycle;
 mod notes_ui;
 mod outline;
 mod palette;
+mod pictures;
 mod paint;
 mod pivot_ui;
 mod recent;

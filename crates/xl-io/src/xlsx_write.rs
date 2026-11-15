@@ -313,6 +313,20 @@ fn excel_px_y(px: f64) -> u32 {
     (crate::to_excel_height(px) * 4.0 / 3.0).round() as u32
 }
 
+/// A picture at its place and size as read. Images rust_xlsxwriter can't
+/// embed are left out.
+fn write_picture(ws: &mut Worksheet, p: &xl_engine::picture::Picture) -> Result<(), rust_xlsxwriter::XlsxError> {
+    let Ok(mut image) = rust_xlsxwriter::Image::new_from_buffer(&p.data) else { return Ok(()) };
+    image = image.set_scale_to_size(f64::from(excel_px_x(p.size.0)), f64::from(excel_px_y(p.size.1)), false);
+    if let Some(alt) = &p.alt {
+        image = image.set_alt_text(alt);
+    }
+    // No offset stays none (the conversions round up to a pixel).
+    let off = |v: f64, f: fn(f64) -> u32| if v > 0.0 { f(v) } else { 0 };
+    ws.insert_image_with_offset(p.anchor.row, p.anchor.col as u16, &image, off(p.offset.0, excel_px_x), off(p.offset.1, excel_px_y))?;
+    Ok(())
+}
+
 fn write_chart(ws: &mut Worksheet, wb: &Workbook, home: xl_engine::SheetId, chart: &xl_engine::chart::Chart) -> Result<(), rust_xlsxwriter::XlsxError> {
     use rust_xlsxwriter::{Chart as XChart, ChartType};
     use xl_engine::chart::ChartKind;
@@ -533,6 +547,9 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for (cell, note) in &layout.notes {
             let n = rust_xlsxwriter::Note::new(&note.text).set_author(&note.author).add_author_prefix(false);
             ws.insert_note(cell.row, cell.col as u16, &n).map_err(err)?;
+        }
+        for p in &layout.pictures {
+            write_picture(ws, p).map_err(err)?;
         }
         for chart in &layout.charts {
             write_chart(ws, wb, id, chart).map_err(err)?;

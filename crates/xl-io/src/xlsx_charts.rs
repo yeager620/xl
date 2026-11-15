@@ -181,12 +181,29 @@ pub(crate) fn read_sheet_notes(zip: &mut Zip, sheet_part: &str, wb: &mut Workboo
 #[derive(Default)]
 pub(crate) struct DrawingNotes {
     pub charts: usize,
-    /// Pictures, shapes or text boxes (xl doesn't keep these).
+    /// Shapes, text boxes, grouped or linked pictures and the like (kept
+    /// when xl saves into the original, but not shown).
     pub other_drawings: bool,
+    /// Pictures xl shows, with the media part each one's image is in.
+    pub pictures: Vec<FoundPicture>,
+    /// Pictures in a format xl can't draw (EMF, WMF…).
+    pub undrawable_pictures: bool,
     /// Charts of kinds xl doesn't draw.
     pub unsupported_charts: bool,
     /// Charts with colors, labels, trendlines and the like, which xl drops.
     pub styled_charts: bool,
+}
+
+/// A picture found in a sheet's drawing; its image is read separately.
+pub(crate) struct FoundPicture {
+    pub anchor: CellRef,
+    pub offset: (f64, f64),
+    pub end: Option<(CellRef, (f64, f64))>,
+    pub size: (f64, f64),
+    /// The media part (e.g. "xl/media/image1.png").
+    pub part: String,
+    pub name: String,
+    pub alt: Option<String>,
 }
 
 /// Chart XML that carries formatting beyond kind, series and title.
@@ -229,9 +246,27 @@ struct Marker {
 }
 
 pub(crate) fn read_sheet_charts(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<DrawingNotes, String> {
-    let (charts, notes) = scan_charts(zip, sheet_part, wb, sheet)?;
+    let (charts, mut notes) = scan_charts(zip, sheet_part, wb, sheet)?;
+    // Pictures showing the same image share its bytes.
+    let mut media: std::collections::HashMap<String, Option<Arc<[u8]>>> = std::collections::HashMap::new();
+    let mut pictures = Vec::new();
+    for p in std::mem::take(&mut notes.pictures) {
+        if !media.contains_key(&p.part) {
+            let bytes = read_entry(zip, &p.part)?.map(Arc::<[u8]>::from);
+            media.insert(p.part.clone(), bytes);
+        }
+        let Some(Some(data)) = media.get(&p.part).cloned() else {
+            notes.other_drawings = true;
+            continue;
+        };
+        let format = xl_engine::picture::PictureFormat::sniff(&data);
+        notes.undrawable_pictures |= format == xl_engine::picture::PictureFormat::Other;
+        pictures.push(xl_engine::picture::Picture { anchor: p.anchor, offset: p.offset, end: p.end, size: p.size, data, format, name: p.name.clone(), alt: p.alt.clone() });
+        notes.pictures.push(p);
+    }
     if let Some(l) = wb.layout_mut(sheet) {
         l.charts.extend(charts.into_iter().map(|c| c.0));
+        l.pictures.extend(pictures);
     }
     Ok(notes)
 }
@@ -259,14 +294,47 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
         let mut text = String::new();
         let mut chart_rid: Option<String> = None;
         let mut in_frame = false;
+        let mut anchor_kind = "";
+        let mut pos: Option<(f64, f64)> = None;
+        // The picture directly in this anchor: (blip relationship, name, alt text, hidden).
+        let mut pic: Option<(Option<String>, String, Option<String>, bool)> = None;
+        let mut group_depth = 0usize;
         let mut buf = Vec::new();
         loop {
             match r.read_event_into(&mut buf).map_err(|e| e.to_string())? {
                 Event::Start(ref e) | Event::Empty(ref e) => match local(e.name().as_ref()) {
-                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                    k @ ("twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor") => {
                         (from, to, ext, chart_rid, in_frame) = (Marker::default(), Marker::default(), None, None, false);
+                        anchor_kind = match k {
+                            "twoCellAnchor" => "two",
+                            "oneCellAnchor" => "one",
+                            _ => "abs",
+                        };
+                        (pos, pic, group_depth) = (None, None, 0);
                     }
+                    // Past here, extents belong to the drawn object, not the anchor.
                     "graphicFrame" => in_frame = true,
+                    "pic" if group_depth == 0 => {
+                        in_frame = true;
+                        pic = Some((None, String::new(), None, false));
+                    }
+                    "cNvPr" if group_depth == 0 => {
+                        if let Some(p) = pic.as_mut() {
+                            p.1 = attr(e, "name").unwrap_or_default();
+                            p.2 = attr(e, "descr").filter(|d| !d.trim().is_empty());
+                            p.3 = attr(e, "hidden").is_some_and(|v| v == "1" || v == "true");
+                        }
+                    }
+                    "blip" if group_depth == 0 => {
+                        if let Some(p) = pic.as_mut() {
+                            // Linked (external) images have r:link instead.
+                            p.0 = attr(e, "embed");
+                        }
+                    }
+                    "pos" if anchor_kind == "abs" && !in_frame => {
+                        let n = |k: &str| attr(e, k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                        pos = Some((n("x") / EMU_PER_PX, n("y") / EMU_PER_PX));
+                    }
                     "from" => in_marker = Some(true),
                     "to" => in_marker = Some(false),
                     f @ ("col" | "colOff" | "row" | "rowOff") if in_marker.is_some() => {
@@ -284,7 +352,15 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
                         }
                     }
                     "chart" => chart_rid = attr(e, "id"),
-                    "pic" | "sp" | "cxnSp" => notes.other_drawings = true,
+                    "grpSp" => {
+                        in_frame = true;
+                        notes.other_drawings = true;
+                        group_depth += 1;
+                    }
+                    "pic" | "sp" | "cxnSp" => {
+                        in_frame = true;
+                        notes.other_drawings = true;
+                    }
                     _ => {}
                 },
                 Event::Text(ref t) if !field.is_empty() => text.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
@@ -301,15 +377,10 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
                         }
                         field.clear();
                     }
+                    "grpSp" => group_depth = group_depth.saturating_sub(1),
                     "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
                         anchor_index += 1;
                         let this_anchor = anchor_index - 1;
-                        let Some(target) = chart_rid.take().and_then(|id| drels.get(&id).cloned()) else { continue };
-                        let part = resolve(&drawing, &target);
-                        let Some(chart_xml) = read_entry(zip, &part)? else { continue };
-                        if STYLING.iter().any(|m| chart_xml.windows(m.len()).any(|w| w == m.as_bytes())) {
-                            notes.styled_charts = true;
-                        }
                         // Size in Excel pixels: from the two-cell span, or the extent.
                         let (w, h) = match ext {
                             Some(e) => e,
@@ -321,6 +392,37 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
                                 (w, h)
                             }
                         };
+                        // Excel pixels to xl's.
+                        let x_px = from_excel_width_px;
+                        let y_px = |excel: f64| from_excel_height(excel * 0.75);
+                        if let Some((rid, name, alt, hidden)) = pic.take() {
+                            match rid.and_then(|id| drels.get(&id).cloned()) {
+                                Some(target) if !hidden && w > 0.0 && h > 0.0 => {
+                                    // Absolute anchors: a position from the sheet's corner.
+                                    let (off_x, off_y) = match pos {
+                                        Some(p) if anchor_kind == "abs" => p,
+                                        _ => (from.col_off, from.row_off),
+                                    };
+                                    notes.pictures.push(FoundPicture {
+                                        anchor: CellRef::new(from.row, from.col),
+                                        offset: (x_px(off_x), y_px(off_y)),
+                                        end: (anchor_kind == "two").then(|| (CellRef::new(to.row, to.col), (x_px(to.col_off), y_px(to.row_off)))),
+                                        size: (x_px(w), y_px(h)),
+                                        part: resolve(&drawing, &target),
+                                        name,
+                                        alt,
+                                    });
+                                }
+                                _ => notes.other_drawings = true,
+                            }
+                            continue;
+                        }
+                        let Some(target) = chart_rid.take().and_then(|id| drels.get(&id).cloned()) else { continue };
+                        let part = resolve(&drawing, &target);
+                        let Some(chart_xml) = read_entry(zip, &part)? else { continue };
+                        if STYLING.iter().any(|m| chart_xml.windows(m.len()).any(|w| w == m.as_bytes())) {
+                            notes.styled_charts = true;
+                        }
                         match parse_chart(&chart_xml, wb) {
                             Some((kind, stacked, title, series)) if !series.is_empty() => {
                                 let chart = Chart {

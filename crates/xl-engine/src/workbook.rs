@@ -57,6 +57,8 @@ pub struct SheetLayout {
     pub cond: Vec<crate::cond::CondFormat>,
     /// Charts, back to front.
     pub charts: Vec<crate::chart::Chart>,
+    /// Pictures, back to front (drawn under the charts).
+    pub pictures: Vec<crate::picture::Picture>,
     pub sparklines: Vec<crate::chart::Sparkline>,
     pub tables: Vec<Table>,
     /// Pivot tables whose output is on this sheet.
@@ -1095,6 +1097,9 @@ impl Workbook {
             if let Some(sd) = self.sheets.get_mut(id) {
                 for chart in &mut sd.layout.charts {
                     chart.apply_shift(op, id);
+                }
+                for p in &mut sd.layout.pictures {
+                    p.apply_shift(op, id);
                 }
                 sd.layout.sparklines.retain_mut(|s| s.apply_shift(op, id));
                 for p in &mut sd.layout.pivots {
