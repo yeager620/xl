@@ -1,6 +1,8 @@
 //! xl-io: reading and writing workbooks (xlsx, csv).
 
+mod csv_fast;
 mod csv_io;
+pub mod infer;
 mod package;
 mod xlsx_chartxml;
 mod xlsx_charts;
@@ -12,11 +14,14 @@ mod xlsx_refs;
 mod xlsx_scripts;
 mod xlsx_write;
 
+pub use csv_fast::{CsvData, CsvOptions, detect_delimiter};
 pub use package::{Package, SavePlan, save_plan};
 
 use std::path::Path;
 
-use xl_engine::{RecalcStats, SheetId, Workbook};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+
+use xl_engine::{RecalcStats, SheetId, Workbook, XLSX_MAX_ROWS};
 
 pub use xlsx_write::{expand_this_row, prefix_future_functions};
 
@@ -54,11 +59,78 @@ impl FileKind {
 }
 
 pub fn open(path: &Path) -> Result<Loaded, String> {
+    open_with_progress(path, &Progress::default())
+}
+
+/// The error a cancelled load returns.
+pub const CANCELLED: &str = "Cancelled";
+
+/// Progress of a long load, shared with the UI thread, which can also ask
+/// for it to stop (the load then returns `Err(CANCELLED)`).
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// 0 = starting, 1 = reading, 2 = parsing, 3 = building the sheet.
+    pub phase: AtomicU8,
+    pub done: AtomicU64,
+    pub total: AtomicU64,
+    pub cancel: AtomicBool,
+}
+
+impl Progress {
+    pub fn start(&self, phase: u8, total: u64) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+        self.phase.store(phase, Ordering::Relaxed);
+    }
+
+    pub fn add(&self, n: u64) {
+        self.done.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// What's happening and how far along (0..=1).
+    pub fn status(&self) -> (&'static str, f64) {
+        let label = match self.phase.load(Ordering::Relaxed) {
+            1 => "Reading",
+            2 => "Parsing",
+            3 => "Building sheet",
+            _ => "Opening",
+        };
+        let total = self.total.load(Ordering::Relaxed);
+        let frac = if total == 0 { 0.0 } else { (self.done.load(Ordering::Relaxed) as f64 / total as f64).min(1.0) };
+        (label, frac)
+    }
+}
+
+/// Open a file, reporting progress (CSV only; xlsx reports nothing yet)
+/// and honouring cancellation.
+pub fn open_with_progress(path: &Path, progress: &Progress) -> Result<Loaded, String> {
     match FileKind::of(path) {
         Some(FileKind::Xlsx) => xlsx_read::read_xlsx(path),
-        Some(FileKind::Csv) => csv_io::read_csv(path),
+        Some(FileKind::Csv) => csv_fast::read_csv_with(path, &CsvOptions::default(), progress),
         None => Err("Unsupported file type (xl opens .xlsx and .csv)".into()),
     }
+}
+
+/// The first sheet with more rows than an xlsx file can hold:
+/// (sheet name, rows used).
+pub fn xlsx_overflow(wb: &Workbook) -> Option<(String, u32)> {
+    wb.sheet_ids().iter().find_map(|&id| {
+        let end = wb.store(id).extent()?;
+        (end.row >= XLSX_MAX_ROWS).then(|| (wb.sheet_name(id).to_string(), end.row + 1))
+    })
+}
+
+/// The message for [`xlsx_overflow`].
+pub fn xlsx_overflow_message(sheet: &str, rows: u32) -> String {
+    format!("“{sheet}” has {rows} rows, but an .xlsx file holds at most {XLSX_MAX_ROWS}. Save as .csv to keep every row.")
 }
 
 /// Save the workbook. CSV files hold one sheet: `sheet` picks which.
@@ -69,6 +141,9 @@ pub fn open(path: &Path) -> Result<Loaded, String> {
 pub fn save(wb: &Workbook, path: &Path, sheet: SheetId, package: Option<&Package>) -> Result<Option<Package>, String> {
     match FileKind::of(path) {
         Some(FileKind::Xlsx) => {
+            if let Some((sheet, rows)) = xlsx_overflow(wb) {
+                return Err(xlsx_overflow_message(&sheet, rows));
+            }
             match package {
                 Some(pkg) if save_plan(wb, pkg) == SavePlan::Patch => xlsx_patch::write_patched(wb, pkg, path)?,
                 _ => xlsx_write::write_xlsx(wb, path)?,

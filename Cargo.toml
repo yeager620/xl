@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xl-engine", "crates/xl-io", "crates/xl-diff", "crates/xl-history", "crates/xl-app", "crates/xl-bench", "crates/xl-pack", "crates/xl-script"]
+members = ["crates/xl-engine", "crates/xl-io", "crates/xl-sql", "crates/xl-diff", "crates/xl-history", "crates/xl-app", "crates/xl-bench", "crates/xl-pack", "crates/xl-script"]
 exclude = ["vendor"]
 
 [workspace.package]
@@ -16,6 +16,7 @@ xl-io = { path = "crates/xl-io" }
 xl-script = { path = "crates/xl-script" }
 xl-diff = { path = "crates/xl-diff" }
 xl-history = { path = "crates/xl-history" }
+xl-sql = { path = "crates/xl-sql" }
 rustc-hash = "2"
 smallvec = "1"
 

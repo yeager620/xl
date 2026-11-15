@@ -2,9 +2,25 @@
 
 use std::fmt;
 
-/// Excel's sheet limits.
-pub const MAX_ROWS: u32 = 1_048_576;
+/// Rows per sheet: 2^24 = 16,777,216 (16x Excel). Chosen so that
+/// - every row index (and row count) is exactly representable in an `f32`,
+///   which is what GPUI geometry uses, so no precision is lost anywhere a
+///   row number turns into a coordinate;
+/// - row offsets in pixels (rows x ~22 px, about 3.7e8) are exact in `f64`,
+///   the type all of xl's layout math uses;
+/// - code that walks a whole column densely (rare, but it exists) stays
+///   within a small constant of Excel's cost;
+/// - the compact column store (8 bytes per imported cell, see
+///   [`crate::bulk`]) holds a full-height 20-column sheet in ~2.7 GB, about
+///   the most a desktop machine can be expected to keep in memory.
+///
+/// Files are still bounded by their formats: xlsx holds at most
+/// [`XLSX_MAX_ROWS`] rows, which xl-io enforces when saving.
+pub const MAX_ROWS: u32 = 1 << 24;
 pub const MAX_COLS: u32 = 16_384;
+
+/// Excel's (and the xlsx format's) row limit.
+pub const XLSX_MAX_ROWS: u32 = 1_048_576;
 
 /// Stable sheet identifier (never reused within a workbook).
 pub type SheetId = u32;
@@ -198,6 +214,19 @@ mod tests {
         assert_eq!(CellRef::parse("A0"), None);
         assert_eq!(CellRef::parse("A"), None);
         assert_eq!(CellRef::parse("1"), None);
-        assert_eq!(CellRef::parse("A1048577"), None);
+        assert_eq!(CellRef::parse("A1048577"), Some(CellRef::new(1_048_576, 0)));
+        assert_eq!(CellRef::parse("A16777216"), Some(CellRef::new(16_777_215, 0)));
+        assert_eq!(CellRef::parse("A16777217"), None);
+        assert_eq!(CellRef::parse("A99999999999"), None);
+    }
+
+    #[test]
+    fn a1_printing_past_excel_limit() {
+        assert_eq!(CellRef::new(16_777_215, 16_383).to_string(), "XFD16777216");
+        assert_eq!(CellRef::new(9_999_999, 2).to_string(), "C10000000");
+        let r = Range::new(CellRef::new(0, 0), CellRef::new(MAX_ROWS - 1, 0));
+        assert_eq!(r.to_string(), "A1:A16777216");
+        assert_eq!(CellRef::new(MAX_ROWS - 1, 0).offset(1, 0), None);
+        assert_eq!(CellRef::new(XLSX_MAX_ROWS - 1, 0).offset(1, 0), Some(CellRef::new(XLSX_MAX_ROWS, 0)));
     }
 }

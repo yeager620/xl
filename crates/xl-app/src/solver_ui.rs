@@ -19,6 +19,8 @@ pub(crate) enum FormKind {
     Pivot(crate::pivot_ui::PivotForm),
     /// Format the selected chart.
     Chart,
+    /// SQL over sheets, tables and CSV files (see `bigdata_ui`).
+    Query,
 }
 
 pub(crate) struct FormDialog {
@@ -63,6 +65,10 @@ impl Spreadsheet {
                     ("Text to display", "Leave as is", self.wb.display(a).text),
                 ]
             }
+            FormKind::Query => vec![
+                ("SQL", "SELECT region, SUM(amount) FROM Sheet1 GROUP BY region", self.big.queries.last().map(|q| q.sql.clone()).unwrap_or_default()),
+                ("Put results in", "A new sheet — or a cell, e.g. Sheet2!A1", String::new()),
+            ],
             FormKind::Solver => vec![
                 ("Objective cell", "The formula to optimize", here),
                 ("Target value", "Only for “value of”", String::new()),
@@ -90,6 +96,7 @@ impl Spreadsheet {
             FormKind::Link | FormKind::Chart => 0,
             FormKind::Validation => 2,
             FormKind::Pivot(_) => 0,
+            FormKind::Query => 0,
         }));
     }
 
@@ -176,6 +183,10 @@ impl Spreadsheet {
             }
             return;
         }
+        if kind == FormKind::Query {
+            self.run_query_form(text(0), text(1));
+            return;
+        }
         if kind == FormKind::Validation {
             match self.apply_validation_form(&text(0), &text(1), &text(2), &text(3), &text(4)) {
                 Ok(()) => {
@@ -188,7 +199,7 @@ impl Spreadsheet {
             return;
         }
         let result: Result<(Vec<Addr>, String), String> = match kind {
-            FormKind::Link | FormKind::Validation | FormKind::Pivot(_) | FormKind::Chart => unreachable!("handled above"),
+            FormKind::Link | FormKind::Validation | FormKind::Pivot(_) | FormKind::Chart | FormKind::Query => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -360,6 +371,7 @@ impl Spreadsheet {
             FormKind::Validation => "Data validation",
             FormKind::Pivot(k) => Spreadsheet::pivot_form_title(k),
             FormKind::Chart => "Format chart",
+            FormKind::Query => "Query with SQL",
         };
         let mut body = div().id("form-body").max_h(px(560.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
@@ -474,7 +486,11 @@ impl Spreadsheet {
             .child(
                 div()
                     .id("form-dialog")
-                    .w(px(if form.kind == FormKind::Chart { 600. } else { 420. }))
+                    .w(px(match form.kind {
+                        FormKind::Chart => 600.,
+                        FormKind::Query => 640.,
+                        _ => 420.,
+                    }))
                     .p(px(20.))
                     .flex()
                     .flex_col()
@@ -504,6 +520,7 @@ impl Spreadsheet {
                                 FormKind::Link | FormKind::Validation => "Save",
                                 FormKind::Pivot(_) => "OK",
                                 FormKind::Chart => "Apply",
+                                FormKind::Query => "Run",
                             }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();

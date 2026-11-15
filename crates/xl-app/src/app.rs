@@ -341,6 +341,8 @@ pub struct Spreadsheet {
     pub(crate) history: crate::history_ui::HistoryState,
     /// Page setup, print preview and print dialogs, page-break overlay.
     pub(crate) print: crate::print_ui::PrintState,
+    /// Load progress, SQL queries, the xlsx row-limit prompt.
+    pub(crate) big: crate::bigdata_ui::BigData,
     _appearance: Subscription,
 }
 
@@ -418,6 +420,7 @@ impl Spreadsheet {
             scripts: crate::scripts_ui::ScriptState::new(),
             history: Default::default(),
             print: Default::default(),
+            big: Default::default(),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -434,6 +437,11 @@ impl Spreadsheet {
     pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
         self.edit_generation += 1;
+        // Cells materialized from compact storage (by whole-column formulas)
+        // go back to 8 bytes each once they take real memory.
+        if self.wb.compact_cache_bytes() > 256 << 20 {
+            self.wb.trim_caches();
+        }
     }
 
     pub(crate) fn at(&self, c: CellRef) -> Addr {
@@ -449,7 +457,7 @@ impl Spreadsheet {
 
     /// Width of the row-header strip, plus the outline gutter when rows are grouped.
     pub(crate) fn hw(&self) -> f64 {
-        HEADER_W + self.outline_levels().0 as f64 * OUTLINE_STEP
+        self.header_w() + self.outline_levels().0 as f64 * OUTLINE_STEP
     }
 
     /// Height of the column-header strip, plus the outline gutter when columns are grouped.
@@ -744,11 +752,14 @@ impl Spreadsheet {
     /// Ctrl+Arrow: jump to the edge of the current data region.
     fn jump(&mut self, dr: i64, dc: i64, extend: bool) {
         let s = self.wb.store(self.cur);
-        let filled = |c: CellRef| !s.value(c).is_empty();
+        let filled = |c: CellRef| s.is_filled(c);
         let step = |c: CellRef| c.offset(dr, dc);
         let mut cur = self.active;
         let Some(next) = step(cur) else { return };
-        if filled(cur) && filled(next) {
+        if filled(cur) && filled(next) && dc == 0 {
+            // Through compact data a segment at a time (tall sheets).
+            cur = CellRef::new(s.run_end(cur.col, cur.row, dr > 0), cur.col);
+        } else if filled(cur) && filled(next) {
             cur = next;
             while let Some(n) = step(cur) {
                 if !filled(n) {
@@ -1592,9 +1603,11 @@ impl Spreadsheet {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.loading = Some(name.clone());
         self.message = Some((format!("Opening {name}…"), false));
+        let progress = std::sync::Arc::new(xl_io::Progress::default());
+        self.watch_progress(progress.clone(), cx);
         let task = cx.background_executor().spawn({
             let path = path.clone();
-            async move { xl_io::open(&path) }
+            async move { xl_io::open_with_progress(&path, &progress) }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1613,6 +1626,7 @@ impl Spreadsheet {
         match result {
             Ok(loaded) => {
                 self.wb = loaded.workbook;
+                self.big.forget_workbook();
                 self.cur = self.wb.sheet_ids()[0];
                 self.views.clear();
                 self.last_stats = Some(loaded.recalc);
@@ -1647,6 +1661,7 @@ impl Spreadsheet {
                 }
                 self.scripts_loaded();
             }
+            Err(e) if e == xl_io::CANCELLED => self.message = Some((format!("Stopped opening {name}"), false)),
             Err(e) => self.message = Some((format!("Could not open {name}: {e}"), true)),
         }
     }
@@ -1673,6 +1688,9 @@ impl Spreadsheet {
 
     pub(crate) fn save_to(&mut self, path: PathBuf) {
         if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        if self.refuse_tall_xlsx(&path) {
             return;
         }
         match xl_io::save(&self.wb, &path, self.cur, self.package.as_ref()) {
@@ -1760,7 +1778,9 @@ impl Spreadsheet {
         let key = ks.key.as_str();
         let ctrl = m.control || m.platform;
         let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
-        let handled = if self.lossy_prompt {
+        let handled = if self.big.xlsx_refused.is_some() {
+            self.key_xlsx_refused(key)
+        } else if self.lossy_prompt {
             self.key_lossy(key, cx)
         } else if self.scripts.consent_prompt {
             self.handle_consent_key(key)
@@ -2461,18 +2481,7 @@ impl Spreadsheet {
         if sel.cell_count() < 2 {
             return None;
         }
-        let (mut sum, mut nums, mut count) = (0.0, 0u64, 0u64);
-        for (_, cell) in self.wb.store(self.cur).iter_range(sel) {
-            match &cell.value {
-                Value::Number(n) => {
-                    sum += n;
-                    nums += 1;
-                    count += 1;
-                }
-                Value::Empty => {}
-                _ => count += 1,
-            }
-        }
+        let (sum, nums, count) = self.summarize_cached(sel);
         if count == 0 {
             return None;
         }

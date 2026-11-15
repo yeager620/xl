@@ -1,0 +1,11 @@
+[package]
+name = "xl-sql"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "SQL queries over xl sheets, tables and CSV files (embedded SQLite)"
+
+[dependencies]
+xl-engine.workspace = true
+xl-io.workspace = true
+rusqlite = { version = "=0.37.0", features = ["bundled"] }

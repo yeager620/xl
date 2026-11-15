@@ -1,14 +1,24 @@
 //! Quick recalc benchmarks: `cargo run -p xl-bench --release`
+//! Big data (CSV load, whole-column SUM at 10M rows, SQL group-by):
+//! `cargo run -p xl-bench --release -- bigdata [rows]`
 
 use std::time::Instant;
 
 use xl_engine::{Addr, CellRef, Workbook};
+
+mod bigdata;
 
 fn ms(d: std::time::Duration) -> String {
     format!("{:>9.3} ms", d.as_secs_f64() * 1e3)
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("bigdata") {
+        let rows = args.get(2).and_then(|r| r.replace('_', "").parse().ok()).unwrap_or(10_000_000);
+        bigdata::run(rows);
+        return;
+    }
     const N: u32 = 100_000;
     let mut wb = Workbook::new();
     let s = wb.sheet_ids()[0];
@@ -80,4 +90,8 @@ fn main() {
     let paste: Vec<_> = (0..5000u32).map(|i| (at(i * 19, 0), "5".to_string())).collect();
     let st = wb.set_inputs(paste);
     println!("paste 5k cells under rolling sums  {}  (evaluated {})", ms(t.elapsed()), st.evaluated);
+
+    // 5. Whole-column SUM over 10M compact rows.
+    let (sum, el) = bigdata::sum_whole_column(10_000_000);
+    println!("=SUM(A:A) over 10M rows           {}  (= {sum})", ms(el));
 }

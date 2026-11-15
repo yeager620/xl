@@ -4,7 +4,7 @@
 use gpui::{Bounds, Pixels, Point, Window, fill, point, px};
 use xl_engine::{MAX_COLS, MAX_ROWS};
 
-use crate::app::{HEADER_H, HEADER_W, OUTLINE_STEP, Spreadsheet};
+use crate::app::{HEADER_H, OUTLINE_STEP, Spreadsheet};
 use crate::paint::{Op, cell_font, outline, rect, shape};
 
 /// Deepest outline level, like Excel.
@@ -74,7 +74,7 @@ impl Spreadsheet {
             out.push((rect(x, y, BUTTON, BUTTON), OutlineAction::Level { rows: true, level: k }, k.to_string()));
         }
         for k in 1..=col_levels {
-            let x = ox + gutter_w + (HEADER_W - BUTTON) / 2.0;
+            let x = ox + gutter_w + (self.header_w() - BUTTON) / 2.0;
             let y = oy + (k - 1) as f64 * OUTLINE_STEP + (OUTLINE_STEP - BUTTON) / 2.0;
             out.push((rect(x, y, BUTTON, BUTTON), OutlineAction::Level { rows: false, level: k }, k.to_string()));
         }
