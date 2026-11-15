@@ -72,6 +72,13 @@ pub fn commands() -> Vec<Command> {
         cmd!("Insert area chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Area)),
         cmd!("Insert pie chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Pie)),
         cmd!("Insert scatter chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Scatter)),
+        cmd!("Script editor…", "", |s, w, cx| s.open_script_editor(w)),
+        cmd!("Run script…", "", |s, w, cx| {
+            s.open_palette();
+            if let Some(p) = s.palette.as_mut() {
+                p.query = "Run script: ".into();
+            }
+        }),
         cmd!("Goal Seek…", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::GoalSeek)),
         cmd!("Solver…", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::Solver)),
         cmd!("Insert pivot table", "", |s, w, cx| s.insert_pivot()),
@@ -178,17 +185,26 @@ pub enum Item {
     Command(usize),
     GoTo(CellRef),
     Function(Func),
+    /// A script macro (index into the palette's macros).
+    Macro(usize),
 }
 
 pub struct Palette {
     pub query: String,
     pub selected: usize,
     commands: Vec<Command>,
+    /// Script macros: (name, shortcut).
+    macros: Vec<(String, String)>,
 }
 
 impl Palette {
     pub fn new() -> Self {
-        Self { query: String::new(), selected: 0, commands: commands() }
+        Self { query: String::new(), selected: 0, commands: commands(), macros: Vec::new() }
+    }
+
+    pub fn with_macros(mut self, macros: Vec<(String, String)>) -> Self {
+        self.macros = macros;
+        self
     }
 
     pub fn items(&self) -> Vec<Item> {
@@ -199,6 +215,11 @@ impl Palette {
         }
         let mut scored: Vec<(i32, Item)> =
             self.commands.iter().enumerate().filter_map(|(i, c)| fuzzy_score(q, c.name).map(|s| (s, Item::Command(i)))).collect();
+        for (i, (name, _)) in self.macros.iter().enumerate() {
+            if let Some(s) = fuzzy_score(q, &format!("Run script: {name}")) {
+                scored.push((s, Item::Macro(i)));
+            }
+        }
         if q.len() >= 2 {
             let fq = q.trim_start_matches('=').to_ascii_uppercase();
             for f in Func::ALL {
@@ -219,6 +240,7 @@ impl Palette {
             Item::Command(i) => (self.commands[i].name.to_string(), self.commands[i].keys.to_string()),
             Item::GoTo(c) => (format!("Go to {c}"), "Enter".into()),
             Item::Function(f) => (format!("Insert ={}()", f.name()), f.signature().to_string()),
+            Item::Macro(i) => (format!("Run script: {}", self.macros[i].0), self.macros[i].1.clone()),
         }
     }
 }
@@ -229,7 +251,8 @@ impl Spreadsheet {
             return;
         }
         self.menu = None;
-        self.palette = Some(Palette::new());
+        let macros = self.scripts.macros().into_iter().map(|m| (m.name, m.key.unwrap_or_default())).collect();
+        self.palette = Some(Palette::new().with_macros(macros));
     }
 
     pub(crate) fn run_palette_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
@@ -238,6 +261,11 @@ impl Spreadsheet {
             Item::Command(i) => (p.commands[i].run)(self, window, cx),
             Item::GoTo(c) => self.select(c, false),
             Item::Function(f) => self.begin_edit(Some(format!("={}(", f.name())), EditMode::Enter),
+            Item::Macro(i) => {
+                if let Some((name, _)) = p.macros.get(i) {
+                    self.run_macro_named(&name.clone());
+                }
+            }
         }
     }
 

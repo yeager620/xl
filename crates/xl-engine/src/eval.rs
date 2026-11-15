@@ -302,6 +302,8 @@ pub struct Ctx<'a> {
     pub cell: CellRef,
     /// Guards against names defined in terms of themselves.
     depth: std::cell::Cell<u8>,
+    /// Script functions, consulted for names the engine doesn't define.
+    pub(crate) udfs: Option<&'a dyn crate::udf::UserFunctions>,
 }
 
 const MAX_NAME_DEPTH: u8 = 16;
@@ -310,7 +312,13 @@ static EMPTY: Value = Value::Empty;
 
 impl<'a> Ctx<'a> {
     pub fn new(sheets: &'a Sheets, names: &'a Names, sheet: SheetId, cell: CellRef) -> Self {
-        Self { sheets, names, sheet, cell, depth: std::cell::Cell::new(0) }
+        Self { sheets, names, sheet, cell, depth: std::cell::Cell::new(0), udfs: None }
+    }
+
+    /// Let formulas call these script functions.
+    pub fn with_udfs(mut self, udfs: Option<&'a dyn crate::udf::UserFunctions>) -> Self {
+        self.udfs = udfs;
+        self
     }
 
     fn store(&self, sheet: SheetId) -> Option<&CellStore> {
@@ -332,7 +340,7 @@ impl<'a> Ctx<'a> {
     /// Resolve an expression that denotes a reference: a cell or range, a
     /// defined name for one, or OFFSET / INDIRECT / INDEX.
     /// None = not a reference; Err = a reference that's invalid (#REF! etc.).
-    fn resolve(&self, e: &Expr) -> Option<EvalResult<RangeRef>> {
+    pub(crate) fn resolve(&self, e: &Expr) -> Option<EvalResult<RangeRef>> {
         match e {
             Expr::Ref(_) | Expr::Range(..) => {
                 let (sheet, range) = e.reference()?;
@@ -422,7 +430,7 @@ impl<'a> Ctx<'a> {
         Ok(RangeRef { sheet: rr.sheet, range: Range::new(CellRef::new(r0, c0), CellRef::new(r1, c1)) })
     }
 
-    fn value(&self, sheet: SheetId, c: CellRef) -> &Value {
+    pub(crate) fn value(&self, sheet: SheetId, c: CellRef) -> &Value {
         self.store(sheet).map_or(&EMPTY, |s| s.value(c))
     }
 
@@ -431,7 +439,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Clamp a range to the used area so full-column scans stay cheap.
-    fn clamp_used(&self, rr: RangeRef) -> RangeRef {
+    pub(crate) fn clamp_used(&self, rr: RangeRef) -> RangeRef {
         let Some(ext) = self.store(rr.sheet).and_then(|s| s.extent()) else {
             return RangeRef { range: Range::single(rr.range.start), ..rr };
         };
@@ -495,7 +503,7 @@ pub fn eval(e: &Expr, cx: &Ctx) -> Value {
         },
         Expr::Binary(op, a, b) => binary(*op, eval(a, cx), eval(b, cx)),
         Expr::Call(f, args) => call(*f, args, cx).unwrap_or_else(Value::Error),
-        Expr::UnknownFunc(..) => Value::Error(ErrorKind::Name),
+        Expr::UnknownFunc(name, args) => crate::udf::call(name, args, cx),
     }
 }
 

@@ -166,6 +166,10 @@ pub(crate) enum UndoEntry {
     Layout { sheet: SheetId, layout: SheetLayout, cells: Snapshots },
     /// Several steps undone together (last first).
     Group(Vec<UndoEntry>),
+    /// Remove a sheet a macro added (can't be redone).
+    AddedSheet(SheetId),
+    /// Give a sheet back its name.
+    RenamedSheet { id: SheetId, name: String },
 }
 
 impl UndoEntry {
@@ -175,6 +179,7 @@ impl UndoEntry {
             UndoEntry::Structure { op, .. } | UndoEntry::Reapply(op) => op.sheet() == id,
             UndoEntry::Layout { sheet, .. } => *sheet == id,
             UndoEntry::Group(steps) => steps.iter().any(|s| s.touches_sheet(id)),
+            UndoEntry::AddedSheet(s) | UndoEntry::RenamedSheet { id: s, .. } => *s == id,
         }
     }
 }
@@ -194,6 +199,8 @@ pub enum Field {
     Form(u8),
     /// The note being written.
     Note,
+    /// The script editor.
+    Script,
 }
 
 /// What a right-click menu is about.
@@ -322,6 +329,8 @@ pub struct Spreadsheet {
     pub(crate) home: Option<crate::home::HomeState>,
     /// Recently opened and saved workbooks.
     pub(crate) recent: crate::recent::Recent,
+    /// Scripts: running functions, consent, the editor.
+    pub(crate) scripts: crate::scripts_ui::ScriptState,
     _appearance: Subscription,
 }
 
@@ -395,6 +404,7 @@ impl Spreadsheet {
             autosaved_generation: None,
             home: None,
             recent: crate::recent::Recent::load(&crate::recent::default_dir()),
+            scripts: crate::scripts_ui::ScriptState::new(),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -899,7 +909,8 @@ impl Spreadsheet {
     pub(crate) fn push_undo(&mut self, entry: UndoEntry) {
         self.undo.push(entry);
         self.redo.clear();
-        if self.undo.len() > 500 {
+        // A running macro's steps are grouped into one when it finishes.
+        if self.undo.len() > 500 && !self.scripts.recording {
             self.undo.remove(0);
         }
     }
@@ -937,7 +948,13 @@ impl Spreadsheet {
         let entry = if is_undo { self.undo.pop() } else { self.redo.pop() };
         let Some(entry) = entry else { return };
         let inverse = self.invert(entry);
-        if is_undo { self.redo.push(inverse) } else { self.undo.push(inverse) }
+        if std::mem::take(&mut self.scripts.redo_blocked) {
+            self.message = Some(("Undid the macro (it added a sheet, so it can't be redone — run it again instead)".into(), false));
+        } else if is_undo {
+            self.redo.push(inverse)
+        } else {
+            self.undo.push(inverse)
+        }
         self.mark_dirty();
     }
 
@@ -947,6 +964,20 @@ impl Spreadsheet {
             // Steps run last-first; listing the inverses in the order they ran
             // makes the inverse group run them last-first too, i.e. reversed.
             UndoEntry::Group(steps) => UndoEntry::Group(steps.into_iter().rev().map(|s| self.invert(s)).collect()),
+            UndoEntry::AddedSheet(id) => {
+                if self.wb.sheet_ids().contains(&id) && self.wb.sheet_ids().len() > 1 {
+                    self.delete_sheet(id);
+                }
+                self.scripts.redo_blocked = true;
+                UndoEntry::Group(Vec::new())
+            }
+            UndoEntry::RenamedSheet { id, name } => {
+                let now = self.wb.sheet_name(id).to_string();
+                if let Err(e) = self.wb.rename_sheet(id, &name) {
+                    self.message = Some((e, true));
+                }
+                UndoEntry::RenamedSheet { id, name: now }
+            }
             UndoEntry::Cells(cells) => {
                 let inverse = self.snapshots(cells.iter().map(|(a, _)| *a));
                 if let Some(&(first, _)) = cells.first() {
@@ -999,7 +1030,7 @@ impl Spreadsheet {
     }
 
     /// Apply a structural change and return the entry that undoes it.
-    fn structural(&mut self, op: Shift) -> UndoEntry {
+    pub(crate) fn structural(&mut self, op: Shift) -> UndoEntry {
         let sheet = op.sheet();
         let mut restore = match op {
             Shift::DeleteRows { at, count, .. } => {
@@ -1596,6 +1627,7 @@ impl Spreadsheet {
                     crate::lifecycle::remove_recovery(&file);
                     self.message = Some(("Restored your unsaved changes. Save to keep them.".into(), false));
                 }
+                self.scripts_loaded();
             }
             Err(e) => self.message = Some((format!("Could not open {name}: {e}"), true)),
         }
@@ -1711,6 +1743,8 @@ impl Spreadsheet {
         let palette_key = ctrl && (key == "k" || (m.shift && key == "p"));
         let handled = if self.lossy_prompt {
             self.key_lossy(key, cx)
+        } else if self.scripts.consent_prompt {
+            self.handle_consent_key(key)
         } else if self.cf_dialog.is_some() {
             self.key_cf_dialog(key)
         } else if self.form.is_some() {
@@ -1738,6 +1772,10 @@ impl Spreadsheet {
             self.key_home(key, ctrl, m.shift, window, cx)
         } else if self.renaming.is_some() {
             self.key_renaming(key)
+        } else if self.field == Some(Field::Script) {
+            self.key_script(key, ctrl)
+        } else if self.field.is_none() && self.edit.is_none() && self.try_macro_key(ks) {
+            true
         } else if self.field == Some(Field::Note) {
             self.key_note(key, m.shift)
         } else if self.field == Some(Field::ChartTitle) {

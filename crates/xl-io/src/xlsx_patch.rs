@@ -2179,6 +2179,20 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             sync_charts(wb, id, &sheet_part, &plan, &mut parts, &mut removed, &mut ct_adds, &mut ct_removes, &mut taken)?;
         }
     }
+    // Scripts: the item rewritten in place, or new parts.
+    if pkg.scripts_changed(wb) {
+        match &pkg.scripts {
+            Some(found) => {
+                replaced.insert(found.item.clone(), crate::xlsx_scripts::scripts_xml(wb.scripts()).into_bytes());
+            }
+            None => {
+                let new = crate::xlsx_scripts::new_parts(wb.scripts(), &|p| existing.contains(p) || added_parts.iter().any(|(n, _)| n == p));
+                added_parts.extend(new.parts);
+                rel_adds.push(("rIdXlScripts".into(), crate::xlsx_scripts::REL_CUSTOM_XML, new.rel_target));
+                ct_adds.extend(new.content_types);
+            }
+        }
+    }
     // Rewritten parts not otherwise changed.
     for (name, bytes) in rewritten {
         replaced.entry(name).or_insert(bytes);

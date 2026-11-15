@@ -629,7 +629,11 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         };
         book.define_name(name, &format!("={}", prefix_future_functions(&wb.name_formula(d)))).map_err(err)?;
     }
-    book.save(path).map_err(err)
+    book.save(path).map_err(err)?;
+    if !wb.scripts().is_empty() {
+        crate::xlsx_scripts::add_to_file(path, wb.scripts())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

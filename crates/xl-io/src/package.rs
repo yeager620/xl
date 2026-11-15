@@ -67,6 +67,8 @@ pub struct Package {
     /// Per sheet, each chart as read with its drawing part and anchor index
     /// (only when they line up one-to-one with the workbook's charts).
     pub(crate) chart_places: HashMap<SheetId, Vec<crate::xlsx_charts::FoundChart>>,
+    /// xl's scripts in the file, and the Custom XML item holding them.
+    pub(crate) scripts: Option<crate::xlsx_scripts::ScriptsPart>,
 }
 
 /// A per-cell map after the structural edits since the package was read.
@@ -333,7 +335,13 @@ impl Package {
                 chart_places.insert(s.id, found);
             }
         }
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect(), sparklines: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).sparklines.clone())).collect() })
+        let scripts = crate::xlsx_scripts::find_scripts(&mut zip);
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, scripts, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect(), sparklines: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).sparklines.clone())).collect() })
+    }
+
+    /// Have the workbook's scripts changed since the file was read?
+    pub(crate) fn scripts_changed(&self, wb: &Workbook) -> bool {
+        self.scripts.as_ref().map_or(&[][..], |s| &s.scripts[..]) != wb.scripts()
     }
 
     /// Zip paths of the worksheet parts, in sheet order.

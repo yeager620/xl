@@ -458,6 +458,8 @@ struct DepGraph {
     cell_deps: FxHashMap<Addr, SmallVec<[Addr; 4]>>,
     ranges: RangeIndex,
     volatile: FxHashSet<Addr>,
+    /// Formulas calling functions the engine doesn't define (script functions).
+    udf_cells: FxHashSet<Addr>,
 }
 
 /// Every reference an expression depends on, following defined names.
@@ -500,6 +502,9 @@ impl DepGraph {
         if expr.is_volatile() {
             self.volatile.insert(at);
         }
+        if expr.has_unknown_func() {
+            self.udf_cells.insert(at);
+        }
         self.precedents.insert(at, p);
     }
 
@@ -519,6 +524,7 @@ impl DepGraph {
             self.ranges.remove(s, r, at);
         }
         self.volatile.remove(&at);
+        self.udf_cells.remove(&at);
     }
 
     fn for_each_dependent(&self, a: Addr, mut f: impl FnMut(Addr)) {
@@ -622,6 +628,10 @@ pub struct Workbook {
     /// The file this came from counts dates from 1904 (old Mac Excel). xl
     /// always works in the 1900 system; savers convert back.
     date1904: bool,
+    /// Script functions formulas can call (see [`crate::udf`]).
+    udfs: Option<crate::udf::UserFunctionsRef>,
+    /// Scripts stored in the workbook.
+    scripts: Vec<crate::udf::ScriptModule>,
 }
 
 /// Days between the 1900 and 1904 date systems' day zero.
@@ -1004,7 +1014,7 @@ impl Workbook {
     /// The formula a name stands for (without '=').
     /// Evaluate an expression as if it were a formula in `cell` on `sheet`.
     pub fn eval_at(&self, sheet: SheetId, cell: CellRef, expr: &Expr) -> Value {
-        crate::eval::eval(expr, &crate::eval::Ctx::new(&self.sheets, &self.names, sheet, cell))
+        crate::eval::eval(expr, &crate::eval::Ctx::new(&self.sheets, &self.names, sheet, cell).with_udfs(self.udfs.as_deref()))
     }
 
     /// Resolve "B7", "Sheet2!A1:C9" or a defined name to a sheet and range,
@@ -1572,7 +1582,7 @@ impl Workbook {
     fn eval_cell(&self, a: Addr) -> Option<Value> {
         let cell = self.sheets.store(a.sheet)?.get(a.cell)?;
         let CellInput::Formula(expr) = &cell.input else { return None };
-        Some(eval(expr, &Ctx::new(&self.sheets, &self.names, a.sheet, a.cell)))
+        Some(eval(expr, &Ctx::new(&self.sheets, &self.names, a.sheet, a.cell).with_udfs(self.udfs.as_deref())))
     }
 
     fn set_value(&mut self, a: Addr, v: Value) -> bool {
@@ -1588,12 +1598,13 @@ impl Workbook {
     fn propagate(&mut self, seeds: Vec<Addr>, mut needs: FxHashSet<Addr>) -> RecalcStats {
         let start = Instant::now();
         let changed_seeds: FxHashSet<Addr> = seeds.iter().copied().filter(|c| !needs.contains(c)).collect();
-        needs.extend(self.graph.volatile.iter().copied());
+        let volatile = self.volatile_cells();
+        needs.extend(volatile.iter().copied());
 
         // 1. Collect the dirty subgraph with its adjacency.
         let mut adj: FxHashMap<Addr, SmallVec<[Addr; 4]>> = FxHashMap::default();
         let mut stack: Vec<Addr> = seeds;
-        stack.extend(self.graph.volatile.iter().copied());
+        stack.extend(volatile);
         while let Some(c) = stack.pop() {
             if adj.contains_key(&c) {
                 continue;
@@ -1671,6 +1682,77 @@ impl Workbook {
         }
 
         RecalcStats { dirty: adj.len(), evaluated, elapsed: start.elapsed() }
+    }
+}
+
+// ----------------------------------------------------- script functions
+
+impl Workbook {
+    /// Let formulas call functions from `udfs` (None removes them), then
+    /// recalculate every formula that calls a function the engine doesn't
+    /// define. Formulas loaded from a file as opaque text because of such
+    /// calls become live formulas when `udfs` defines all their functions.
+    pub fn set_user_functions(&mut self, udfs: Option<crate::udf::UserFunctionsRef>) -> RecalcStats {
+        self.udfs = udfs;
+        let mut seeds: Vec<Addr> = self.graph.udf_cells.iter().copied().collect();
+        if let Some(u) = self.udfs.clone() {
+            let mut promote = Vec::new();
+            for &id in &self.sheets.order {
+                for (c, cell) in self.sheets.store(id).unwrap().iter() {
+                    if let CellInput::Opaque(src) = &cell.input
+                        && let Ok(e) = parse_formula(src, &self.sheets)
+                        && e.has_unknown_func()
+                        && crate::udf::all_known(&e, u.as_ref())
+                    {
+                        promote.push((Addr::new(id, c), Arc::new(e)));
+                    }
+                }
+            }
+            for (a, e) in promote {
+                if let Some(cell) = self.sheets.get_mut(a.sheet).and_then(|s| s.store.get_mut(a.cell)) {
+                    cell.input = CellInput::Formula(e.clone());
+                }
+                self.graph.add(a, &e, &self.sheets, &self.names);
+                seeds.push(a);
+            }
+        }
+        let forced: FxHashSet<Addr> = seeds.iter().copied().collect();
+        self.propagate(seeds, forced)
+    }
+
+    pub fn user_functions(&self) -> Option<&crate::udf::UserFunctionsRef> {
+        self.udfs.as_ref()
+    }
+
+    /// Cells whose formulas call a function the engine doesn't define.
+    pub fn user_function_cells(&self) -> impl Iterator<Item = Addr> + '_ {
+        self.graph.udf_cells.iter().copied()
+    }
+
+    /// Volatile cells, including those calling volatile script functions.
+    fn volatile_cells(&self) -> Vec<Addr> {
+        let mut out: Vec<Addr> = self.graph.volatile.iter().copied().collect();
+        if let Some(u) = &self.udfs {
+            for &a in &self.graph.udf_cells {
+                if let Some(Cell { input: CellInput::Formula(e), .. }) = self.cell(a)
+                    && crate::udf::calls_volatile(e, u.as_ref())
+                {
+                    out.push(a);
+                }
+            }
+        }
+        out
+    }
+
+    /// The scripts stored in the workbook.
+    pub fn scripts(&self) -> &[crate::udf::ScriptModule] {
+        &self.scripts
+    }
+
+    /// Replace the stored scripts (doesn't change which functions run:
+    /// see [`Workbook::set_user_functions`]).
+    pub fn set_scripts(&mut self, scripts: Vec<crate::udf::ScriptModule>) {
+        self.scripts = scripts;
     }
 }
 

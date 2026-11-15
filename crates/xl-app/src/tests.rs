@@ -60,6 +60,7 @@ fn setup_home(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestC
         s.recovery_offer = None;
         s.recovery_dir = scratch("recovery");
         s.recent = crate::recent::Recent::load(&scratch("recent"));
+        s.scripts = crate::scripts_ui::ScriptState::isolated();
     });
     cx.run_until_parked();
     (view, cx)
@@ -1784,4 +1785,124 @@ fn pictures_are_drawn_and_follow_inserted_rows(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     view.read_with(cx, |s, _| assert_eq!(s.picture_cache.len(), 0));
+}
+
+/// Put scripts in the fixture workbook as if it had been opened from a file.
+fn with_scripts(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext, source: &str) {
+    view.update(cx, |s, cx| {
+        s.scripts = crate::scripts_ui::ScriptState::isolated();
+        s.wb.set_scripts(vec![xl_engine::ScriptModule { name: "Module1".into(), source: source.into() }]);
+        s.scripts_loaded();
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+const MACRO_SCRIPT: &str = r#"
+xl.func("DOUBLE", function(x) return x * 2 end)
+xl.macro("Restock", function()
+  xl.set("B4:B6", 100)
+  xl.set_formula("E4", "=DOUBLE(B4)")
+  xl.bold("A4:A6")
+  xl.insert_rows(1)
+  local s = xl.add_sheet("Log")
+  xl.rename_sheet("Welcome", "Shop")
+  xl.message("Restocked")
+end, { key = "ctrl-alt-r" })
+"#;
+
+#[gpui::test]
+fn macro_runs_as_one_undo_step(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    with_scripts(&view, cx, MACRO_SCRIPT);
+    // Scripts from a file wait for consent.
+    view.read_with(cx, |s, _| assert!(s.scripts.consent_prompt && !s.scripts.allowed));
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(!s.scripts.consent_prompt && s.scripts.allowed));
+    let undo_before = view.read_with(cx, |s, _| s.undo.len());
+    // Run it from its shortcut.
+    cx.simulate_keystrokes("ctrl-alt-r");
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.message.as_ref().map(|m| m.0.as_str()), Some("Restocked"));
+        assert_eq!(s.undo.len(), undo_before + 1, "one undo step");
+        assert!(s.wb.sheet_id("Log").is_some() && s.wb.sheet_id("Shop").is_some());
+    });
+    // A row was inserted at the top, so B4 moved to B5.
+    assert_eq!(sheet(&view, cx), "Shop");
+    assert_eq!(val(&view, cx, "B5"), Value::Number(100.0));
+    assert_eq!(val(&view, cx, "E5"), Value::Number(200.0), "script function in a formula");
+    assert_eq!(val(&view, cx, "D5"), Value::Number(1450.0));
+    view.read_with(cx, |s, _| assert!(s.wb.style(s.at(CellRef::parse("A5").unwrap())).bold));
+    // One Ctrl+Z undoes everything.
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| {
+        assert!(s.wb.sheet_id("Log").is_none());
+        assert!(s.wb.sheet_id("Welcome").is_some());
+    });
+    assert_eq!(val(&view, cx, "B4"), Value::Number(3.0));
+    assert_eq!(val(&view, cx, "D4"), Value::Number(43.5));
+    assert_eq!(input(&view, cx, "E4"), "");
+    view.read_with(cx, |s, _| {
+        assert!(!s.wb.style(s.at(CellRef::parse("A4").unwrap())).bold);
+        assert_eq!(s.undo.len(), undo_before);
+    });
+}
+
+#[gpui::test]
+fn denied_scripts_dont_run_and_errors_show(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    with_scripts(&view, cx, "xl.func('BAD', function() error('no luck') end)\nxl.macro('M', function() xl.set('A1', 'ran') end)");
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(!s.scripts.allowed && s.scripts.host.is_none()));
+    // Typing a formula with the function: #NAME? while scripts are off.
+    go(&view, cx, "F1");
+    cx.simulate_input("=BAD()");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F1"), Value::Error(xl_engine::ErrorKind::Name));
+    // Running a macro asks again instead of running.
+    view.update(cx, |s, _| s.run_macro_named("M"));
+    view.read_with(cx, |s, _| assert!(s.scripts.consent_prompt));
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F1"), Value::Error(xl_engine::ErrorKind::Value));
+    go(&view, cx, "F1");
+    view.update(cx, |s, _| s.message = None);
+    view.read_with(cx, |s, _| {
+        let (msg, err) = s.script_error_status().unwrap();
+        assert!(err && msg.contains("no luck") && msg.contains("line 1"), "{msg}");
+    });
+}
+
+#[gpui::test]
+fn script_editor_types_saves_and_runs(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    view.update_in(cx, |s, window, _| {
+        s.scripts = crate::scripts_ui::ScriptState::isolated();
+        s.open_script_editor(window);
+        // Start from an empty module.
+        let ed = s.scripts.editor.as_mut().unwrap();
+        ed.modules[0].source.clear();
+        ed.cursor = 0;
+    });
+    cx.simulate_input("xl.macro('Hi', function()");
+    cx.simulate_keystrokes("enter tab");
+    cx.simulate_input("xl.set('A1', 'hello')");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("end)");
+    view.read_with(cx, |s, _| assert_eq!(s.scripts.editor.as_ref().unwrap().text(), "xl.macro('Hi', function()\n  xl.set('A1', 'hello')\n  end)"));
+    cx.simulate_keystrokes("ctrl-enter");
+    assert_eq!(val(&view, cx, "A1"), Value::text("hello"));
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.wb.scripts().len(), 1);
+        assert!(s.dirty);
+    });
+    // A syntax error is reported with its line.
+    cx.simulate_keystrokes("ctrl-end");
+    cx.simulate_input(" oops(");
+    cx.simulate_keystrokes("ctrl-s");
+    view.read_with(cx, |s, _| {
+        let errs = &s.scripts.editor.as_ref().unwrap().errors;
+        assert_eq!(errs.first().and_then(|e| e.line), Some(3), "{errs:?}");
+    });
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |s, _| assert!(s.field.is_none() && s.scripts.editor.is_some()));
 }

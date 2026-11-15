@@ -1067,10 +1067,15 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         }
     };
     let names: Vec<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
+    // xl's own scripts (a Custom XML item) are read, not "unsupported".
+    let scripts = crate::xlsx_scripts::find_scripts(&mut zip);
+    let scripts_parts: Vec<String> = scripts.iter().flat_map(|s| std::iter::once(s.item.clone()).chain(s.related.iter().cloned())).collect();
     // Images that no shown picture uses (in headers, backgrounds, shapes…).
     let mut unshown_media: std::collections::HashSet<String> = names.iter().filter(|n| n.starts_with("xl/media/")).cloned().collect();
     for name in names {
-        if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix)) {
+        if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix))
+            && !scripts_parts.contains(&name)
+        {
             note(label);
         }
     }
@@ -1122,6 +1127,9 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     }
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
         note("chart sheets");
+    }
+    if let Some(s) = scripts {
+        wb.set_scripts(s.scripts);
     }
     // Old Mac workbooks count dates from 1904.
     if read_entry(&mut zip, "xl/workbook.xml")?.is_some_and(|b| {

@@ -54,6 +54,7 @@ impl Spreadsheet {
             Some(crate::app::Field::ChartTitle) => return &self.chart_title_text,
             Some(crate::app::Field::Note) => return self.note_edit.as_ref().map_or("", |(_, t)| t.as_str()),
             Some(crate::app::Field::Form(i)) => return self.form.as_ref().and_then(|f| f.fields.get(i as usize)).map_or("", |f| &f.2),
+            Some(crate::app::Field::Script) => return self.scripts.editor.as_ref().map_or("", |e| e.text()),
             None => {}
         }
         match (&self.renaming, &self.edit) {
@@ -76,6 +77,10 @@ impl EntityInputHandler for Spreadsheet {
         if let Some(p) = &self.palette {
             let end = utf16_len(&p.query);
             return Some(UTF16Selection { range: end..end, reversed: false });
+        }
+        if let (Some(crate::app::Field::Script), Some(e)) = (self.field, &self.scripts.editor) {
+            let caret = byte_to_utf16(e.text(), e.cursor);
+            return Some(UTF16Selection { range: caret..caret, reversed: false });
         }
         let caret = match (&self.renaming, &self.edit) {
             _ if self.field.is_some() || self.home.is_some() => utf16_len(self.ime_text()),
@@ -137,6 +142,11 @@ impl EntityInputHandler for Spreadsheet {
                 crate::app::Field::Form(i) => {
                     if let Some(f) = self.form.as_mut().and_then(|f| f.fields.get_mut(i as usize)) {
                         f.2.push_str(text);
+                    }
+                }
+                crate::app::Field::Script => {
+                    if let Some(e) = self.scripts.editor.as_mut() {
+                        e.insert(text);
                     }
                 }
                 crate::app::Field::Cf2 => {

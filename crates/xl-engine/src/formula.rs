@@ -347,7 +347,7 @@ impl Expr {
         }
     }
 
-    fn any(&self, pred: &impl Fn(&Expr) -> bool) -> bool {
+    pub(crate) fn any(&self, pred: &impl Fn(&Expr) -> bool) -> bool {
         if pred(self) {
             return true;
         }

@@ -19,6 +19,7 @@ mod paint;
 mod pivot_ui;
 mod recent;
 mod refs;
+mod scripts_ui;
 mod solver_ui;
 mod templates;
 #[cfg(test)]

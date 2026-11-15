@@ -132,6 +132,7 @@ impl Spreadsheet {
             }
         };
         self.wb = wb;
+        self.scripts_loaded();
         self.cur = self.wb.sheet_ids()[0];
         self.views.clear();
         self.last_stats = None;

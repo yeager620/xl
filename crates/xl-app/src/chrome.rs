@@ -950,7 +950,7 @@ impl Spreadsheet {
                     .px(px(12.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .when_some(self.message.clone(), |d, (msg, err)| d.text_color(if err { t.error } else { t.ink_muted }).child(msg)),
+                    .when_some(self.message.clone().map(|(m, e)| (SharedString::from(m), e)).or_else(|| self.script_error_status()), |d, (msg, err)| d.text_color(if err { t.error } else { t.ink_muted }).child(msg)),
             )
             .when_some(mode, |d, m| d.child(div().px(px(12.)).text_color(t.ink_muted).child(m)))
             .when_some(summary, |d, parts| {
@@ -1025,7 +1025,8 @@ impl Render for Spreadsheet {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll)),
                 )
-                .children(self.render_pivot_panel(cx)),
+                .children(self.render_pivot_panel(cx))
+                .children(self.render_script_panel(cx)),
             )
             .child(self.render_bottom_bar(cx)))
             .relative()
@@ -1067,6 +1068,7 @@ impl Render for Spreadsheet {
         let content = content.when(self.cf_dialog.is_some(), |d| d.child(deferred(self.render_cf_dialog(cx)).with_priority(3)));
         let content = content.when(self.form.is_some(), |d| d.child(deferred(self.render_form(cx)).with_priority(3)));
         let content = content.when(self.lossy_prompt, |d| d.child(deferred(self.render_lossy_dialog(cx)).with_priority(4)));
+        let content = content.when(self.scripts.consent_prompt && self.home.is_none(), |d| d.child(deferred(self.render_consent_dialog(cx)).with_priority(4)));
         self.window_frame(content, window)
     }
 }
