@@ -536,6 +536,7 @@ fn xl_chart(wb: &xl_engine::Workbook, kind: xl_engine::chart::ChartKind, values:
         offset: (0.0, 0.0),
         size: (360.0, 200.0),
         stacked: false,
+        pivot: None,
     }
 }
 

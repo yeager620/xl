@@ -533,6 +533,7 @@ fn add_chart(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
         offset: (0.0, 0.0),
         size: (320.0, 180.0),
         stacked: false,
+        pivot: None,
     });
     let mut allowed = part_of(ctx, wb, s);
     allowed.extend(ctx.original.keys().filter(|k| k.starts_with("xl/drawings/") || k.starts_with("xl/worksheets/_rels/")).cloned());

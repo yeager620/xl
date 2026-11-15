@@ -433,6 +433,7 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
                                     offset: (from_excel_width_px(from.col_off), from_excel_height(from.row_off * 0.75)),
                                     size: (from_excel_width_px(w).max(80.0), from_excel_height(h * 0.75).max(60.0)),
                                     stacked,
+                                    pivot: None,
                                 };
                                 found.push((chart, drawing.clone(), this_anchor));
                                 notes.charts += 1;

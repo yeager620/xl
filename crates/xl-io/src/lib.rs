@@ -5,6 +5,7 @@ mod package;
 mod xlsx_chartxml;
 mod xlsx_charts;
 mod xlsx_patch;
+mod xlsx_pivots;
 mod xlsx_read;
 mod xlsx_refs;
 mod xlsx_scripts;

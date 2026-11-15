@@ -54,6 +54,9 @@ pub struct Chart {
     pub size: (f64, f64),
     /// Column, bar and area charts: stack the series instead of side by side.
     pub stacked: bool,
+    /// A pivot chart: the pivot table (by name) whose output it plots; its
+    /// series are rewritten whenever the pivot is.
+    pub pivot: Option<String>,
 }
 
 /// A chart's data, read from the workbook.

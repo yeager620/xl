@@ -138,7 +138,7 @@ impl Builder {
             .iter()
             .map(|&(name, values)| ChartSeries { name: Some(self.expr(&format!("{sheet}!{name}"))), categories: categories.clone(), values: self.expr(&format!("{sheet}!{values}")) })
             .collect();
-        let chart = Chart { kind, title: Some(title.into()), series, anchor: cell(at), offset: (0.0, 0.0), size, stacked: false };
+        let chart = Chart { kind, title: Some(title.into()), series, anchor: cell(at), offset: (0.0, 0.0), size, stacked: false, pivot: None };
         if let Some(l) = self.wb.layout_mut(self.s) {
             l.charts.push(chart);
         }

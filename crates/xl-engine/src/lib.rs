@@ -11,6 +11,7 @@ pub mod formula;
 pub mod input;
 pub mod picture;
 pub mod pivot;
+pub mod slicer;
 pub mod solver;
 pub mod store;
 pub mod style;

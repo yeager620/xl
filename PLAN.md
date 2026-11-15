@@ -188,6 +188,7 @@ Checklist (tick as each lands with tests):
 - [x] Charts (column, bar, line, area, pie, scatter; insert, move, resize, edit) + xlsx read/write
 - [x] Tables (Format as Table, banding, structured refs) + xlsx
 - [x] Pivot tables (field panel, sum/count/avg/min/max, refresh)
+- [x] Pivot tables, extended: calculated fields, show values as (% of totals, difference, running total, rank), grouping (dates by years/quarters/months/days, number ranges, manual groups), item/label/value/top-N filters, sort by value, subtotals, slicers (pivots and tables), timelines, pivot charts; definitions saved in a custom XML part (`customXml/xlPivots.xml`) — not yet as Excel pivotTable/pivotCache parts
 - [x] Sparklines (line/column/win-loss) + xlsx
 - [x] Goal Seek; Solver (min/max/target, constraints)
 - [x] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx

@@ -1271,11 +1271,11 @@ fn pivot_table_panel_and_live_refresh(cx: &mut TestAppContext) {
     // Make sure Score is the value field.
     view.update(cx, |s, _| {
         let p = s.wb.layout(s.cur).pivots[0].clone();
-        if !p.values.iter().any(|(f, _)| *f == 2) {
+        if !p.values.iter().any(|v| v.field == 2) {
             s.toggle_pivot_field(2, Area::Values);
         }
-        for (f, _) in p.values.iter().filter(|(f, _)| *f != 2) {
-            s.toggle_pivot_field(*f, Area::Values);
+        for v in p.values.iter().filter(|v| v.field != 2) {
+            s.toggle_pivot_field(v.field, Area::Values);
         }
     });
     let grid = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| (1..=5).map(|r| (val(view, cx, &format!("A{r}")), val(view, cx, &format!("B{r}")))).collect::<Vec<_>>();
@@ -1303,6 +1303,114 @@ fn pivot_table_panel_and_live_refresh(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     assert_eq!(green(&view, cx), Value::Empty);
     view.read_with(cx, |s, _| assert_eq!(*s.wb.value(Addr::new(s.wb.sheet_ids()[0], CellRef::parse("H6").unwrap())), Value::Empty));
+}
+
+/// Slicers and timelines float over the grid, and clicking or dragging
+/// them filters the pivot (and its pivot chart), undoably.
+#[gpui::test]
+fn pivot_slicers_timelines_and_pivot_charts(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, cx| {
+        let rows = [["Date", "Team", "Score"], ["2024-01-10", "Red", "10"], ["2024-01-20", "Blue", "20"], ["2024-02-05", "Red", "30"], ["2024-03-01", "Blue", "40"], ["2024-03-15", "Green", "50"]];
+        let mut items = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                items.push((s.at(CellRef::new(r as u32, 10 + c as u32)), v.to_string()));
+            }
+        }
+        s.wb.set_inputs(items);
+        s.select(CellRef::parse("L2").unwrap(), false);
+        s.insert_pivot();
+        // Defaults: rows by Team (the first text column), sum of Score.
+        let p = &s.wb.layout(s.cur).pivots[0];
+        assert_eq!((p.rows.clone(), p.values[0].field), (vec![1], 2));
+        s.insert_pivot_slicer(1);
+        s.insert_pivot_timeline(0);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let column = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| (1..=5).map(|r| (val(view, cx, &format!("A{r}")).display(), val(view, cx, &format!("B{r}")).display())).filter(|(a, _)| !a.is_empty()).collect::<Vec<_>>();
+    let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+    assert_eq!(column(&view, cx), pairs(&[("Team", "Sum of Score"), ("Blue", "60"), ("Green", "50"), ("Red", "40"), ("Grand Total", "150")]));
+    let click = |cx: &mut VisualTestContext, selector: &'static str, mods: Modifiers| {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn")).center();
+        cx.simulate_mouse_down(at, MouseButton::Left, mods);
+        cx.simulate_mouse_up(at, MouseButton::Left, mods);
+        cx.run_until_parked();
+    };
+    // Slicer items: Blue, Green, Red. Clicking Red shows just Red; Ctrl adds Blue.
+    #[cfg(debug_assertions)]
+    {
+        assert!(cx.debug_bounds("slicer-0").is_some() && cx.debug_bounds("timeline-0").is_some(), "both panels are drawn");
+        click(cx, "slicer-0-item-2", Modifiers::none());
+    }
+    #[cfg(not(debug_assertions))]
+    view.update(cx, |s, _| s.click_slicer_item(0, "Red", false));
+    assert_eq!(column(&view, cx), pairs(&[("Team", "Sum of Score"), ("Red", "40"), ("Grand Total", "40")]));
+    #[cfg(debug_assertions)]
+    click(cx, "slicer-0-item-0", Modifiers::control());
+    #[cfg(not(debug_assertions))]
+    view.update(cx, |s, _| s.click_slicer_item(0, "Blue", true));
+    assert_eq!(column(&view, cx), pairs(&[("Team", "Sum of Score"), ("Blue", "60"), ("Red", "40"), ("Grand Total", "100")]));
+    // One undo takes back the selection and the pivot's output together.
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(column(&view, cx), pairs(&[("Team", "Sum of Score"), ("Red", "40"), ("Grand Total", "40")]));
+    view.update(cx, |s, cx| {
+        s.clear_slicer(crate::slicer_ui::Panel::Slicer(0));
+        cx.notify();
+    });
+    assert_eq!(column(&view, cx).len(), 5);
+
+    // A pivot chart plots the pivot and follows it.
+    view.update(cx, |s, cx| {
+        cx.notify();
+        s.select(CellRef::parse("A2").unwrap(), false);
+        s.insert_pivot_chart(xl_engine::chart::ChartKind::Column);
+        let chart = s.wb.layout(s.cur).charts.last().unwrap();
+        assert_eq!(chart.pivot.as_deref(), Some("PivotTable1"));
+        assert_eq!(s.wb.chart_data(s.cur, chart).categories, ["Blue", "Green", "Red"]);
+    });
+    cx.run_until_parked();
+
+    // Timeline months: Jan, Feb, Mar 2024. Drag across Jan–Feb.
+    #[cfg(debug_assertions)]
+    {
+        let jan = cx.debug_bounds("timeline-0-period-0").expect("periods are drawn").center();
+        let feb = cx.debug_bounds("timeline-0-period-1").unwrap().center();
+        cx.simulate_mouse_down(jan, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(feb, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(feb, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    #[cfg(not(debug_assertions))]
+    view.update(cx, |s, _| s.set_timeline_range(0, 0, 1, true));
+    assert_eq!(column(&view, cx), pairs(&[("Team", "Sum of Score"), ("Blue", "20"), ("Red", "40"), ("Grand Total", "60")]));
+    view.read_with(cx, |s, _| {
+        let t = &s.wb.layout(s.cur).timelines[0];
+        assert_eq!(xl_engine::slicer::range_label(t.range.unwrap(), t.level), "Jan 2024 – Feb 2024");
+        let chart = s.wb.layout(s.cur).charts.last().unwrap();
+        assert_eq!(s.wb.chart_data(s.cur, chart).categories, ["Blue", "Red"], "the chart follows the filter");
+    });
+    // The whole drag undoes in one step.
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(column(&view, cx).len(), 5);
+    view.read_with(cx, |s, _| assert!(s.wb.layout(s.cur).timelines[0].range.is_none()));
+
+    // Moving a slicer by its title bar re-anchors it.
+    #[cfg(debug_assertions)]
+    {
+        let before = view.read_with(cx, |s, _| s.wb.layout(s.cur).slicers[0].anchor);
+        let title = cx.debug_bounds("slicer-0-title").unwrap().center();
+        let to = gpui::point(title.x, title.y + gpui::px(110.));
+        cx.simulate_mouse_down(title, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let after = view.read_with(cx, |s, _| s.wb.layout(s.cur).slicers[0].anchor);
+        assert_eq!(after.col, before.col);
+        assert!(after.row >= before.row + 4, "moved down about five rows: {before:?} → {after:?}");
+    }
 }
 
 #[gpui::test]

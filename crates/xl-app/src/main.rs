@@ -18,6 +18,7 @@ mod palette;
 mod pictures;
 mod paint;
 mod pivot_ui;
+mod slicer_ui;
 mod recent;
 mod refs;
 mod scripts_ui;
