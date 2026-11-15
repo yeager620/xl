@@ -75,6 +75,8 @@ pub struct SheetLayout {
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
+    /// How the sheet prints (page setup, print area, breaks…).
+    pub page: crate::page::PageSetup,
 }
 
 /// A hyperlink on a cell: a web/file address, or a place in the workbook.
@@ -150,6 +152,7 @@ impl SheetLayout {
     }
 
     fn apply_shift(&mut self, op: Shift, sheet: SheetId) {
+        self.page.apply_shift(op);
         self.cond.retain_mut(|c| c.apply_shift(op, sheet));
         self.validations = self.validations.iter().filter_map(|v| v.shifted(op, sheet)).collect();
         let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });

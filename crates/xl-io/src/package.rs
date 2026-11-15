@@ -69,6 +69,8 @@ pub struct Package {
     pub(crate) chart_places: HashMap<SheetId, Vec<crate::xlsx_charts::FoundChart>>,
     /// xl's scripts in the file, and the Custom XML item holding them.
     pub(crate) scripts: Option<crate::xlsx_scripts::ScriptsPart>,
+    /// Each sheet's page setup when read.
+    pub(crate) pages: HashMap<SheetId, xl_engine::page::PageSetup>,
 }
 
 /// A per-cell map after the structural edits since the package was read.
@@ -336,7 +338,7 @@ impl Package {
             }
         }
         let scripts = crate::xlsx_scripts::find_scripts(&mut zip);
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, scripts, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect(), sparklines: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).sparklines.clone())).collect() })
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, scripts, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect(), sparklines: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).sparklines.clone())).collect(), pages: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).page.clone())).collect() })
     }
 
     /// Have the workbook's scripts changed since the file was read?

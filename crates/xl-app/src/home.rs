@@ -108,6 +108,7 @@ impl Spreadsheet {
         self.filter_menu = None;
         self.field = None;
         self.renaming = None;
+        self.print = Default::default();
         // Pick up files opened in other windows and files that went missing.
         self.recent = Recent::load(self.recent.dir());
         self.home = Some(HomeState::new(true));
@@ -152,6 +153,7 @@ impl Spreadsheet {
         self.selected_chart = None;
         self.form = None;
         self.cf_dialog = None;
+        self.print = Default::default();
         self.confirm_delete = None;
         self.dirty = false;
         self.unsupported.clear();

@@ -203,6 +203,8 @@ pub enum Field {
     Script,
     /// The name of a version in the history panel.
     VersionLabel,
+    /// A field of the page setup or print dialog (see print_ui.rs).
+    Page(u8),
 }
 
 /// What a right-click menu is about.
@@ -337,6 +339,8 @@ pub struct Spreadsheet {
     pub(crate) scripts: crate::scripts_ui::ScriptState,
     /// Version history: the store, its panel and the diff being shown.
     pub(crate) history: crate::history_ui::HistoryState,
+    /// Page setup, print preview and print dialogs, page-break overlay.
+    pub(crate) print: crate::print_ui::PrintState,
     _appearance: Subscription,
 }
 
@@ -413,6 +417,7 @@ impl Spreadsheet {
             recent: crate::recent::Recent::load(&crate::recent::default_dir()),
             scripts: crate::scripts_ui::ScriptState::new(),
             history: Default::default(),
+            print: Default::default(),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -1758,6 +1763,8 @@ impl Spreadsheet {
             self.key_cf_dialog(key)
         } else if self.form.is_some() {
             self.key_form(key)
+        } else if self.print_ui_open() {
+            self.key_print(key, ctrl, cx)
         } else if self.pending.is_some() {
             self.key_dialog(key, window, cx)
         } else if ctrl && (key == "q" || key == "w") {
@@ -1779,6 +1786,9 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.home.is_some() {
             self.key_home(key, ctrl, m.shift, window, cx)
+        } else if ctrl && !m.shift && !m.alt && key == "p" {
+            self.open_print(cx);
+            true
         } else if self.renaming.is_some() {
             self.key_renaming(key)
         } else if self.field == Some(Field::Script) {

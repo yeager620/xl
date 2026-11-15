@@ -18,6 +18,12 @@ xl-history.workspace = true
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 gpui = { path = "../../vendor/zed/crates/gpui", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", default-features = false, features = ["wayland", "x11", "font-kit"] }
+# PDF export (pure Rust, embeds and subsets fonts) and font metrics for print layout.
+krilla = "=0.8.2"
+ttf-parser = "=0.25.1"
+# Printing through the XDG desktop portal (same version GPUI already uses).
+ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "print"] }
 
 [dev-dependencies]
+lopdf = { version = "=0.47.0", default-features = false }
 gpui = { path = "../../vendor/zed/crates/gpui", default-features = false, features = ["font-kit", "wayland", "x11", "test-support"] }

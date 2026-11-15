@@ -18,6 +18,10 @@ mod outline;
 mod palette;
 mod pictures;
 mod paint;
+mod pdf;
+mod print_layout;
+mod print_ui;
+mod printing;
 mod pivot_ui;
 mod slicer_ui;
 mod recent;
@@ -58,6 +62,20 @@ fn main() {
     // `xl diff …` / `xl textconv …` print and exit without starting the GUI.
     if let Some(code) = xl_diff::cli::run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
+    }
+    // `xl --pdf book.xlsx out.pdf`: export every sheet without opening a window.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--pdf") {
+        std::process::exit(match print_ui::export_headless(args.get(2), args.get(3)) {
+            Ok(msg) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("xl: {e}");
+                1
+            }
+        });
     }
     let path = std::env::args().nth(1).map(PathBuf::from);
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {

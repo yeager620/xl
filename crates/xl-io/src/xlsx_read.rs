@@ -1049,9 +1049,13 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         wb.add_sheet(None)?;
     }
     // Names before cells, so formulas that use them get the right dependencies.
+    let mut print_names = Vec::new();
     for (name, local, formula) in defined_names {
         // Built-ins (print areas, filter ranges) aren't user names.
         if name.starts_with("_xlnm.") {
+            if let Some(id) = local.and_then(|i| ids.get(i).copied()) {
+                print_names.push((id, name, formula));
+            }
             continue;
         }
         let scope = local.and_then(|i| ids.get(i).copied());
@@ -1097,6 +1101,9 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
             }
         }
         let skipped = read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles, dxfs: &dxfs, theme: &theme }, &mut cells, &mut warnings)?;
+        if let Some(l) = wb.layout_mut(*id) {
+            l.page = crate::xlsx_page::read_page(&bytes);
+        }
         if skipped.0 {
             note("some kinds of conditional formatting");
         }
@@ -1121,6 +1128,11 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         }
         if drawn.charts > 0 && drawn.styled_charts {
             note("chart styling (the charts themselves are kept)");
+        }
+    }
+    for (id, name, formula) in print_names {
+        if let Some(l) = wb.layout_mut(id) {
+            crate::xlsx_page::apply_print_name(&mut l.page, &name, &formula);
         }
     }
     if !unshown_media.is_empty() {
