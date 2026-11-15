@@ -66,6 +66,43 @@ pub(crate) fn read_sheet_tables(zip: &mut Zip, sheet_part: &str, wb: &mut Workbo
     Ok(())
 }
 
+/// Read a worksheet's hyperlinks (addresses live in its relationships).
+pub(crate) fn read_sheet_links(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<(), String> {
+    let Some(bytes) = read_entry(zip, sheet_part)? else { return Ok(()) };
+    if !bytes.windows(10).any(|w| w == b"<hyperlink" || w.ends_with(b":hyperlink")) {
+        return Ok(());
+    }
+    let rels = read_rels(zip, &rels_of(sheet_part))?;
+    let mut r = xml(&bytes);
+    let mut buf = Vec::new();
+    loop {
+        match r.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+            Event::Start(ref e) | Event::Empty(ref e) if local(e.name().as_ref()) == "hyperlink" => {
+                let Some(range) = attr(e, "ref") else { continue };
+                let tooltip = attr(e, "tooltip");
+                let link = match (attr(e, "id").and_then(|id| rels.get(&id).cloned()), attr(e, "location")) {
+                    (Some(url), loc) => xl_engine::Link::Url { url: loc.map_or(url.clone(), |l| format!("{url}#{l}")), tooltip },
+                    (None, Some(location)) => xl_engine::Link::Place { location, tooltip },
+                    (None, None) => continue,
+                };
+                // A link over a range applies to each of its cells.
+                let (a, b) = range.split_once(':').unwrap_or((&range, &range));
+                if let (Some(a), Some(b)) = (CellRef::parse(a), CellRef::parse(b))
+                    && let Some(l) = wb.layout_mut(sheet)
+                {
+                    for c in xl_engine::Range::new(a, b).iter().take(10_000) {
+                        l.links.insert(c, link.clone());
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
 /// Read a worksheet's notes (legacy comments parts).
 pub(crate) fn read_sheet_notes(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<(), String> {
     let rels = read_rels(zip, &rels_of(sheet_part))?;

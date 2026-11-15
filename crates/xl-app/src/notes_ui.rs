@@ -130,11 +130,26 @@ impl Spreadsheet {
             return Some((self.cell_corner(*cell), el));
         }
         let cell = self.hover_note?;
-        let note = self.note_at(cell)?;
         let _ = cx;
+        let link = self.link_at(cell).cloned();
+        let note = self.note_at(cell).cloned();
+        if link.is_none() && note.is_none() {
+            return None;
+        }
         let el = card()
-            .when(!note.author.is_empty(), |d| d.child(div().font_weight(FontWeight::SEMIBOLD).child(SharedString::from(note.author.clone()))))
-            .children(note.text.split('\n').map(|l| div().child(SharedString::from(l.to_string()))))
+            .when_some(link, |d, l| {
+                let hint = match l {
+                    xl_engine::Link::Url { .. } => "Ctrl+click to open",
+                    xl_engine::Link::Place { .. } => "Ctrl+click to go there",
+                };
+                d.child(div().text_color(t.accent).overflow_hidden().child(SharedString::from(l.target().to_string())))
+                    .when_some(l.tooltip().map(str::to_string), |d, tip| d.child(div().text_color(t.ink_muted).child(SharedString::from(tip))))
+                    .child(div().text_size(px(11.5)).text_color(t.ink_faint).child(hint))
+            })
+            .when_some(note, |d, note| {
+                d.when(!note.author.is_empty(), |d| d.child(div().font_weight(FontWeight::SEMIBOLD).child(SharedString::from(note.author.clone()))))
+                    .children(note.text.split('\n').map(|l| div().child(SharedString::from(l.to_string()))))
+            })
             .into_any_element();
         Some((self.cell_corner(cell), el))
     }

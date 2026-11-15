@@ -11,6 +11,8 @@ use crate::app::{Field, Spreadsheet, UndoEntry};
 pub(crate) enum FormKind {
     GoalSeek,
     Solver,
+    /// Insert or edit the active cell's hyperlink.
+    Link,
 }
 
 pub(crate) struct FormDialog {
@@ -41,6 +43,13 @@ impl Spreadsheet {
                 ("To value", "The result you want", String::new()),
                 ("By changing cell", "A number the formula depends on", String::new()),
             ],
+            FormKind::Link => {
+                let a = self.at(self.active);
+                vec![
+                    ("Address", "https://… or a place like Sheet2!A1", self.link_at(self.active).map(|l| l.target().to_string()).unwrap_or_default()),
+                    ("Text to display", "Leave as is", self.wb.display(a).text),
+                ]
+            }
             FormKind::Solver => vec![
                 ("Objective cell", "The formula to optimize", here),
                 ("Target value", "Only for “value of”", String::new()),
@@ -49,7 +58,11 @@ impl Spreadsheet {
             ],
         };
         self.form = Some(FormDialog { kind, fields, goal: SolverGoalKind::Max, non_negative: true });
-        self.field = Some(Field::Form(if kind == FormKind::GoalSeek { 1 } else { 2 }));
+        self.field = Some(Field::Form(match kind {
+            FormKind::GoalSeek => 1,
+            FormKind::Solver => 2,
+            FormKind::Link => 0,
+        }));
     }
 
     fn cell_ref(&self, text: &str) -> Result<Addr, String> {
@@ -117,7 +130,12 @@ impl Spreadsheet {
         let texts: Vec<String> = form.fields.iter().map(|f| f.2.clone()).collect();
         let text = |i: usize| texts.get(i).cloned().unwrap_or_default();
         let (kind, goal_kind, non_negative) = (form.kind, form.goal, form.non_negative);
+        if kind == FormKind::Link {
+            self.apply_link_form(text(0), text(1));
+            return;
+        }
         let result: Result<(Vec<Addr>, String), String> = match kind {
+            FormKind::Link => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -178,6 +196,80 @@ impl Spreadsheet {
         }
     }
 
+    pub(crate) fn link_at(&self, cell: CellRef) -> Option<&xl_engine::Link> {
+        let l = self.wb.layout(self.cur);
+        l.links.get(&l.merge_at(cell).map_or(cell, |m| m.start))
+    }
+
+    /// Save the link dialog: a web address (anything with a scheme or a dot
+    /// and no "!"), else a place in the workbook. Empty removes the link.
+    fn apply_link_form(&mut self, address: String, display: String) {
+        let cell = self.active;
+        let address = address.trim().to_string();
+        let link = if address.is_empty() {
+            None
+        } else if address.contains("://") || address.starts_with("mailto:") {
+            Some(xl_engine::Link::Url { url: address.clone(), tooltip: None })
+        } else if self.wb.resolve_reference(&address, self.cur).is_some() {
+            Some(xl_engine::Link::Place { location: address.clone(), tooltip: None })
+        } else if address.contains('.') && !address.contains('!') {
+            Some(xl_engine::Link::Url { url: format!("https://{address}"), tooltip: None })
+        } else {
+            self.message = Some((format!("{address} isn't a web address or a place in this workbook"), true));
+            return;
+        };
+        self.form = None;
+        self.field = None;
+        let a = self.at(cell);
+        // The text to show (the address, if the cell was empty), styled like a link.
+        let current = self.wb.display(a).text;
+        let display = if display.trim().is_empty() { if current.is_empty() { address.clone() } else { current.clone() } } else { display };
+        let mut snap = self.wb.snapshot(a);
+        if display != current {
+            snap.input = display;
+        }
+        if link.is_some() && snap.style.color.is_none() && !snap.style.underline {
+            snap.style.color = Some(0x0563C1);
+            snap.style.underline = true;
+        }
+        let sheet = self.cur;
+        self.change_layout(Some(xl_engine::Range::single(cell)), |s| {
+            s.wb.restore(vec![(a, snap)]);
+            if let Some(l) = s.wb.layout_mut(sheet) {
+                match link {
+                    Some(link) => {
+                        l.links.insert(cell, link);
+                    }
+                    None => {
+                        l.links.remove(&cell);
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn remove_link(&mut self) {
+        let sel = self.selection();
+        self.context = None;
+        self.change_layout(None, |s| {
+            if let Some(l) = s.wb.layout_mut(s.cur) {
+                l.links.retain(|c, _| !sel.contains(*c));
+            }
+        });
+    }
+
+    /// Ctrl+click: open a web link, or go to a place.
+    pub(crate) fn follow_link(&mut self, cell: CellRef, cx: &mut Context<Self>) {
+        match self.link_at(cell).cloned() {
+            Some(xl_engine::Link::Url { url, .. }) => {
+                cx.open_url(&url);
+                self.message = Some((format!("Opened {url}"), false));
+            }
+            Some(xl_engine::Link::Place { location, .. }) => self.name_box_go(&location),
+            None => {}
+        }
+    }
+
     pub(crate) fn key_form(&mut self, key: &str) -> bool {
         let Some(form) = self.form.as_mut() else { return false };
         let n = form.fields.len() as u8;
@@ -211,6 +303,7 @@ impl Spreadsheet {
         let title = match form.kind {
             FormKind::GoalSeek => "Goal Seek",
             FormKind::Solver => "Solver",
+            FormKind::Link => "Link",
         };
         let mut body = div().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
@@ -349,7 +442,11 @@ impl Spreadsheet {
                                 this.field = None;
                                 cx.notify();
                             })))
-                            .child(button("form-run", if form.kind == FormKind::GoalSeek { "Seek" } else { "Solve" }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
+                            .child(button("form-run", match form.kind {
+                                FormKind::GoalSeek => "Seek",
+                                FormKind::Solver => "Solve",
+                                FormKind::Link => "Save",
+                            }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();
                             }))),

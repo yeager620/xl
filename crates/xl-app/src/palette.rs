@@ -48,6 +48,8 @@ pub fn commands() -> Vec<Command> {
         cmd!("Insert columns right", "", |s, w, cx| s.insert_cols(true)),
         cmd!("Delete rows", "Ctrl+-", |s, w, cx| s.delete_rows()),
         cmd!("Delete columns", "", |s, w, cx| s.delete_cols()),
+        cmd!("Insert or edit link…", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::Link)),
+        cmd!("Remove links in selection", "", |s, w, cx| s.remove_link()),
         cmd!("Insert or edit note", "Shift+F2", |s, w, cx| s.edit_note()),
         cmd!("Delete notes in selection", "", |s, w, cx| s.delete_note()),
         cmd!("Go to / name a range…", "Ctrl+G", |s, w, cx| s.focus_name_box()),

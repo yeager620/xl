@@ -58,8 +58,23 @@ pub struct Package {
     pub(crate) names: u64,
     /// Structural edits the workbook had when this package was read.
     pub(crate) log_len: usize,
-    /// Each sheet's notes when read.
+    /// Each sheet's notes and hyperlinks when read.
     pub(crate) notes: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Note>>,
+    pub(crate) links: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Link>>,
+}
+
+/// A per-cell map after the structural edits since the package was read.
+fn shifted<T: Clone>(before: &std::collections::BTreeMap<CellRef, T>, wb: &Workbook, pkg: &Package, sheet: SheetId) -> std::collections::BTreeMap<CellRef, T> {
+    let mut out = before.clone();
+    for op in wb.structure_log().iter().skip(pkg.log_len) {
+        if let xl_engine::StructOp::Shift(s) = op
+            && s.sheet() == sheet
+        {
+            let rows = matches!(s, xl_engine::Shift::InsertRows { .. } | xl_engine::Shift::DeleteRows { .. });
+            out = out.into_iter().filter_map(|(c, n)| Some((if rows { CellRef::new(s.map_pos(c.row)?, c.col) } else { CellRef::new(c.row, s.map_pos(c.col)?) }, n))).collect();
+        }
+    }
+    out
 }
 
 impl Package {
@@ -67,19 +82,13 @@ impl Package {
     /// deleted lines (which rewriting the comments part handles)?
     pub(crate) fn notes_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
         let Some(before) = self.notes.get(&sheet) else { return !wb.layout(sheet).notes.is_empty() };
-        let mut expected = before.clone();
-        for op in wb.structure_log().iter().skip(self.log_len) {
-            if let xl_engine::StructOp::Shift(s) = op
-                && s.sheet() == sheet
-            {
-                let rows = matches!(s, xl_engine::Shift::InsertRows { .. } | xl_engine::Shift::DeleteRows { .. });
-                expected = expected
-                    .into_iter()
-                    .filter_map(|(c, n)| Some((if rows { CellRef::new(s.map_pos(c.row)?, c.col) } else { CellRef::new(c.row, s.map_pos(c.col)?) }, n)))
-                    .collect();
-            }
-        }
-        expected != wb.layout(sheet).notes
+        shifted(before, wb, self, sheet) != wb.layout(sheet).notes
+    }
+
+    /// Did a sheet's hyperlinks change other than by moving with lines?
+    pub(crate) fn links_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
+        let Some(before) = self.links.get(&sheet) else { return !wb.layout(sheet).links.is_empty() };
+        shifted(before, wb, self, sheet) != wb.layout(sheet).links
     }
 }
 
@@ -237,7 +246,7 @@ impl Package {
             cell_extras.insert(id, with_input);
             sheets.push(PackageSheet { id, name: name.clone(), part, digest: sheet_digest(wb, id), structure: wb.structure_version(id) });
         }
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect() })
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.

@@ -883,7 +883,6 @@ const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
 /// Worksheet elements xl doesn't model.
 const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
     ("<dataValidations", "data validation"),
-    ("<hyperlinks", "hyperlinks"),
     ("<sheetProtection", "sheet protection"),
     ("<customFilters", "advanced filters"),
     ("<top10", "advanced filters"),
@@ -977,6 +976,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         }
         crate::xlsx_charts::read_sheet_tables(&mut zip, &part, &mut wb, *id)?;
         crate::xlsx_charts::read_sheet_notes(&mut zip, &part, &mut wb, *id)?;
+        crate::xlsx_charts::read_sheet_links(&mut zip, &part, &mut wb, *id)?;
         let drawn = crate::xlsx_charts::read_sheet_charts(&mut zip, &part, &mut wb, *id)?;
         if drawn.other_drawings {
             note("drawings and images");

@@ -63,9 +63,34 @@ pub struct SheetLayout {
     pub pivots: Vec<crate::pivot::Pivot>,
     /// Notes (Excel's comments) on cells.
     pub notes: BTreeMap<CellRef, Note>,
+    /// Hyperlinks on cells.
+    pub links: BTreeMap<CellRef, Link>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
+}
+
+/// A hyperlink on a cell: a web/file address, or a place in the workbook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    Url { url: String, tooltip: Option<String> },
+    /// "Sheet2!A1" or a defined name.
+    Place { location: String, tooltip: Option<String> },
+}
+
+impl Link {
+    pub fn tooltip(&self) -> Option<&str> {
+        match self {
+            Link::Url { tooltip, .. } | Link::Place { tooltip, .. } => tooltip.as_deref(),
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        match self {
+            Link::Url { url, .. } => url,
+            Link::Place { location, .. } => location,
+        }
+    }
 }
 
 /// A note attached to a cell.
@@ -133,13 +158,9 @@ impl SheetLayout {
             shift_levels(&mut self.col_levels);
         }
         self.merges = self.merges.iter().filter_map(|m| op.map_range(*m)).filter(|m| m.cell_count() > 1).collect();
-        self.notes = std::mem::take(&mut self.notes)
-            .into_iter()
-            .filter_map(|(c, n)| {
-                let c = if rows { CellRef::new(op.map_pos(c.row)?, c.col) } else { CellRef::new(c.row, op.map_pos(c.col)?) };
-                Some((c, n))
-            })
-            .collect();
+        let move_cell = |c: CellRef| -> Option<CellRef> { Some(if rows { CellRef::new(op.map_pos(c.row)?, c.col) } else { CellRef::new(c.row, op.map_pos(c.col)?) }) };
+        self.notes = std::mem::take(&mut self.notes).into_iter().filter_map(|(c, n)| Some((move_cell(c)?, n))).collect();
+        self.links = std::mem::take(&mut self.links).into_iter().filter_map(|(c, n)| Some((move_cell(c)?, n))).collect();
         self.tables.retain_mut(|t| match op.map_range(t.range) {
             // A table keeps its header row and at least one data row.
             Some(r) if r.rows() > 1 => {
@@ -1118,11 +1139,20 @@ impl Workbook {
         if let Some(sd) = self.sheets.get_mut(mv.from_sheet) {
             sd.layout.notes.retain(|c, _| !mv.from.contains(*c));
         }
+        let moving_links: Vec<(CellRef, Link)> = self.sheets.get(mv.from_sheet).map(|sd| sd.layout.links.iter().filter(|(c, _)| mv.from.contains(**c)).map(|(c, n)| (*c, n.clone())).collect()).unwrap_or_default();
+        if let Some(sd) = self.sheets.get_mut(mv.from_sheet) {
+            sd.layout.links.retain(|c, _| !mv.from.contains(*c));
+        }
         if let Some(sd) = self.sheets.get_mut(mv.to_sheet) {
             let to = mv.to_range();
+            let land = |c: CellRef| CellRef::new((c.row as i64 + mv.dr) as u32, (c.col as i64 + mv.dc) as u32);
             sd.layout.notes.retain(|c, _| !to.contains(*c));
+            sd.layout.links.retain(|c, _| !to.contains(*c));
             for (c, n) in moving_notes {
-                sd.layout.notes.insert(CellRef::new((c.row as i64 + mv.dr) as u32, (c.col as i64 + mv.dc) as u32), n);
+                sd.layout.notes.insert(land(c), n);
+            }
+            for (c, l) in moving_links {
+                sd.layout.links.insert(land(c), l);
             }
         }
         for id in self.sheets.order.clone() {

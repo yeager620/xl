@@ -678,6 +678,11 @@ impl Spreadsheet {
         }
         if kind == ContextKind::Cells {
             items.push(None);
+            let has_link = self.link_at(self.active).is_some();
+            items.push(Some((if has_link { "Edit link…".into() } else { "Insert link…".into() }, "", |s, _, _| s.open_form(crate::solver_ui::FormKind::Link))));
+            if has_link {
+                items.push(Some(("Remove link".into(), "", |s, _, _| s.remove_link())));
+            }
             let has_note = self.note_at(self.active).is_some();
             items.push(Some((if has_note { "Edit note…".into() } else { "Insert note…".into() }, "Shift+F2", |s, _, _| s.edit_note())));
             if has_note {

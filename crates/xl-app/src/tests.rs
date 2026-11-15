@@ -1597,3 +1597,45 @@ fn home_keeps_the_recovery_offer(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[gpui::test]
+fn insert_follow_and_remove_links(cx: &mut TestAppContext) {
+    use crate::solver_ui::FormKind;
+    let (view, cx) = setup(cx);
+    // A place link: Ctrl+click jumps there.
+    go(&view, cx, "F1");
+    view.update(cx, |s, _| s.open_form(FormKind::Link));
+    cx.simulate_input("D10");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("Go to total");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| {
+        assert!(s.form.is_none(), "{:?}", s.message);
+        assert!(matches!(s.link_at(CellRef::parse("F1").unwrap()), Some(xl_engine::Link::Place { .. })));
+        let st = s.wb.style(s.at(CellRef::parse("F1").unwrap()));
+        assert!(st.underline && st.color == Some(0x0563C1), "styled like a link");
+    });
+    assert_eq!(val(&view, cx, "F1"), Value::text("Go to total"));
+    let p = cell_point(&view, cx, "F1", 10.0, 10.0);
+    cx.simulate_click(p, gpui::Modifiers { control: true, ..Default::default() });
+    view.read_with(cx, |s, _| assert_eq!(s.active, CellRef::parse("D10").unwrap()));
+    // A web address without a scheme gets https://; an empty cell shows the address.
+    go(&view, cx, "F2");
+    view.update(cx, |s, _| s.open_form(FormKind::Link));
+    cx.simulate_input("example.org/docs");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert_eq!(s.link_at(CellRef::parse("F2").unwrap()).map(|l| l.target()), Some("https://example.org/docs")));
+    assert_eq!(val(&view, cx, "F2"), Value::text("example.org/docs"));
+    // Nonsense addresses are refused.
+    go(&view, cx, "F3");
+    view.update(cx, |s, _| s.open_form(FormKind::Link));
+    cx.simulate_input("not a place");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.form.is_some() && s.message.as_ref().is_some_and(|(_, e)| *e)));
+    cx.simulate_keystrokes("escape");
+    go(&view, cx, "F2");
+    view.update(cx, |s, _| s.remove_link());
+    view.read_with(cx, |s, _| assert!(s.link_at(CellRef::parse("F2").unwrap()).is_none()));
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert!(s.link_at(CellRef::parse("F2").unwrap()).is_some()));
+}

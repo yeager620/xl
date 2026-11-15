@@ -462,6 +462,22 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for cf in &layout.cond {
             write_cond(ws, wb, cf).map_err(err)?;
         }
+        for (cell, link) in &layout.links {
+            let a = Addr::new(id, *cell);
+            let url = match link {
+                xl_engine::Link::Url { url, .. } => rust_xlsxwriter::Url::new(url.as_str()),
+                xl_engine::Link::Place { location, .. } => rust_xlsxwriter::Url::new(format!("internal:{location}")),
+            };
+            let mut url = url.set_text(wb.display(a).text);
+            if let Some(t) = link.tooltip() {
+                url = url.set_tip(t);
+            }
+            match fmt(wb.format_code(a), wb.style(a)) {
+                Some(f) => ws.write_url_with_format(cell.row, cell.col as u16, url, &f),
+                None => ws.write_url(cell.row, cell.col as u16, url),
+            }
+            .map_err(err)?;
+        }
         for (cell, note) in &layout.notes {
             let n = rust_xlsxwriter::Note::new(&note.text).set_author(&note.author).add_author_prefix(false);
             ws.insert_note(cell.row, cell.col as u16, &n).map_err(err)?;

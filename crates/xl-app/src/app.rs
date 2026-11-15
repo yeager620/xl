@@ -2113,6 +2113,9 @@ impl Spreadsheet {
                 self.active = CellRef::new(row, MAX_COLS - 1);
                 self.anchor.col = 0;
             }
+            Hit::Cell(c) if (ev.modifiers.control || ev.modifiers.platform) && self.link_at(c).is_some() => {
+                self.follow_link(c, cx);
+            }
             Hit::Cell(c) if self.filter_button_at(ev.position) == Some(c.col) => {
                 self.open_filter_menu(c.col, ev.position);
             }
@@ -2182,7 +2185,7 @@ impl Spreadsheet {
         }
         // Show a cell's note while the pointer is over it.
         let over_note = match (self.drag, self.hit_test(ev.position)) {
-            (None, Some(Hit::Cell(c))) if self.note_at(c).is_some() => Some(self.wb.layout(self.cur).merge_at(c).map_or(c, |m| m.start)),
+            (None, Some(Hit::Cell(c))) if self.note_at(c).is_some() || self.link_at(c).is_some() => Some(self.wb.layout(self.cur).merge_at(c).map_or(c, |m| m.start)),
             _ => None,
         };
         if over_note != self.hover_note {

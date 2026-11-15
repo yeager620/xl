@@ -1160,6 +1160,61 @@ fn notes_vml(notes: &BTreeMap<CellRef, xl_engine::Note>, idmap: u32) -> String {
     out
 }
 
+const REL_HYPERLINK: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+
+/// Rewrite a sheet's `<hyperlinks>` and its hyperlink relationships (all
+/// replaced: they're only used by that element). Returns the new sheet XML.
+fn write_links(wb: &Workbook, pkg: &Package, sheet: SheetId, sheet_part: &str, sheet_doc: Vec<u8>, replaced: &mut HashMap<String, Vec<u8>>, added_parts: &mut Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
+    let links = &wb.layout(sheet).links;
+    let rels_path = crate::xlsx_charts::rels_of(sheet_part);
+    let rels_doc = replaced.get(&rels_path).cloned().or_else(|| pkg.part(&rels_path));
+    let mut el = String::new();
+    let mut rels: Vec<(String, String)> = Vec::new();
+    for (cell, link) in links {
+        let tip = link.tooltip().map_or(String::new(), |t| format!(" tooltip=\"{}\"", esc(t)));
+        match link {
+            xl_engine::Link::Url { url, .. } => {
+                let id = format!("rIdXlLink{}", rels.len() + 1);
+                el.push_str(&format!("<hyperlink ref=\"{cell}\" r:id=\"{id}\"{tip}/>"));
+                rels.push((id, url.clone()));
+            }
+            xl_engine::Link::Place { location, .. } => el.push_str(&format!("<hyperlink ref=\"{cell}\" location=\"{}\"{tip}/>", esc(location))),
+        }
+    }
+    let new_rels: String = rels.iter().map(|(id, url)| format!("<Relationship Id=\"{id}\" Type=\"{REL_HYPERLINK}\" Target=\"{}\" TargetMode=\"External\"/>", esc(url))).collect();
+    match rels_doc {
+        Some(doc) => {
+            let doc = expand_root(&doc);
+            let (_, root_close, prefix, kids) = children(&doc)?;
+            let text = String::from_utf8_lossy(&doc).to_string();
+            let mut edits: Vec<(usize, usize, String)> = kids.iter().filter(|k| text[k.start..k.end].contains("/relationships/hyperlink\"")).map(|k| (k.start, k.end, String::new())).collect();
+            edits.push((root_close, root_close, prefixed(&new_rels, &prefix)));
+            replaced.insert(rels_path, apply_edits(&doc, edits));
+        }
+        None if !rels.is_empty() => added_parts.push((
+            rels_path,
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{new_rels}</Relationships>").into_bytes(),
+        )),
+        None => {}
+    }
+    let doc = ensure_r_namespace(sheet_doc)?;
+    let mut rep: HashMap<&str, Option<String>> = HashMap::new();
+    rep.insert("hyperlinks", (!el.is_empty()).then(|| format!("<hyperlinks>{el}</hyperlinks>")));
+    splice(&doc, SHEET_ORDER, rep)
+}
+
+/// Make sure a worksheet's root declares the relationships namespace (for r:id).
+fn ensure_r_namespace(doc: Vec<u8>) -> Result<Vec<u8>, String> {
+    let text = String::from_utf8_lossy(&doc).to_string();
+    let (open_end, _, _, _) = children(&doc)?;
+    let root_start = text[..open_end].rfind("<worksheet").or_else(|| text[..open_end].rfind(":worksheet").and_then(|i| text[..i].rfind('<'))).unwrap_or(0);
+    if text[root_start..open_end].contains("xmlns:r=") {
+        return Ok(doc);
+    }
+    let fixed = set_attrs(&text[root_start..open_end], &[("xmlns:r", Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships".into()))]);
+    Ok(apply_edits(&doc, vec![(root_start, open_end, fixed)]))
+}
+
 /// Put a sheet's notes into the package: rewrite its comments and note
 /// drawing, or create them (with relationships and a `<legacyDrawing>`
 /// link in the sheet). Returns the sheet XML if it had to change.
@@ -1207,7 +1262,11 @@ fn write_notes(
     ct_adds.push((format!("/{vpart}"), CT_VML));
     // Relationships from the sheet (targets relative to xl/worksheets/).
     let adds = vec![("rIdXlNotes".to_string(), REL_COMMENTS, format!("../comments{n}.xml")), ("rIdXlVml".to_string(), REL_VML, format!("../drawings/vmlDrawing{n}.vml"))];
-    match pkg.part(&rels_path).or_else(|| replaced.get(&rels_path).cloned()) {
+    if let Some(slot) = added_parts.iter_mut().find(|(p, _)| *p == rels_path) {
+        // Created earlier in this save (by hyperlinks): extend it.
+        slot.1 = patch_rels(&slot.1, &adds, &[])?;
+    } else {
+        match replaced.get(&rels_path).cloned().or_else(|| pkg.part(&rels_path)) {
         Some(doc) => {
             replaced.insert(rels_path.clone(), patch_rels(&doc, &adds, &[])?);
         }
@@ -1215,17 +1274,10 @@ fn write_notes(
             let body: String = adds.iter().map(|(id, ty, t)| format!("<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{t}\"/>")).collect();
             added_parts.push((rels_path.clone(), format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes()));
         }
+        }
     }
     // Link the note drawing from the sheet; r:id needs the relationships namespace.
-    let mut doc = sheet_doc;
-    let text = String::from_utf8_lossy(&doc).to_string();
-    let (open_end, _, _, _) = children(&doc)?;
-    let root_start = text[..open_end].rfind("<worksheet").or_else(|| text[..open_end].rfind(":worksheet").and_then(|i| text[..i].rfind('<'))).unwrap_or(0);
-    if !text[root_start..open_end].contains("xmlns:r=") {
-        let tag = &text[root_start..open_end];
-        let fixed = set_attrs(tag, &[("xmlns:r", Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships".into()))]);
-        doc = apply_edits(&doc, vec![(root_start, open_end, fixed)]);
-    }
+    let doc = ensure_r_namespace(sheet_doc)?;
     let mut rep: HashMap<&str, Option<String>> = HashMap::new();
     rep.insert("legacyDrawing", Some("<legacyDrawing r:id=\"rIdXlVml\"/>".into()));
     Ok(Some(splice(&doc, SHEET_ORDER, rep)?))
@@ -1479,6 +1531,28 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         any_data = true;
     }
     // Shared strings: append, or create the part.
+    // Hyperlinks that changed (or appeared on new sheets).
+    let link_sheets: Vec<(SheetId, String)> = pkg
+        .sheets
+        .iter()
+        .filter(|s| wb.sheet_ids().contains(&s.id) && pkg.links_changed(wb, s.id))
+        .map(|s| (s.id, s.part.clone()))
+        .chain(new_sheet_parts.iter().filter(|(id, _)| !wb.layout(*id).links.is_empty()).cloned())
+        .collect();
+    for (id, sheet_part) in link_sheets {
+        let doc = replaced
+            .get(&sheet_part)
+            .cloned()
+            .or_else(|| added_parts.iter().find(|(p, _)| *p == sheet_part).map(|(_, b)| b.clone()))
+            .or_else(|| part(&sheet_part))
+            .ok_or_else(|| format!("missing {sheet_part}"))?;
+        let new_doc = write_links(wb, pkg, id, &sheet_part, doc, &mut replaced, &mut added_parts)?;
+        if let Some(slot) = added_parts.iter_mut().find(|(p, _)| *p == sheet_part) {
+            slot.1 = new_doc;
+        } else {
+            replaced.insert(sheet_part, new_doc);
+        }
+    }
     // Notes that changed (or appeared on new sheets).
     let mut taken: BTreeSet<String> = existing.clone();
     taken.extend(added_parts.iter().map(|(p, _)| p.clone()));

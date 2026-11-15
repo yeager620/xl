@@ -320,3 +320,41 @@ fn notes_are_read_edited_and_added() {
     xl_io::save(&back.workbook, &fresh, s, None).unwrap();
     assert_eq!(xl_io::open(&fresh).unwrap().workbook.layout(s).notes.len(), 1);
 }
+
+#[test]
+fn hyperlinks_are_read_edited_and_saved() {
+    use xl_engine::Link;
+    let src = tmp("links.xlsx");
+    rich_file(&src); // A9 links to https://example.com
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let a9 = CellRef::parse("A9").unwrap();
+    assert_eq!(loaded.workbook.layout(s).links.get(&a9).map(|l| l.target()), Some("https://example.com"));
+    assert!(!loaded.unsupported.contains(&"hyperlinks"));
+    // Unchanged links survive an inserted row without being rewritten as new ones.
+    loaded.workbook.apply_shift(xl_engine::Shift::InsertRows { sheet: s, at: 0, count: 1 });
+    let a10 = CellRef::parse("A10").unwrap();
+    assert!(loaded.workbook.layout(s).links.contains_key(&a10));
+    // Add a web link and a link to a place.
+    {
+        let l = loaded.workbook.layout_mut(s).unwrap();
+        l.links.insert(CellRef::parse("C1").unwrap(), Link::Url { url: "https://xl.example/docs?a=1&b=2".into(), tooltip: Some("Docs".into()) });
+        l.links.insert(CellRef::parse("C2").unwrap(), Link::Place { location: "'Data'!B5".into(), tooltip: None });
+    }
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("links-edit.xlsx");
+    let pkg2 = xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap().unwrap();
+    let back = xl_io::open(&out).unwrap();
+    let links = &back.workbook.layout(back.workbook.sheet_ids()[0]).links;
+    assert_eq!(links.len(), 3);
+    assert_eq!(links[&a10].target(), "https://example.com");
+    assert_eq!(links[&CellRef::parse("C1").unwrap()], Link::Url { url: "https://xl.example/docs?a=1&b=2".into(), tooltip: Some("Docs".into()) });
+    assert_eq!(links[&CellRef::parse("C2").unwrap()].target(), "'Data'!B5");
+    // Saving again doesn't pile up relationships.
+    let mut again = back.workbook;
+    again.layout_mut(again.sheet_ids()[0]).unwrap().links.remove(&CellRef::parse("C2").unwrap());
+    let out2 = tmp("links-edit2.xlsx");
+    xl_io::save(&again, &out2, again.sheet_ids()[0], Some(&pkg2)).unwrap();
+    let rels = text(&parts(&out2), "xl/worksheets/_rels/sheet1.xml.rels");
+    assert_eq!(rels.matches("relationships/hyperlink\"").count(), 2, "{rels}");
+}
