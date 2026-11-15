@@ -991,6 +991,13 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
         note("chart sheets");
     }
+    // Old Mac workbooks count dates from 1904.
+    if read_entry(&mut zip, "xl/workbook.xml")?.is_some_and(|b| {
+        let t = String::from_utf8_lossy(&b);
+        t.contains("date1904=\"1\"") || t.contains("date1904=\"true\"")
+    }) {
+        wb.convert_from_1904();
+    }
     // Formulas using tables get their dependencies once the tables are known.
     let has_tables = wb.sheet_ids().iter().any(|&s| !wb.layout(s).tables.is_empty());
     let stats = if has_tables { wb.rebuild() } else { wb.recalc_all() };

@@ -594,6 +594,8 @@ struct SheetCtx<'a> {
     styles: &'a mut Styles,
     strings: &'a mut Strings,
     original_xfs: Option<&'a HashMap<CellRef, u32>>,
+    /// Extra attributes per cell, and the input they belong with.
+    extras: Option<&'a HashMap<CellRef, (crate::package::CellExtra, String)>>,
     /// Attributes of the original `<row>` elements xl doesn't own.
     row_attrs: RowAttrs,
     /// The original `<col>` style indexes, per column.
@@ -665,12 +667,23 @@ impl SheetCtx<'_> {
         let s = self.styles.xf(wb.format_code(a), wb.style(a), original);
         let s_attr = if s != 0 { format!(" s=\"{s}\"") } else { String::new() };
         let r = cell.to_string();
+        // Attributes xl doesn't model come back when the cell is unchanged.
+        let extra = self.extras.and_then(|m| m.get(&cell)).filter(|(_, input)| *input == wb.input_text(a)).map(|(e, _)| e);
+        let mut s_attr = s_attr;
+        if let Some(e) = extra {
+            for (k, v) in &e.c_attrs {
+                s_attr.push_str(&format!(" {k}=\"{}\"", esc(v)));
+            }
+        }
+        let f_attrs: String = extra.map_or(String::new(), |e| e.f_attrs.iter().map(|(k, v)| format!(" {k}=\"{}\"", esc(v))).collect());
         let Some(c) = wb.cell(a) else { return format!("<c r=\"{r}\"{s_attr}/>") };
+        // A 1904-based file gets its dates back in its own system.
+        let to_file = |n: f64| if wb.date1904() && n >= 1.0 + xl_engine::DATE1904_OFFSET && wb.format(a).is_some_and(|f| f.has_date()) { n - xl_engine::DATE1904_OFFSET } else { n };
         match &c.input {
             CellInput::Formula(_) | CellInput::Opaque(_) => {
-                let f = format!("<f>{}</f>", esc(&formula_text(wb, self.id, cell)));
+                let f = format!("<f{f_attrs}>{}</f>", esc(&formula_text(wb, self.id, cell)));
                 match &c.value {
-                    Value::Number(n) => format!("<c r=\"{r}\"{s_attr}>{f}<v>{}</v></c>", precise(*n)),
+                    Value::Number(n) => format!("<c r=\"{r}\"{s_attr}>{f}<v>{}</v></c>", precise(to_file(*n))),
                     Value::Text(t) => format!("<c r=\"{r}\"{s_attr} t=\"str\">{f}<v>{}</v></c>", esc(t)),
                     Value::Bool(b) => format!("<c r=\"{r}\"{s_attr} t=\"b\">{f}<v>{}</v></c>", *b as u8),
                     Value::Error(e) => format!("<c r=\"{r}\"{s_attr} t=\"e\">{f}<v>{}</v></c>", esc(e.as_str())),
@@ -678,7 +691,7 @@ impl SheetCtx<'_> {
                 }
             }
             CellInput::Value(v) => match v {
-                Value::Number(n) => format!("<c r=\"{r}\"{s_attr}><v>{}</v></c>", precise(*n)),
+                Value::Number(n) => format!("<c r=\"{r}\"{s_attr}><v>{}</v></c>", precise(to_file(*n))),
                 Value::Text(t) => format!("<c r=\"{r}\"{s_attr} t=\"s\"><v>{}</v></c>", self.strings.index(t)),
                 Value::Bool(b) => format!("<c r=\"{r}\"{s_attr} t=\"b\"><v>{}</v></c>", *b as u8),
                 Value::Error(e) => format!("<c r=\"{r}\"{s_attr} t=\"e\"><v>{}</v></c>", esc(e.as_str())),
@@ -1253,6 +1266,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             styles: &mut styles,
             strings: &mut strings,
             original_xfs: pkg.cell_xfs.get(&s.id).filter(|_| same_structure),
+            extras: pkg.cell_extras.get(&s.id).filter(|_| same_structure),
             row_attrs,
             col_styles,
         };
@@ -1291,7 +1305,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             n += 1;
         }
         let part = format!("xl/worksheets/sheet{n}.xml");
-        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, row_attrs: HashMap::new(), col_styles: HashMap::new() };
+        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new() };
         added_parts.push((part.clone(), new_sheet(&mut ctx).into_bytes()));
         let rid = format!("rIdXl{n}");
         rel_adds.push((rid.clone(), REL_WORKSHEET, format!("worksheets/sheet{n}.xml")));

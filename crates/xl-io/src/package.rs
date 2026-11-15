@@ -52,6 +52,8 @@ pub struct Package {
     pub(crate) sheets: Vec<PackageSheet>,
     /// Style index (`s`) of every styled cell, per sheet.
     pub(crate) cell_xfs: HashMap<SheetId, HashMap<CellRef, u32>>,
+    /// Extra cell/formula attributes, with the cell's input when read.
+    pub(crate) cell_extras: HashMap<SheetId, HashMap<CellRef, (CellExtra, String)>>,
     pub(crate) names: u64,
     /// Structural edits the workbook had when this package was read.
     pub(crate) log_len: usize,
@@ -106,24 +108,64 @@ pub(crate) fn names_digest(wb: &Workbook) -> u64 {
     hash_of(&[&names])
 }
 
-/// Every `<c r=".." s="..">` style index in a worksheet part.
-fn scan_cell_xfs(bytes: &[u8]) -> HashMap<CellRef, u32> {
-    let mut out = HashMap::new();
+/// What a cell's XML carried beyond xl's model, put back when the cell is
+/// rewritten unchanged: `<c>` attributes like `cm`/`vm` (dynamic arrays,
+/// rich values) and `<f>` attributes of array and data-table formulas.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CellExtra {
+    pub c_attrs: Vec<(String, String)>,
+    pub f_attrs: Vec<(String, String)>,
+}
+
+fn all_attrs(e: &quick_xml::events::BytesStart) -> Vec<(String, String)> {
+    e.attributes()
+        .with_checks(false)
+        .flatten()
+        .map(|a| (a.key.as_ref().to_string(), a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_default()))
+        .collect()
+}
+
+/// Per-cell style index and extra attributes of a worksheet part.
+type CellScan = (HashMap<CellRef, u32>, HashMap<CellRef, CellExtra>);
+
+/// Every cell's style index (`s`) and extra attributes in a worksheet part.
+fn scan_cells(bytes: &[u8]) -> CellScan {
+    let (mut xfs, mut extras) = (HashMap::new(), HashMap::<CellRef, CellExtra>::new());
     let mut r = xml(bytes);
     let mut buf = Vec::new();
+    let mut cur: Option<CellRef> = None;
     while let Ok(ev) = r.read_event_into(&mut buf) {
         match ev {
-            Event::Start(ref e) | Event::Empty(ref e) if local(e.name().as_ref()) == "c" => {
-                if let (Some(cell), Some(s)) = (attr(e, "r").and_then(|r| CellRef::parse(&r)), attr(e, "s").and_then(|s| s.parse::<u32>().ok())) {
-                    out.insert(cell, s);
+            Event::Start(ref e) | Event::Empty(ref e) => match local(e.name().as_ref()) {
+                "c" => {
+                    cur = attr(e, "r").and_then(|r| CellRef::parse(&r));
+                    if let Some(cell) = cur {
+                        if let Some(s) = attr(e, "s").and_then(|s| s.parse::<u32>().ok()) {
+                            xfs.insert(cell, s);
+                        }
+                        let extra: Vec<_> = all_attrs(e).into_iter().filter(|(k, _)| !matches!(k.as_str(), "r" | "s" | "t")).collect();
+                        if !extra.is_empty() {
+                            extras.entry(cell).or_default().c_attrs = extra;
+                        }
+                    }
                 }
-            }
+                "f" => {
+                    // Shared formulas are written out in full; arrays and data tables keep their kind.
+                    let fa = all_attrs(e);
+                    if let Some(cell) = cur
+                        && fa.iter().any(|(k, v)| k == "t" && (v == "array" || v == "dataTable"))
+                    {
+                        extras.entry(cell).or_default().f_attrs = fa;
+                    }
+                }
+                _ => {}
+            },
             Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-    out
+    (xfs, extras)
 }
 
 impl Package {
@@ -153,6 +195,7 @@ impl Package {
         }
         let mut sheets = Vec::new();
         let mut cell_xfs = HashMap::new();
+        let mut cell_extras = HashMap::new();
         for ((name, rid), &id) in listed.iter().zip(wb.sheet_ids()) {
             let Some(target) = rels.get(rid) else { continue };
             let part = crate::xlsx_read::sheet_path(target);
@@ -162,10 +205,14 @@ impl Package {
             } else {
                 continue;
             }
-            cell_xfs.insert(id, scan_cell_xfs(&data));
+            let (xfs, extras) = scan_cells(&data);
+            cell_xfs.insert(id, xfs);
+            // Remember each extra's input, so it's only reapplied to the same formula.
+            let with_input: HashMap<CellRef, (CellExtra, String)> = extras.into_iter().map(|(c, e)| (c, (e, wb.input_text(Addr::new(id, c))))).collect();
+            cell_extras.insert(id, with_input);
             sheets.push(PackageSheet { id, name: name.clone(), part, digest: sheet_digest(wb, id), structure: wb.structure_version(id) });
         }
-        Ok(Package { bytes, sheets, cell_xfs, names: names_digest(wb), log_len: wb.structure_log().len() })
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.

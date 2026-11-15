@@ -577,7 +577,13 @@ pub struct Workbook {
     /// Every structural edit in order, for savers that patch files written
     /// before them.
     structure_log: Vec<StructOp>,
+    /// The file this came from counts dates from 1904 (old Mac Excel). xl
+    /// always works in the 1900 system; savers convert back.
+    date1904: bool,
 }
+
+/// Days between the 1900 and 1904 date systems' day zero.
+pub const DATE1904_OFFSET: f64 = 1462.0;
 
 /// A structural edit, as logged.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -608,6 +614,34 @@ impl Workbook {
 
     pub fn sheets(&self) -> &Sheets {
         &self.sheets
+    }
+
+    pub fn date1904(&self) -> bool {
+        self.date1904
+    }
+
+    /// Mark the workbook as read from a 1904-based file, converting its
+    /// date-formatted constants (not pure times) to the 1900 system.
+    pub fn convert_from_1904(&mut self) {
+        self.date1904 = true;
+        for id in self.sheets.order.clone() {
+            let Some(sd) = self.sheets.get(id) else { continue };
+            let dates: Vec<CellRef> = sd
+                .store
+                .iter()
+                .filter(|(c, cell)| matches!(cell.input, CellInput::Value(Value::Number(n)) if n >= 1.0) && sd.formats.get(c).is_some_and(|f| self.formats.get(*f).has_date()))
+                .map(|(c, _)| c)
+                .collect();
+            let Some(sd) = self.sheets.get_mut(id) else { continue };
+            for c in dates {
+                if let Some(cell) = sd.store.get_mut(c)
+                    && let CellInput::Value(Value::Number(n)) = cell.input
+                {
+                    cell.input = CellInput::Value(Value::Number(n + DATE1904_OFFSET));
+                    cell.value = Value::Number(n + DATE1904_OFFSET);
+                }
+            }
+        }
     }
 
     /// All structural edits so far, oldest first.

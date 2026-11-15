@@ -203,3 +203,74 @@ fn falls_back_when_patching_would_be_unsafe() {
         SavePlan::Patch => panic!("should not patch"),
     }
 }
+
+#[test]
+fn array_formulas_keep_their_kind_when_the_sheet_is_rewritten() {
+    let src = tmp("arrays.xlsx");
+    {
+        let mut book = XlsxBook::new();
+        let ws = book.add_worksheet();
+        for r in 0..3 {
+            ws.write_number(r, 0, (r + 1) as f64).unwrap();
+        }
+        ws.write_dynamic_array_formula(0, 2, 2, 2, "=_xlfn._xlws.SORT(A1:A3,1,-1)").unwrap();
+        ws.write_array_formula(0, 4, 0, 4, "{=SUM(A1:A3*2)}").unwrap();
+        book.save(&src).unwrap();
+    }
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    loaded.workbook.set_input(Addr::new(s, CellRef::parse("G1").unwrap()), "edited").unwrap();
+    let out = tmp("arrays-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let sheet = text(&parts(&out), "xl/worksheets/sheet1.xml");
+    let before = text(&parts(&src), "xl/worksheets/sheet1.xml");
+    let c1 = |x: &str| x.split("<c r=\"C1\"").nth(1).map(|t| t.split("</c>").next().unwrap_or("").to_string()).unwrap_or_default();
+    assert!(c1(&before).contains("cm=\"1\"") && c1(&before).contains("t=\"array\""), "fixture: {}", c1(&before));
+    assert!(c1(&sheet).contains("cm=\"1\""), "dynamic array metadata kept: {}", c1(&sheet));
+    assert!(c1(&sheet).contains("t=\"array\"") && c1(&sheet).contains("ref=\"C1:C3\""), "array kind kept: {}", c1(&sheet));
+    assert!(sheet.contains("<c r=\"G1\""));
+}
+
+#[test]
+fn dates_in_1904_files_show_and_save_correctly() {
+    use std::io::Write;
+    let plain = tmp("dates1900.xlsx");
+    {
+        let mut book = XlsxBook::new();
+        let ws = book.add_worksheet();
+        // 1904-based serial 0 is 1904-01-01; 1462 days later is 1908-01-02.
+        ws.write_number_with_format(0, 0, 1462.0, &Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+        ws.write_number_with_format(1, 0, 0.5, &Format::new().set_num_format("h:mm")).unwrap();
+        book.save(&plain).unwrap();
+    }
+    // Flip the file to the 1904 system.
+    let src = tmp("dates1904.xlsx");
+    {
+        let mut zin = zip::ZipArchive::new(std::fs::File::open(&plain).unwrap()).unwrap();
+        let mut zout = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().unwrap().to_string();
+            let mut b = Vec::new();
+            f.read_to_end(&mut b).unwrap();
+            if name == "xl/workbook.xml" {
+                b = String::from_utf8(b).unwrap().replace("<workbookPr ", "<workbookPr date1904=\"1\" ").into_bytes();
+            }
+            zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zout.write_all(&b).unwrap();
+        }
+        zout.finish().unwrap();
+    }
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let shown = |wb: &xl_engine::Workbook, a1: &str| wb.display(Addr::new(s, CellRef::parse(a1).unwrap())).text;
+    assert_eq!(shown(&loaded.workbook, "A1"), "1908-01-02");
+    assert_eq!(shown(&loaded.workbook, "A2"), "12:00", "pure times are unaffected");
+    loaded.workbook.set_input(Addr::new(s, CellRef::parse("B1").unwrap()), "x").unwrap();
+    let out = tmp("dates1904-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let sheet = text(&parts(&out), "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<v>1462</v>"), "written back in the file's own date system: {sheet}");
+    let back = xl_io::open(&out).unwrap();
+    assert_eq!(back.workbook.display(Addr::new(back.workbook.sheet_ids()[0], CellRef::parse("A1").unwrap())).text, "1908-01-02");
+}
