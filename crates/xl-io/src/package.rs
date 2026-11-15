@@ -87,7 +87,9 @@ impl Package {
     /// deleted lines (which rewriting the comments part handles)?
     pub(crate) fn notes_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
         let Some(before) = self.notes.get(&sheet) else { return !wb.layout(sheet).notes.is_empty() };
-        shifted(before, wb, self, sheet) != wb.layout(sheet).notes
+        // Notes deleted with their rows need their note boxes rebuilt too.
+        let expected = shifted(before, wb, self, sheet);
+        expected.len() != before.len() || expected != wb.layout(sheet).notes
     }
 
     /// Charts whose place differs from where inserted/deleted lines alone

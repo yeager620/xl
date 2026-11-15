@@ -186,22 +186,28 @@ fn inserted_rows_and_renames_move_preserved_addresses() {
 }
 
 #[test]
-fn falls_back_when_patching_would_be_unsafe() {
+fn deletes_and_moves_patch_too() {
     let src = tmp("rich4.xlsx");
     rich_file(&src);
-    // Deleting the commented cell's row: its note box can't be removed safely yet.
+    // Deleting the commented cell's row: the notes are rebuilt without it.
     let mut loaded = xl_io::open(&src).unwrap();
     let s = loaded.workbook.sheet_ids()[0];
     loaded.workbook.apply_shift(xl_engine::Shift::DeleteRows { sheet: s, at: 1, count: 1 });
-    assert!(matches!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Rewrite(_)));
-    // Cut and paste isn't adjusted in preserved parts yet.
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("rich4-del.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let back = xl_io::open(&out).unwrap();
+    assert!(back.workbook.layout(back.workbook.sheet_ids()[0]).notes.is_empty());
+    let vml = parts(&out).into_iter().find(|(k, _)| k.ends_with(".vml")).map(|(_, v)| String::from_utf8_lossy(&v).to_string()).unwrap();
+    assert!(!vml.contains("ObjectType=\"Note\""), "its note box went too");
+    // Cut and paste: the chart series that read the moved cells follow them.
     let mut loaded = xl_io::open(&src).unwrap();
     let s = loaded.workbook.sheet_ids()[0];
-    loaded.workbook.move_range(xl_engine::Move { from_sheet: s, from: xl_engine::Range::single(CellRef::new(2, 0)), to_sheet: s, dr: 20, dc: 0 });
-    match xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()) {
-        SavePlan::Rewrite(why) => assert!(why.iter().any(|w| w.contains("moved"))),
-        SavePlan::Patch => panic!("should not patch"),
-    }
+    loaded.workbook.move_range(xl_engine::Move { from_sheet: s, from: xl_engine::Range::new(CellRef::new(1, 1), CellRef::new(3, 1)), to_sheet: s, dr: 20, dc: 0 });
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("rich4-move.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    assert!(text(&parts(&out), "xl/charts/chart1.xml").contains("Data!$B$22:$B$24"));
 }
 
 #[test]

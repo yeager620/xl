@@ -21,25 +21,33 @@ use crate::xlsx_read::{push_entity, read_rels, xml};
 pub(crate) struct Edits<'a> {
     pub wb: &'a Workbook,
     pub shifts: Vec<Shift>,
+    /// Every structural edit in order (shifts and cut/paste moves).
+    pub ops: Vec<StructOp>,
     /// (old name, new name) of renamed sheets.
     pub renames: Vec<(String, String)>,
 }
 
 impl<'a> Edits<'a> {
     pub fn since(wb: &'a Workbook, pkg: &Package) -> Result<Edits<'a>, String> {
-        let mut shifts = Vec::new();
-        for op in wb.structure_log().iter().skip(pkg.log_len) {
-            match op {
-                StructOp::Shift(s) => shifts.push(*s),
-                StructOp::Move(_) => return Err("cells were moved (cut and paste)".into()),
-            }
-        }
+        let ops: Vec<StructOp> = wb.structure_log().iter().skip(pkg.log_len).copied().collect();
+        let shifts = ops.iter().filter_map(|op| if let StructOp::Shift(s) = op { Some(*s) } else { None }).collect();
         let renames = pkg.sheets.iter().filter(|s| wb.sheet_ids().contains(&s.id) && wb.sheet_name(s.id) != s.name).map(|s| (s.name.clone(), wb.sheet_name(s.id).to_string())).collect();
-        Ok(Edits { wb, shifts, renames })
+        Ok(Edits { wb, shifts, ops, renames })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shifts.is_empty() && self.renames.is_empty()
+        self.ops.is_empty() && self.renames.is_empty()
+    }
+
+    /// Sheets whose cells moved (by shifts or cut/paste).
+    fn touched(&self) -> Vec<SheetId> {
+        self.ops
+            .iter()
+            .flat_map(|op| match op {
+                StructOp::Shift(s) => vec![s.sheet()],
+                StructOp::Move(m) => vec![m.from_sheet, m.to_sheet],
+            })
+            .collect()
     }
 
     /// Replace references to renamed sheets in formula text.
@@ -75,7 +83,7 @@ impl<'a> Edits<'a> {
     /// names), so the home sheet doesn't matter.
     pub fn formula_in(&self, src: &str, home: SheetId, qualified: bool) -> Result<String, String> {
         let renamed = self.renamed(src);
-        if self.shifts.is_empty() {
+        if self.ops.is_empty() {
             return Ok(renamed);
         }
         let mut expr = match parse_formula(&renamed, self.wb.sheets()) {
@@ -84,7 +92,7 @@ impl<'a> Edits<'a> {
                 // A formula xl can't parse is safe to leave alone if it can't
                 // refer to a shifted sheet: none is named in it, and its
                 // unqualified references (if any) are to an unshifted sheet.
-                let shifted: Vec<SheetId> = self.shifts.iter().map(|s| s.sheet()).collect();
+                let shifted = self.touched();
                 let names_one = shifted.iter().any(|&id| {
                     let name = self.wb.sheet_name(id);
                     renamed.contains(&format!("{name}!")) || renamed.contains(&format!("{}!", quote_sheet_name(name)))
@@ -95,8 +103,11 @@ impl<'a> Edits<'a> {
                 return Err(format!("a formula xl can't read ({src}): {e}"));
             }
         };
-        for op in &self.shifts {
-            expr = expr.shifted(*op, home);
+        for op in &self.ops {
+            expr = match op {
+                StructOp::Shift(s) => expr.shifted(*s, home),
+                StructOp::Move(m) => expr.moved(m, home),
+            };
         }
         Ok(expr.to_source(0, 0, self.wb.sheets()))
     }
@@ -105,15 +116,23 @@ impl<'a> Edits<'a> {
         self.shifts.iter().filter(move |s| s.sheet() == sheet)
     }
 
-    /// A range on `sheet` after the edits; None if deleted.
+    /// A range on `sheet` after the edits; None if deleted. A range wholly
+    /// inside a block moved within the sheet moves with it.
     fn range(&self, r: Range, sheet: SheetId) -> Option<Range> {
-        self.on_sheet(sheet).try_fold(r, |r, op| op.map_range(r))
+        self.ops.iter().try_fold(r, |r, op| match op {
+            StructOp::Shift(s) if s.sheet() == sheet => s.map_range(r),
+            StructOp::Move(m) if m.from_sheet == sheet && m.to_sheet == sheet && m.from.contains(r.start) && m.from.contains(r.end) => {
+                let off = |c: CellRef| CellRef::new((c.row as i64 + m.dr) as u32, (c.col as i64 + m.dc) as u32);
+                Some(Range::new(off(r.start), off(r.end)))
+            }
+            _ => Some(r),
+        })
     }
 
     /// A space-separated range list ("A1:B2 D4", "A:A", "3:5"); None if all
     /// of it was deleted. Unchanged (text and all) when nothing shifted here.
     pub fn sqref(&self, s: &str, sheet: SheetId) -> Option<String> {
-        if self.on_sheet(sheet).next().is_none() {
+        if !self.touched().contains(&sheet) {
             return Some(s.to_string());
         }
         let out: Vec<String> = s
@@ -287,7 +306,7 @@ where
 impl Edits<'_> {
     /// A worksheet's preserved elements.
     pub fn sheet_xml(&self, doc: &[u8], sheet: SheetId) -> Result<Option<Vec<u8>>, String> {
-        let shifted = self.on_sheet(sheet).next().is_some();
+        let shifted = self.touched().contains(&sheet);
         let fail: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
         let out = rewrite(
             doc,
@@ -404,9 +423,10 @@ impl Edits<'_> {
                     Some((_, r)) => match self.sqref(r, sheet) {
                         Some(n) if n != *r => Action::Attrs(vec![("ref".into(), Some(n))]),
                         Some(_) => Action::Keep,
+                        // Its note is rebuilt (with the rest) from the workbook's notes.
                         None => {
                             deleted = true;
-                            Action::Keep
+                            Action::Drop
                         }
                     },
                     None => Action::Keep,
@@ -414,9 +434,7 @@ impl Edits<'_> {
             },
             |_, _, _| None,
         )?;
-        if deleted {
-            return Err("a comment's cell was deleted".into());
-        }
+        let _ = deleted;
         Ok(out)
     }
 
@@ -571,7 +589,7 @@ pub(crate) fn rewrite_preserved(wb: &Workbook, pkg: &Package) -> Result<HashMap<
     }
     // Parts that refer to cells in ways not handled above.
     for (prefix, what) in [("xl/slicerCaches/", "slicers"), ("xl/timelineCaches/", "timelines")] {
-        if !edits.shifts.is_empty() && names.iter().any(|n| n.starts_with(prefix)) {
+        if !edits.ops.is_empty() && names.iter().any(|n| n.starts_with(prefix)) {
             return Err(format!("the file has {what}, which xl can't adjust yet"));
         }
     }
@@ -584,7 +602,8 @@ mod tests {
     use xl_engine::Workbook;
 
     fn edits<'a>(wb: &'a Workbook, shifts: Vec<Shift>, renames: Vec<(&str, &str)>) -> Edits<'a> {
-        Edits { wb, shifts, renames: renames.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
+        let ops = shifts.iter().map(|s| StructOp::Shift(*s)).collect();
+        Edits { wb, shifts, ops, renames: renames.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
     }
 
     #[test]
