@@ -37,15 +37,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>A budget with live totals for the selected cells</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-1.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.0/packaging/screenshots/screenshot-1.png</image>
     </screenshot>
     <screenshot>
       <caption>Writing a formula, with each reference highlighted in the grid</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-2.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.0/packaging/screenshots/screenshot-2.png</image>
     </screenshot>
     <screenshot>
       <caption>Every command a keystroke away in the command palette</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-3.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.0/packaging/screenshots/screenshot-3.png</image>
     </screenshot>
   </screenshots>
   <branding>
@@ -58,6 +58,20 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.4.0" date="2026-11-15">
+      <description>
+        <p>Beyond Excel parity:</p>
+        <ul>
+          <li>Dynamic arrays: formulas spill, with FILTER, SORT, UNIQUE, SEQUENCE and more, plus LET and LAMBDA</li>
+          <li>Printing and PDF export with page setup, print preview and page breaks</li>
+          <li>Charts: combos, secondary axis, trendlines, error bars, styling, histogram and waterfall</li>
+          <li>Pivot tables: calculated fields, grouping, slicers, timelines and pivot charts</li>
+          <li>Over 16 million rows, very fast CSV opening without mangling data, and SQL queries over sheets and CSV files</li>
+          <li>Sandboxed Lua scripting for custom functions and macros</li>
+          <li>Version history with cell-by-cell diffs, and git-friendly xlsx diffs</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-15">
       <description>
         <p>Lossless xlsx and a Home page:</p>
