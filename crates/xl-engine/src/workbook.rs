@@ -65,6 +65,8 @@ pub struct SheetLayout {
     pub notes: BTreeMap<CellRef, Note>,
     /// Hyperlinks on cells.
     pub links: BTreeMap<CellRef, Link>,
+    /// Data validation rules.
+    pub validations: Vec<crate::validation::Validation>,
     /// Outline (grouping) level of grouped rows and columns, from 1.
     pub row_levels: BTreeMap<u32, u8>,
     pub col_levels: BTreeMap<u32, u8>,
@@ -144,6 +146,7 @@ impl SheetLayout {
 
     fn apply_shift(&mut self, op: Shift, sheet: SheetId) {
         self.cond.retain_mut(|c| c.apply_shift(op, sheet));
+        self.validations = self.validations.iter().filter_map(|v| v.shifted(op, sheet)).collect();
         let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
         let shift_keys = |m: &mut BTreeMap<u32, f64>| *m = std::mem::take(m).into_iter().filter_map(|(k, v)| Some((op.map_pos(k)?, v))).collect();
         let shift_set = |m: &mut BTreeSet<u32>| *m = std::mem::take(m).into_iter().filter_map(|k| op.map_pos(k)).collect();

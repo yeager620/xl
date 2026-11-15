@@ -13,6 +13,8 @@ pub(crate) enum FormKind {
     Solver,
     /// Insert or edit the active cell's hyperlink.
     Link,
+    /// Data validation for the selection.
+    Validation,
 }
 
 pub(crate) struct FormDialog {
@@ -43,6 +45,13 @@ impl Spreadsheet {
                 ("To value", "The result you want", String::new()),
                 ("By changing cell", "A number the formula depends on", String::new()),
             ],
+            FormKind::Validation => vec![
+                ("Allow", "list · whole · decimal · date · time · length · custom", "list".to_string()),
+                ("Condition", "between · = · <> · > · < · >= · <= (not for lists)", "between".to_string()),
+                ("Choices or value", "Red, Green, Blue  ·  =$H$2:$H$9  ·  1  ·  =A1>0", String::new()),
+                ("Second value", "For between", String::new()),
+                ("Error message", "Shown when a value is refused", String::new()),
+            ],
             FormKind::Link => {
                 let a = self.at(self.active);
                 vec![
@@ -62,6 +71,7 @@ impl Spreadsheet {
             FormKind::GoalSeek => 1,
             FormKind::Solver => 2,
             FormKind::Link => 0,
+            FormKind::Validation => 2,
         }));
     }
 
@@ -134,8 +144,19 @@ impl Spreadsheet {
             self.apply_link_form(text(0), text(1));
             return;
         }
+        if kind == FormKind::Validation {
+            match self.apply_validation_form(&text(0), &text(1), &text(2), &text(3), &text(4)) {
+                Ok(()) => {
+                    self.form = None;
+                    self.field = None;
+                    self.message = Some(("Added the rule — values that break it will be refused".into(), false));
+                }
+                Err(e) => self.message = Some((e, true)),
+            }
+            return;
+        }
         let result: Result<(Vec<Addr>, String), String> = match kind {
-            FormKind::Link => unreachable!("handled above"),
+            FormKind::Link | FormKind::Validation => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -304,6 +325,7 @@ impl Spreadsheet {
             FormKind::GoalSeek => "Goal Seek",
             FormKind::Solver => "Solver",
             FormKind::Link => "Link",
+            FormKind::Validation => "Data validation",
         };
         let mut body = div().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
@@ -445,7 +467,7 @@ impl Spreadsheet {
                             .child(button("form-run", match form.kind {
                                 FormKind::GoalSeek => "Seek",
                                 FormKind::Solver => "Solve",
-                                FormKind::Link => "Save",
+                                FormKind::Link | FormKind::Validation => "Save",
                             }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();

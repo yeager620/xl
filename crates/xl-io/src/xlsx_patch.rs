@@ -634,6 +634,7 @@ struct SheetCtx<'a> {
     row_attrs: RowAttrs,
     /// The original `<col>` style indexes, per column.
     col_styles: HashMap<u32, String>,
+    validations_changed: bool,
 }
 
 fn formula_text(wb: &Workbook, sheet: SheetId, cell: CellRef) -> String {
@@ -896,6 +897,74 @@ fn cond_xml(wb: &Workbook, styles: &mut Styles, cf: &CondFormat, priority: usize
     Some(format!("<conditionalFormatting sqref=\"{sqref}\">{rule}</conditionalFormatting>"))
 }
 
+/// A sheet's `<dataValidations>` element.
+fn validations_xml(wb: &Workbook, sheet: SheetId) -> Option<String> {
+    use xl_engine::validation::{ErrorStyle, ListSource, ValidationKind, ValidationOp, ValidationRule};
+    let list = &wb.layout(sheet).validations;
+    if list.is_empty() {
+        return None;
+    }
+    let f = |e: &xl_engine::formula::Expr| esc(&prefix_future_functions(&e.to_source(0, 0, wb.sheets())));
+    let mut out = format!("<dataValidations count=\"{}\">", list.len());
+    for v in list {
+        let sqref = v.ranges.iter().map(|r| range_ref(*r)).collect::<Vec<_>>().join(" ");
+        let (ty, op, formulas) = match &v.rule {
+            ValidationRule::List(ListSource::Items(items)) => ("list", None, vec![format!("\"{}\"", esc(&items.join(",").replace('"', "\"\"")))]),
+            ValidationRule::List(ListSource::Cells(e)) => ("list", None, vec![f(e)]),
+            ValidationRule::Custom(e) => ("custom", None, vec![f(e)]),
+            ValidationRule::Compare { kind, op, a, b } => {
+                let ty = match kind {
+                    ValidationKind::Whole => "whole",
+                    ValidationKind::Decimal => "decimal",
+                    ValidationKind::Date => "date",
+                    ValidationKind::Time => "time",
+                    ValidationKind::TextLength => "textLength",
+                };
+                let op = match op {
+                    ValidationOp::Between => "between",
+                    ValidationOp::NotBetween => "notBetween",
+                    ValidationOp::Equal => "equal",
+                    ValidationOp::NotEqual => "notEqual",
+                    ValidationOp::Greater => "greaterThan",
+                    ValidationOp::Less => "lessThan",
+                    ValidationOp::GreaterEq => "greaterThanOrEqual",
+                    ValidationOp::LessEq => "lessThanOrEqual",
+                };
+                (ty, Some(op), std::iter::once(f(a)).chain(b.as_deref().map(f)).collect())
+            }
+        };
+        out.push_str(&format!("<dataValidation type=\"{ty}\""));
+        if let Some(op) = op.filter(|o| *o != "between") {
+            out.push_str(&format!(" operator=\"{op}\""));
+        }
+        match v.error_style {
+            ErrorStyle::Stop => {}
+            ErrorStyle::Warning => out.push_str(" errorStyle=\"warning\""),
+            ErrorStyle::Information => out.push_str(" errorStyle=\"information\""),
+        }
+        if v.allow_blank {
+            out.push_str(" allowBlank=\"1\"");
+        }
+        if ty == "list" && !v.dropdown {
+            out.push_str(" showDropDown=\"1\"");
+        }
+        if let Some((t, b)) = &v.prompt {
+            out.push_str(&format!(" showInputMessage=\"1\" promptTitle=\"{}\" prompt=\"{}\"", esc(t), esc(b)));
+        }
+        out.push_str(" showErrorMessage=\"1\"");
+        if let Some((t, b)) = &v.error {
+            out.push_str(&format!(" errorTitle=\"{}\" error=\"{}\"", esc(t), esc(b)));
+        }
+        out.push_str(&format!(" sqref=\"{sqref}\">"));
+        for (i, formula) in formulas.iter().enumerate() {
+            out.push_str(&format!("<formula{n}>{formula}</formula{n}>", n = i + 1));
+        }
+        out.push_str("</dataValidation>");
+    }
+    out.push_str("</dataValidations>");
+    Some(out)
+}
+
 /// Frozen panes inside `<sheetViews>`: drop the old pane and its
 /// selections, add ours to the first view.
 fn patch_sheet_views(el: &str, freeze: (u32, u32)) -> Result<String, String> {
@@ -1070,6 +1139,9 @@ fn patch_sheet(doc: &[u8], ctx: &mut SheetCtx, before: &SheetDigest, now: &Sheet
             replace.insert("extLst", if empty { None } else { Some(cleaned) });
         }
     }
+    if ctx.validations_changed {
+        replace.insert("dataValidations", validations_xml(ctx.wb, ctx.id));
+    }
     if now.freeze != before.freeze {
         let freeze = ctx.wb.layout(ctx.id).freeze;
         let views = match original("sheetViews") {
@@ -1105,6 +1177,9 @@ fn new_sheet(ctx: &mut SheetCtx) -> String {
         body.push_str(&m);
     }
     body.push_str(&ctx.cond().concat());
+    if let Some(v) = validations_xml(ctx.wb, ctx.id) {
+        body.push_str(&v);
+    }
     body.push_str("<pageMargins left=\"0.7\" right=\"0.7\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\"/>");
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{body}</worksheet>"
@@ -1365,7 +1440,11 @@ fn patch_workbook(doc: &[u8], wb: &Workbook, pkg: &Package, new_sheets: &[(Sheet
         }
         if let Some((_, rid)) = new_iter.next() {
             max_sheet_id += 1;
-            out.push_str(&format!("<sheet name=\"{}\" sheetId=\"{max_sheet_id}\" r:id=\"{rid}\"/>", esc(name)));
+            // Declared here too: some files only declare the namespace per element.
+            out.push_str(&format!(
+                "<sheet name=\"{}\" sheetId=\"{max_sheet_id}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"{rid}\"/>",
+                esc(name)
+            ));
         }
     }
     out.push_str("</sheets>");
@@ -1468,7 +1547,8 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         }
         let now = sheet_digest(wb, s.id);
         let before = s.digest;
-        if (now.data, now.cols, now.merges, now.cond, now.filter, now.freeze) == (before.data, before.cols, before.merges, before.cond, before.filter, before.freeze) {
+        let validations_changed = pkg.validations_changed(wb, s.id);
+        if (now.data, now.cols, now.merges, now.cond, now.filter, now.freeze) == (before.data, before.cols, before.merges, before.cond, before.filter, before.freeze) && !validations_changed {
             continue;
         }
         any_data |= now.data != before.data;
@@ -1484,6 +1564,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             extras: pkg.cell_extras.get(&s.id).filter(|_| same_structure),
             row_attrs,
             col_styles,
+            validations_changed,
         };
         let patched = patch_sheet(&doc, &mut ctx, &before, &now)?;
         replaced.insert(s.part.clone(), patched);
@@ -1521,7 +1602,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             n += 1;
         }
         let part = format!("xl/worksheets/sheet{n}.xml");
-        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new() };
+        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new(), validations_changed: true };
         added_parts.push((part.clone(), new_sheet(&mut ctx).into_bytes()));
         new_sheet_parts.push((id, part.clone()));
         let rid = format!("rIdXl{n}");

@@ -383,6 +383,55 @@ fn outline_runs(levels: &std::collections::BTreeMap<u32, u8>) -> Vec<(u32, u32)>
     out
 }
 
+fn write_validation(ws: &mut Worksheet, wb: &Workbook, v: &xl_engine::validation::Validation) -> Result<(), rust_xlsxwriter::XlsxError> {
+    use rust_xlsxwriter::{DataValidation, DataValidationErrorStyle, DataValidationRule as R};
+    use xl_engine::validation::{ErrorStyle, ListSource, ValidationKind, ValidationOp, ValidationRule};
+    let Some(first) = v.ranges.first() else { return Ok(()) };
+    let f = |e: &xl_engine::formula::Expr| Formula::new(prefix_future_functions(&e.to_source(0, 0, wb.sheets())));
+    let mut dv = DataValidation::new();
+    dv = match &v.rule {
+        ValidationRule::List(ListSource::Items(items)) => dv.allow_list_strings(&items.iter().map(String::as_str).collect::<Vec<_>>())?,
+        ValidationRule::List(ListSource::Cells(e)) => dv.allow_list_formula(f(e)),
+        ValidationRule::Custom(e) => dv.allow_custom(f(e)),
+        ValidationRule::Compare { kind, op, a, b } => {
+            let (a, b) = (f(a), b.as_deref().map(f).unwrap_or_else(|| Formula::new("0")));
+            let rule = match op {
+                ValidationOp::Between => R::Between(a, b),
+                ValidationOp::NotBetween => R::NotBetween(a, b),
+                ValidationOp::Equal => R::EqualTo(a),
+                ValidationOp::NotEqual => R::NotEqualTo(a),
+                ValidationOp::Greater => R::GreaterThan(a),
+                ValidationOp::Less => R::LessThan(a),
+                ValidationOp::GreaterEq => R::GreaterThanOrEqualTo(a),
+                ValidationOp::LessEq => R::LessThanOrEqualTo(a),
+            };
+            match kind {
+                ValidationKind::Whole => dv.allow_whole_number_formula(rule),
+                ValidationKind::Decimal => dv.allow_decimal_number_formula(rule),
+                ValidationKind::Date => dv.allow_date_formula(rule),
+                ValidationKind::Time => dv.allow_time_formula(rule),
+                ValidationKind::TextLength => dv.allow_text_length_formula(rule),
+            }
+        }
+    };
+    dv = dv.ignore_blank(v.allow_blank).show_dropdown(v.dropdown).set_error_style(match v.error_style {
+        ErrorStyle::Stop => DataValidationErrorStyle::Stop,
+        ErrorStyle::Warning => DataValidationErrorStyle::Warning,
+        ErrorStyle::Information => DataValidationErrorStyle::Information,
+    });
+    if let Some((t, b)) = &v.prompt {
+        dv = dv.set_input_title(t)?.set_input_message(b)?;
+    }
+    if let Some((t, b)) = &v.error {
+        dv = dv.set_error_title(t)?.set_error_message(b)?;
+    }
+    if v.ranges.len() > 1 {
+        dv = dv.set_multi_range(v.ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" "));
+    }
+    ws.add_data_validation(first.start.row, first.start.col as u16, first.end.row, first.end.col as u16, &dv)?;
+    Ok(())
+}
+
 fn result_text(v: &Value) -> String {
     match v {
         Value::Number(n) => precise(*n),
@@ -461,6 +510,9 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         }
         for cf in &layout.cond {
             write_cond(ws, wb, cf).map_err(err)?;
+        }
+        for v in &layout.validations {
+            write_validation(ws, wb, v).map_err(err)?;
         }
         for (cell, link) in &layout.links {
             let a = Addr::new(id, *cell);

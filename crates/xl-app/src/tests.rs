@@ -1639,3 +1639,59 @@ fn insert_follow_and_remove_links(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     view.read_with(cx, |s, _| assert!(s.link_at(CellRef::parse("F2").unwrap()).is_some()));
 }
+
+#[gpui::test]
+fn data_validation_dropdown_and_refusal(cx: &mut TestAppContext) {
+    use crate::solver_ui::FormKind;
+    let (view, cx) = setup(cx);
+    // A list rule on F1:F5.
+    go(&view, cx, "F1");
+    cx.simulate_keystrokes("shift-down shift-down shift-down shift-down");
+    view.update(cx, |s, _| s.open_form(FormKind::Validation));
+    cx.simulate_input("Low, Medium, High");
+    cx.simulate_keystrokes("tab tab");
+    cx.simulate_input("Pick Low, Medium or High");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.form.is_none(), "{:?}", s.message));
+    // Typing something else is refused and stays in the editor.
+    go(&view, cx, "F2");
+    cx.simulate_input("Urgent");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| {
+        assert!(s.edit.is_some(), "still editing");
+        assert_eq!(s.message.as_ref().map(|(m, e)| (m.as_str(), *e)), Some(("Pick Low, Medium or High", true)));
+    });
+    assert_eq!(val(&view, cx, "F2"), Value::Empty);
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input("medium");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "F2"), Value::text("medium"), "choices match without case");
+    // The dropdown: button beside the active cell, then a choice.
+    go(&view, cx, "F3");
+    let button = view.read_with(cx, |s, _| {
+        let (x, y, w, h) = s.dropdown_rect().expect("dropdown button");
+        gpui::point(gpui::px((x + w / 2.0) as f32), gpui::px((y + h / 2.0) as f32))
+    });
+    cx.simulate_click(button, gpui::Modifiers::none());
+    view.read_with(cx, |s, _| assert_eq!(s.dropdown.as_ref().map(|d| d.1.clone()), Some(vec!["Low".to_string(), "Medium".into(), "High".into()])));
+    view.update(cx, |s, _| s.choose(2));
+    assert_eq!(val(&view, cx, "F3"), Value::text("High"));
+    // A number rule.
+    go(&view, cx, "G1");
+    view.update(cx, |s, _| s.open_form(FormKind::Validation));
+    view.update(cx, |s, _| {
+        let f = s.form.as_mut().unwrap();
+        f.fields[0].2 = "whole".into();
+        f.fields[1].2 = ">=".into();
+        f.fields[2].2 = "10".into();
+    });
+    cx.simulate_keystrokes("enter");
+    go(&view, cx, "G1");
+    cx.simulate_input("9");
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |s, _| assert!(s.edit.is_some()));
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input("12");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(val(&view, cx, "G1"), Value::Number(12.0));
+}

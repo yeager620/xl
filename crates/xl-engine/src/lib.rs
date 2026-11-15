@@ -13,6 +13,7 @@ pub mod pivot;
 pub mod solver;
 pub mod store;
 pub mod style;
+pub mod validation;
 pub mod value;
 pub mod workbook;
 

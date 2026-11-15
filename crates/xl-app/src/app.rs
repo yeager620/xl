@@ -277,6 +277,8 @@ pub struct Spreadsheet {
     /// The selected chart (index on the current sheet).
     pub(crate) selected_chart: Option<usize>,
     pub(crate) chart_title_text: String,
+    /// The open list of choices for a validated cell: cell, choices, where.
+    pub(crate) dropdown: Option<(CellRef, Vec<String>, Point<Pixels>)>,
     /// The note being written: its cell and text.
     pub(crate) note_edit: Option<(CellRef, String)>,
     /// The cell whose note the pointer is over.
@@ -372,6 +374,7 @@ impl Spreadsheet {
             cf_dialog: None,
             form: None,
             note_edit: None,
+            dropdown: None,
             hover_note: None,
             selected_chart: None,
             chart_title_text: String::new(),
@@ -841,6 +844,21 @@ impl Spreadsheet {
         let Some(edit) = self.edit.take() else { return true };
         let before = self.wb.snapshot(edit.at);
         let result = if edit.text == before.input { Ok(None) } else { self.wb.set_input(edit.at, &edit.text).map(Some) };
+        // Data validation: a refused value goes back to the editor.
+        let mut notice = None;
+        if let Ok(Some(_)) = &result
+            && let Err(rule) = self.wb.check_value(edit.at.sheet, edit.at.cell, &self.wb.value(edit.at).clone())
+        {
+            let text = rule.error.as_ref().map(|(t, b)| if t.is_empty() { b.clone() } else if b.is_empty() { t.clone() } else { format!("{t}: {b}") });
+            let text = text.unwrap_or_else(|| "That value isn't allowed in this cell".into());
+            if rule.error_style == xl_engine::validation::ErrorStyle::Stop {
+                self.wb.restore(vec![(edit.at, before)]);
+                self.message = Some((text, true));
+                self.edit = Some(edit);
+                return false;
+            }
+            notice = Some(text);
+        }
         match result {
             Ok(stats) => {
                 if let Some(stats) = stats {
@@ -852,7 +870,7 @@ impl Spreadsheet {
                     self.last_stats = Some(stats);
                     self.mark_dirty();
                 }
-                self.message = None;
+                self.message = notice.map(|t| (t, false));
                 if self.cur != edit.at.sheet {
                     self.switch_sheet(edit.at.sheet);
                 }
@@ -1922,6 +1940,7 @@ impl Spreadsheet {
             }
         }
         match (key, ctrl) {
+            ("down", false) if alt => self.open_dropdown(),
             ("right", false) if shift && alt => self.group(false),
             ("left", false) if shift && alt => self.group(true),
             ("up", false) => self.move_by(-1, 0, shift),
@@ -1963,6 +1982,7 @@ impl Spreadsheet {
                 self.filter_menu = None;
                 self.clip = None;
                 self.selected_chart = None;
+                self.dropdown = None;
             }
             ("=" | "+", true) if shift => self.insert_or_delete(true),
             ("-", true) => self.insert_or_delete(false),
@@ -2017,6 +2037,11 @@ impl Spreadsheet {
                 len / 2.0
             };
             self.drag = Some(Drag::Scroll { axis, grab });
+            cx.notify();
+            return;
+        }
+        if self.on_dropdown(ev.position) {
+            self.open_dropdown();
             cx.notify();
             return;
         }

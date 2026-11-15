@@ -448,6 +448,7 @@ enum Capture {
     Inline,
     CfFormula,
     Sqref,
+    DvFormula,
 }
 
 struct SharedFormula {
@@ -538,7 +539,7 @@ impl CfRuleXml {
 }
 
 /// Read one worksheet. Returns true if it had conditional formats xl can't keep.
-fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize, warnings: &mut Vec<String>) -> Result<bool, String> {
+fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize, warnings: &mut Vec<String>) -> Result<(bool, bool), String> {
     let mut r = xml(bytes);
     let mut buf = Vec::new();
     let mut row: u32 = 0;
@@ -567,6 +568,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     let mut spark_color: Option<Rgb> = None;
     let mut sqref = String::new();
     let mut sparklines: Vec<xl_engine::chart::Sparkline> = Vec::new();
+    // Data validation: the rule being read (attributes, formulas) and the results.
+    let mut dv: Option<DvXml> = None;
+    let mut dv_formula = String::new();
+    let mut validations: Vec<xl_engine::validation::Validation> = Vec::new();
+    let mut dv_skipped = false;
 
     loop {
         let ev = r.read_event_into(&mut buf).map_err(|e| e.to_string())?;
@@ -595,6 +601,26 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                         {
                             l.row_levels.insert(row, level.min(7));
                         }
+                    }
+                    // Standard rules only; extension ones (x14) stay preserved as they are.
+                    "dataValidation" if e.name().as_ref() == "dataValidation" || !e.name().as_ref().starts_with("x14:") => {
+                        let attrs: Vec<(String, String)> = e
+                            .attributes()
+                            .with_checks(false)
+                            .flatten()
+                            .map(|a| (local(a.key.as_ref()).to_string(), a.normalized_value(XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_default()))
+                            .collect();
+                        dv = Some((attrs, Vec::new()));
+                        if empty {
+                            match dv.take().and_then(|(a, f)| validation_from_xml(&a, &f, wb)) {
+                                Some(v) => validations.push(v),
+                                None => dv_skipped = true,
+                            }
+                        }
+                    }
+                    "formula1" | "formula2" if dv.is_some() && !empty => {
+                        dv_formula.clear();
+                        cap = Capture::DvFormula;
                     }
                     "conditionalFormatting" => {
                         cf_ranges = attr(e, "sqref").map(|s| s.split_whitespace().filter_map(parse_range).collect()).unwrap_or_default();
@@ -756,6 +782,7 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                 Capture::Inline => v.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::CfFormula => cf_formula.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::Sqref => sqref.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
+                Capture::DvFormula => dv_formula.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
                 Capture::None => {}
             },
             Event::GeneralRef(ref g) => match cap {
@@ -763,10 +790,25 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
                 Capture::Formula => push_entity(&mut f, g),
                 Capture::CfFormula => push_entity(&mut cf_formula, g),
                 Capture::Sqref => push_entity(&mut sqref, g),
+                Capture::DvFormula => push_entity(&mut dv_formula, g),
                 Capture::None => {}
             },
             Event::End(ref e) => match local(e.name().as_ref()) {
                 "v" | "f" | "t" | "sqref" => cap = Capture::None,
+                "formula1" | "formula2" if cap == Capture::DvFormula => {
+                    cap = Capture::None;
+                    if let Some((_, formulas)) = dv.as_mut() {
+                        formulas.push(std::mem::take(&mut dv_formula));
+                    }
+                }
+                "dataValidation" => {
+                    if let Some((attrs, formulas)) = dv.take() {
+                        match validation_from_xml(&attrs, &formulas, wb) {
+                            Some(v) => validations.push(v),
+                            None => dv_skipped = true,
+                        }
+                    }
+                }
                 "sparkline" => {
                     // The data reference was captured like a cell formula.
                     if let (Some(cell), Ok(data)) = (CellRef::parse(sqref.trim()), parse_formula(f.trim(), wb.sheets())) {
@@ -839,6 +881,11 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
         }
         buf.clear();
     }
+    if !validations.is_empty()
+        && let Some(l) = wb.layout_mut(cx.id)
+    {
+        l.validations = validations;
+    }
     if !sparklines.is_empty()
         && let Some(l) = wb.layout_mut(cx.id)
     {
@@ -864,7 +911,7 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
     if unresolved_shared > 0 {
         warnings.push(format!("{}: {unresolved_shared} shared formulas couldn't be expanded and were kept as values", wb.sheet_name(cx.id)));
     }
-    Ok(cf_skipped)
+    Ok((cf_skipped, dv_skipped))
 }
 
 /// Package parts xl doesn't model, by path prefix.
@@ -882,7 +929,7 @@ const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
 
 /// Worksheet elements xl doesn't model.
 const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
-    ("<dataValidations", "data validation"),
+    ("<x14:dataValidations", "data validation on other sheets"),
     ("<sheetProtection", "sheet protection"),
     ("<customFilters", "advanced filters"),
     ("<top10", "advanced filters"),
@@ -890,6 +937,68 @@ const UNSUPPORTED_SHEET_ELEMENTS: &[(&str, &str)] = &[
     ("<colorFilter", "advanced filters"),
     ("<iconFilter", "advanced filters"),
 ];
+
+/// A `<dataValidation>` being read: its attributes and formulas.
+type DvXml = (Vec<(String, String)>, Vec<String>);
+
+/// A `<dataValidation>` in xl's terms; None for rules xl can't represent.
+fn validation_from_xml(attrs: &[(String, String)], formulas: &[String], wb: &Workbook) -> Option<xl_engine::validation::Validation> {
+    use xl_engine::validation::{ErrorStyle, ListSource, Validation, ValidationKind, ValidationOp, ValidationRule};
+    let get = |k: &str| attrs.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str());
+    let flag = |k: &str| get(k).is_some_and(|v| v == "1" || v == "true");
+    let ranges: Vec<Range> = get("sqref")?.split_whitespace().filter_map(parse_range).collect();
+    if ranges.is_empty() {
+        return None;
+    }
+    let expr = |i: usize| -> Option<Arc<xl_engine::formula::Expr>> { parse_formula(formulas.get(i)?.trim().trim_start_matches('='), wb.sheets()).ok().map(Arc::new) };
+    let op = match get("operator").unwrap_or("between") {
+        "between" => ValidationOp::Between,
+        "notBetween" => ValidationOp::NotBetween,
+        "equal" => ValidationOp::Equal,
+        "notEqual" => ValidationOp::NotEqual,
+        "greaterThan" => ValidationOp::Greater,
+        "lessThan" => ValidationOp::Less,
+        "greaterThanOrEqual" => ValidationOp::GreaterEq,
+        "lessThanOrEqual" => ValidationOp::LessEq,
+        _ => return None,
+    };
+    let compare = |kind| -> Option<ValidationRule> { Some(ValidationRule::Compare { kind, op, a: expr(0)?, b: if op.two_values() { Some(expr(1)?) } else { None } }) };
+    let rule = match get("type").unwrap_or("none") {
+        "list" => {
+            let f = formulas.first()?.trim();
+            match f.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+                Some(items) => ValidationRule::List(ListSource::Items(items.replace("\"\"", "\"").split(',').map(|i| i.trim().to_string()).collect())),
+                None => ValidationRule::List(ListSource::Cells(expr(0)?)),
+            }
+        }
+        "whole" => compare(ValidationKind::Whole)?,
+        "decimal" => compare(ValidationKind::Decimal)?,
+        "date" => compare(ValidationKind::Date)?,
+        "time" => compare(ValidationKind::Time)?,
+        "textLength" => compare(ValidationKind::TextLength)?,
+        "custom" => ValidationRule::Custom(expr(0)?),
+        // "none" (any value, used just for an input message) and others.
+        _ => return None,
+    };
+    let message = |title: &str, body: &str| -> Option<(String, String)> {
+        let (t, b) = (get(title).unwrap_or(""), get(body).unwrap_or(""));
+        (!t.is_empty() || !b.is_empty()).then(|| (t.to_string(), b.to_string()))
+    };
+    Some(Validation {
+        ranges,
+        rule,
+        allow_blank: flag("allowBlank"),
+        // The attribute is named backwards: showDropDown="1" hides it.
+        dropdown: !flag("showDropDown"),
+        prompt: if get("showInputMessage").is_none_or(|v| v == "1" || v == "true") { message("promptTitle", "prompt") } else { None },
+        error: message("errorTitle", "error"),
+        error_style: match get("errorStyle") {
+            Some("warning") => ErrorStyle::Warning,
+            Some("information") => ErrorStyle::Information,
+            _ => ErrorStyle::Stop,
+        },
+    })
+}
 
 /// "A1:B2" (or a single cell) to a range.
 fn parse_range(s: &str) -> Option<Range> {
@@ -971,8 +1080,11 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
             }
         }
         let skipped = read_sheet(&mut wb, &bytes, &SheetCtx { id: *id, shared: &shared, styles: &styles, dxfs: &dxfs, theme: &theme }, &mut cells, &mut warnings)?;
-        if skipped {
+        if skipped.0 {
             note("some kinds of conditional formatting");
+        }
+        if skipped.1 {
+            note("some data validation rules");
         }
         crate::xlsx_charts::read_sheet_tables(&mut zip, &part, &mut wb, *id)?;
         crate::xlsx_charts::read_sheet_notes(&mut zip, &part, &mut wb, *id)?;

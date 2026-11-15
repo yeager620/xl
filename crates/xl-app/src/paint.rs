@@ -552,6 +552,18 @@ impl Spreadsheet {
             }
         }
 
+        // The dropdown button beside a cell with a list of choices.
+        if let Some((bx, by, bw, bh)) = self.dropdown_rect() {
+            let clip = clip_of(self.active.row, self.active.col);
+            let size = bh.min(18.0) - 2.0;
+            let (x0, y0) = (bx + 1.0, by + (bh - size) / 2.0);
+            ops.push(Op::Quad(border_quad(b(x0, y0, bw - 2.0, size), 1.0, t.divider, t.chrome, BorderStyle::Solid, 3.0), b(f64::from(grid_clip.origin.x), f64::from(clip.origin.y), f64::from(grid_clip.size.width), f64::from(clip.size.height))));
+            let (cx0, cy0) = (x0 + (bw - 2.0) / 2.0, y0 + size / 2.0 - 1.5);
+            for (i, half) in [3.5, 2.5, 1.5, 0.5].iter().enumerate() {
+                ops.push(Op::Quad(fill(b(cx0 - half, cy0 + i as f64, half * 2.0, 1.0), t.ink_muted), grid_clip));
+            }
+        }
+
         // Filter dropdown buttons in the header row.
         if let Some(f) = &layout.filter
             && let Some(&(r, y, h)) = rows.iter().find(|row| row.0 == f.range.start.row)

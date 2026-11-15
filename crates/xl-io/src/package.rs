@@ -61,6 +61,7 @@ pub struct Package {
     /// Each sheet's notes and hyperlinks when read.
     pub(crate) notes: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Note>>,
     pub(crate) links: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Link>>,
+    pub(crate) validations: HashMap<SheetId, Vec<xl_engine::validation::Validation>>,
 }
 
 /// A per-cell map after the structural edits since the package was read.
@@ -83,6 +84,17 @@ impl Package {
     pub(crate) fn notes_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
         let Some(before) = self.notes.get(&sheet) else { return !wb.layout(sheet).notes.is_empty() };
         shifted(before, wb, self, sheet) != wb.layout(sheet).notes
+    }
+
+    /// Did a sheet's validation rules change other than by moving with lines?
+    pub(crate) fn validations_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
+        let mut expected = self.validations.get(&sheet).cloned().unwrap_or_default();
+        for op in wb.structure_log().iter().skip(self.log_len) {
+            if let xl_engine::StructOp::Shift(s) = op {
+                expected = expected.iter().filter_map(|v| v.shifted(*s, sheet)).collect();
+            }
+        }
+        expected != wb.layout(sheet).validations
     }
 
     /// Did a sheet's hyperlinks change other than by moving with lines?
@@ -246,7 +258,7 @@ impl Package {
             cell_extras.insert(id, with_input);
             sheets.push(PackageSheet { id, name: name.clone(), part, digest: sheet_digest(wb, id), structure: wb.structure_version(id) });
         }
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect() })
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.
@@ -293,6 +305,15 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         // a move by hand isn't patched yet.
         if now.object_places != s.digest.object_places && !structural {
             why.push(format!("a chart on “{}” was moved or resized", wb.sheet_name(s.id)));
+        }
+        if pkg.validations_changed(wb, s.id)
+            && let Some(xml) = pkg.part(&s.part)
+        {
+            // Rules xl couldn't read would be lost when the list is rewritten.
+            let in_file = String::from_utf8_lossy(&xml).matches("<dataValidation ").count();
+            if in_file > pkg.validations.get(&s.id).map_or(0, Vec::len) {
+                why.push(format!("validation on “{}” changed, and it has rules xl can't edit", wb.sheet_name(s.id)));
+            }
         }
         if pkg.notes_changed(wb, s.id)
             && let Some(problem) = notes_unpatchable(pkg, s)

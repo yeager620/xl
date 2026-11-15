@@ -1028,7 +1028,7 @@ impl Render for Spreadsheet {
             )
             .child(self.render_bottom_bar(cx)))
             .relative()
-            .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some() || self.filter_menu.is_some(), |d| {
+            .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some() || self.filter_menu.is_some() || self.dropdown.is_some(), |d| {
                 // Transparent backdrop: a click anywhere outside the open menu or palette closes it.
                 d.child(
                     deferred(div().id("menu-backdrop").absolute().top_0().left_0().size_full().occlude().on_mouse_down(
@@ -1038,6 +1038,7 @@ impl Render for Spreadsheet {
                             this.palette = None;
                             this.context = None;
                             this.filter_menu = None;
+                            this.dropdown = None;
                             cx.stop_propagation();
                             cx.notify();
                         }),
@@ -1051,7 +1052,8 @@ impl Render for Spreadsheet {
             .when_some(if self.menu.is_none() && self.palette.is_none() { self.render_completion(cx) } else { None }, |d, (pos, el)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
             })
-            .when_some(if self.menu.is_none() && self.context.is_none() { self.render_note_card(cx) } else { None }, |d, (pos, el)| {
+            .when_some(self.render_dropdown(cx), |d, (pos, el)| d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2)))
+            .when_some(if self.menu.is_none() && self.context.is_none() { self.render_note_card(cx).or_else(|| self.render_prompt()) } else { None }, |d, (pos, el)| {
                 d.child(deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(el)).with_priority(2))
             })
             .when_some(self.context, |d, (pos, kind)| {

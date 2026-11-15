@@ -358,3 +358,62 @@ fn hyperlinks_are_read_edited_and_saved() {
     let rels = text(&parts(&out2), "xl/worksheets/_rels/sheet1.xml.rels");
     assert_eq!(rels.matches("relationships/hyperlink\"").count(), 2, "{rels}");
 }
+
+#[test]
+fn data_validation_is_read_edited_and_saved() {
+    use std::sync::Arc;
+    use xl_engine::formula::parse_formula;
+    use xl_engine::validation::{ListSource, Validation, ValidationKind, ValidationOp, ValidationRule};
+    let src = tmp("dv.xlsx");
+    rich_file(&src); // B2:B4 whole number between 0 and 100
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let wb = &loaded.workbook;
+    let v = wb.validation_at(s, CellRef::parse("B3").unwrap()).expect("rule read");
+    assert!(matches!(&v.rule, ValidationRule::Compare { kind: ValidationKind::Whole, op: ValidationOp::Between, .. }));
+    assert!(wb.check_value(s, CellRef::parse("B3").unwrap(), &Value::Number(50.0)).is_ok());
+    assert!(wb.check_value(s, CellRef::parse("B3").unwrap(), &Value::Number(150.0)).is_err());
+    assert!(wb.check_value(s, CellRef::parse("B3").unwrap(), &Value::Number(2.5)).is_err(), "whole numbers only");
+    assert!(!loaded.unsupported.contains(&"data validation"));
+    // Add a dropdown list and a list from cells.
+    let e = |src: &str| Arc::new(parse_formula(src, loaded.workbook.sheets()).unwrap());
+    let from_cells = e("$A$2:$A$4");
+    {
+        let l = loaded.workbook.layout_mut(s).unwrap();
+        let mut colors = Validation::new(vec![xl_engine::Range::new(CellRef::parse("C2").unwrap(), CellRef::parse("C9").unwrap())], ValidationRule::List(ListSource::Items(vec!["Red".into(), "Green".into(), "Blue, light".into()])));
+        colors.prompt = Some(("Color".into(), "Pick one".into()));
+        colors.error = Some(("Oops".into(), "Not a color".into()));
+        l.validations.push(colors);
+        l.validations.push(Validation::new(vec![xl_engine::Range::single(CellRef::parse("D2").unwrap())], ValidationRule::List(ListSource::Cells(from_cells))));
+    }
+    let wb = &loaded.workbook;
+    assert_eq!(wb.list_choices(s, wb.validation_at(s, CellRef::parse("D2").unwrap()).unwrap()), ["Pen", "Pad", "Ink"]);
+    assert!(wb.check_value(s, CellRef::parse("C5").unwrap(), &Value::text("green")).is_ok());
+    assert!(wb.check_value(s, CellRef::parse("C5").unwrap(), &Value::text("Purple")).is_err());
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    for (name, pkg) in [("dv-patch.xlsx", loaded.package.as_ref()), ("dv-fresh.xlsx", None)] {
+        let out = tmp(name);
+        xl_io::save(&loaded.workbook, &out, s, pkg).unwrap();
+        let back = xl_io::open(&out).unwrap();
+        let vs = &back.workbook.layout(back.workbook.sheet_ids()[0]).validations;
+        assert_eq!(vs.len(), 3, "{name}");
+        let colors = vs.iter().find(|v| v.ranges[0].start == CellRef::parse("C2").unwrap()).unwrap();
+        assert_eq!(colors.rule, ValidationRule::List(ListSource::Items(vec!["Red".into(), "Green".into(), "Blue, light".into()])).clone().pipe_items(), "{name}");
+        assert_eq!(colors.prompt, Some(("Color".into(), "Pick one".into())), "{name}");
+    }
+}
+
+/// Excel can't store a comma inside a typed-in list item (it splits on commas).
+trait PipeItems {
+    fn pipe_items(self) -> Self;
+}
+
+impl PipeItems for xl_engine::validation::ValidationRule {
+    fn pipe_items(self) -> Self {
+        use xl_engine::validation::{ListSource, ValidationRule};
+        match self {
+            ValidationRule::List(ListSource::Items(items)) => ValidationRule::List(ListSource::Items(items.iter().flat_map(|i| i.split(',').map(|p| p.trim().to_string())).collect())),
+            other => other,
+        }
+    }
+}

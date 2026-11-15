@@ -23,6 +23,7 @@ mod templates;
 #[cfg(test)]
 mod tests;
 mod theme;
+mod validation_ui;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
