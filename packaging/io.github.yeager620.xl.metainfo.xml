@@ -37,15 +37,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>A budget with live totals for the selected cells</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-1.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-1.png</image>
     </screenshot>
     <screenshot>
       <caption>Writing a formula, with each reference highlighted in the grid</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-2.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-2.png</image>
     </screenshot>
     <screenshot>
       <caption>Every command a keystroke away in the command palette</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.2.0/packaging/screenshots/screenshot-3.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.3.0/packaging/screenshots/screenshot-3.png</image>
     </screenshot>
   </screenshots>
   <branding>
@@ -58,6 +58,20 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.3.0" date="2026-11-15">
+      <description>
+        <p>Lossless xlsx and a Home page:</p>
+        <ul>
+          <li>Saving an opened xlsx file changes only what you edited: themes, formatting, pictures, pivot tables, macros and everything else xl doesn't model are kept</li>
+          <li>Inserted and deleted rows, moved cells and renamed sheets are followed everywhere in the file</li>
+          <li>Charts, tables and sparklines you add, move or edit are written into the original file</li>
+          <li>Notes, hyperlinks and data validation with dropdown lists: read, shown, editable and saved</li>
+          <li>Pictures in xlsx files are shown</li>
+          <li>A Home page with recent files, new blank workbooks and templates</li>
+          <li>Workbooks using the 1904 date system open correctly</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-14">
       <description>
         <p>A big step toward Excel parity:</p>
