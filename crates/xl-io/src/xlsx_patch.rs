@@ -43,15 +43,15 @@ pub(crate) fn esc(s: &str) -> String {
 
 /// A direct child of an XML document's root element, as byte ranges.
 #[derive(Clone, Debug)]
-struct Child {
-    local: String,
-    start: usize,
-    end: usize,
+pub(crate) struct Child {
+    pub(crate) local: String,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 /// The root's start tag end, its end tag start, the namespace prefix it
 /// uses ("x:" or ""), and its direct children.
-fn children(full: &[u8]) -> Result<(usize, usize, String, Vec<Child>), String> {
+pub(crate) fn children(full: &[u8]) -> Result<(usize, usize, String, Vec<Child>), String> {
     // The reader skips a byte-order mark and counts positions after it.
     let bom = if full.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
     let (open, close, prefix, kids) = children_after_bom(&full[bom..])?;
@@ -126,7 +126,7 @@ fn children_after_bom(doc: &[u8]) -> Result<(usize, usize, String, Vec<Child>), 
 }
 
 /// Give every tag in a generated snippet the document's namespace prefix.
-fn prefixed(snippet: &str, prefix: &str) -> String {
+pub(crate) fn prefixed(snippet: &str, prefix: &str) -> String {
     if prefix.is_empty() {
         return snippet.to_string();
     }
@@ -174,7 +174,7 @@ fn prefixed_utf8(snippet: &str, prefix: &str) -> String {
 }
 
 /// Set (Some) or remove (None) attributes in a start tag's text.
-fn set_attrs(tag: &str, changes: &[(&str, Option<String>)]) -> String {
+pub(crate) fn set_attrs(tag: &str, changes: &[(&str, Option<String>)]) -> String {
     let mut t = tag.to_string();
     for (name, value) in changes {
         let pat = format!(" {name}=\"");
@@ -194,7 +194,7 @@ fn set_attrs(tag: &str, changes: &[(&str, Option<String>)]) -> String {
 }
 
 /// The start tag of an element snippet, and the rest.
-fn split_start_tag(el: &str) -> (&str, &str) {
+pub(crate) fn split_start_tag(el: &str) -> (&str, &str) {
     // The first '>' outside quotes ends the start tag.
     let mut q = false;
     for (i, c) in el.char_indices() {
@@ -208,7 +208,7 @@ fn split_start_tag(el: &str) -> (&str, &str) {
 }
 
 /// The XML between an element's start and end tags ("" if self-closing).
-fn inner_of(el: &str) -> &str {
+pub(crate) fn inner_of(el: &str) -> &str {
     let (tag, rest) = split_start_tag(el);
     if tag.ends_with("/>") {
         return "";
@@ -254,7 +254,10 @@ fn splice(doc: &[u8], order: &[&str], mut replace: HashMap<&str, Option<String>>
     }
     // Elements that weren't there go before the first later-ranked one.
     let rank = |n: &str| order.iter().position(|o| *o == n).unwrap_or(order.len());
-    for (name, rep) in replace.drain() {
+    // In schema order, so several new elements at one place line up right.
+    let mut adds: Vec<(&str, Option<String>)> = replace.drain().collect();
+    adds.sort_by_key(|(n, _)| rank(n));
+    for (name, rep) in adds {
         let Some(rep) = rep else { continue };
         if seen.contains(name) {
             continue;
@@ -265,14 +268,14 @@ fn splice(doc: &[u8], order: &[&str], mut replace: HashMap<&str, Option<String>>
     Ok(apply_edits(doc, edits))
 }
 
-const SHEET_ORDER: &[&str] = &[
+pub(crate) const SHEET_ORDER: &[&str] = &[
     "sheetPr", "dimension", "sheetViews", "sheetFormatPr", "cols", "sheetData", "sheetCalcPr", "sheetProtection", "protectedRanges", "scenarios", "autoFilter", "sortState",
     "dataConsolidate", "customSheetViews", "mergeCells", "phoneticPr", "conditionalFormatting", "dataValidations", "hyperlinks", "printOptions", "pageMargins", "pageSetup",
     "headerFooter", "rowBreaks", "colBreaks", "customProperties", "cellWatches", "ignoredErrors", "smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "picture",
     "oleObjects", "controls", "webPublishItems", "tableParts", "extLst",
 ];
 
-const WORKBOOK_ORDER: &[&str] = &[
+pub(crate) const WORKBOOK_ORDER: &[&str] = &[
     "fileVersion", "fileSharing", "workbookPr", "workbookProtection", "bookViews", "sheets", "functionGroups", "externalReferences", "definedNames", "calcPr", "oleSize",
     "customWorkbookViews", "pivotCaches", "smartTagPr", "smartTagTypes", "webPublishing", "fileRecoveryPr", "webPublishObjects", "extLst",
 ];
@@ -534,7 +537,7 @@ impl Styles {
     }
 }
 
-fn strip_prefix_tag(tag: &str) -> String {
+pub(crate) fn strip_prefix_tag(tag: &str) -> String {
     // "<x:fonts count=..>" → "<fonts count=..>"
     let after_lt = &tag[1..];
     let name_end = after_lt.find(|c: char| c.is_whitespace() || c == '>' || c == '/').unwrap_or(after_lt.len());
@@ -547,7 +550,7 @@ fn strip_prefix_tag(tag: &str) -> String {
 
 /// Like `splice`, but a replacement may carry a raw (already prefixed)
 /// middle section between \u{1} markers that must not be re-prefixed.
-fn splice_keeping_raw(doc: &[u8], order: &[&str], replace: HashMap<&str, Option<String>>) -> Result<Vec<u8>, String> {
+pub(crate) fn splice_keeping_raw(doc: &[u8], order: &[&str], replace: HashMap<&str, Option<String>>) -> Result<Vec<u8>, String> {
     let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let fix = |s: &str| -> String {
@@ -567,7 +570,9 @@ fn splice_keeping_raw(doc: &[u8], order: &[&str], replace: HashMap<&str, Option<
         }
     }
     let rank = |n: &str| order.iter().position(|o| *o == n).unwrap_or(order.len());
-    for (name, rep) in &replace {
+    let mut adds: Vec<(&&str, &Option<String>)> = replace.iter().collect();
+    adds.sort_by_key(|(n, _)| rank(n));
+    for (name, rep) in adds {
         let Some(rep) = rep else { continue };
         if seen.contains(*name) {
             continue;
@@ -2160,6 +2165,17 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     if names_changed || renamed || reordered || !new_sheets.is_empty() {
         let doc = part("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
         replaced.insert("xl/workbook.xml".into(), patch_workbook(&doc, wb, pkg, &new_sheets, names_changed)?);
+    }
+    // Page setup and print names that changed (or are set on new sheets).
+    for (name, bytes) in crate::xlsx_page::patch_pages(wb, pkg, &new_sheet_parts, &|n| {
+        replaced.get(n).cloned().or_else(|| added_parts.iter().find(|(p, _)| p == n).map(|(_, b)| b.clone())).or_else(|| part(n))
+    })? {
+        match added_parts.iter_mut().find(|(p, _)| *p == name) {
+            Some(slot) => slot.1 = bytes,
+            None => {
+                replaced.insert(name, bytes);
+            }
+        }
     }
     // Charts: kept ones re-anchored when moved, removed ones dropped, new
     // and edited ones written (on new sheets too).

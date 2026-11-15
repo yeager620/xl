@@ -522,6 +522,7 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         if layout.freeze != (0, 0) {
             ws.set_freeze_panes(layout.freeze.0, layout.freeze.1 as u16).map_err(err)?;
         }
+        crate::xlsx_page::write_fresh(ws, &layout.page).map_err(err)?;
         for cf in &layout.cond {
             write_cond(ws, wb, cf).map_err(err)?;
         }

@@ -9,6 +9,7 @@ pub mod eval;
 pub mod format;
 pub mod formula;
 pub mod input;
+pub mod page;
 pub mod picture;
 pub mod pivot;
 pub mod solver;

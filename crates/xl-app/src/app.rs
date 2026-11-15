@@ -194,6 +194,8 @@ pub enum Field {
     Form(u8),
     /// The note being written.
     Note,
+    /// A field of the page setup or print dialog (see print_ui.rs).
+    Page(u8),
 }
 
 /// What a right-click menu is about.
@@ -322,6 +324,8 @@ pub struct Spreadsheet {
     pub(crate) home: Option<crate::home::HomeState>,
     /// Recently opened and saved workbooks.
     pub(crate) recent: crate::recent::Recent,
+    /// Page setup, print preview and print dialogs, page-break overlay.
+    pub(crate) print: crate::print_ui::PrintState,
     _appearance: Subscription,
 }
 
@@ -395,6 +399,7 @@ impl Spreadsheet {
             autosaved_generation: None,
             home: None,
             recent: crate::recent::Recent::load(&crate::recent::default_dir()),
+            print: Default::default(),
             _appearance: appearance,
         };
         this.recovery_offer = crate::lifecycle::find_recovery(&this.recovery_dir);
@@ -1715,6 +1720,8 @@ impl Spreadsheet {
             self.key_cf_dialog(key)
         } else if self.form.is_some() {
             self.key_form(key)
+        } else if self.print_ui_open() {
+            self.key_print(key, ctrl, cx)
         } else if self.pending.is_some() {
             self.key_dialog(key, window, cx)
         } else if ctrl && (key == "q" || key == "w") {
@@ -1736,6 +1743,9 @@ impl Spreadsheet {
             self.key_palette(key, window, cx)
         } else if self.home.is_some() {
             self.key_home(key, ctrl, m.shift, window, cx)
+        } else if ctrl && !m.shift && !m.alt && key == "p" {
+            self.open_print(cx);
+            true
         } else if self.renaming.is_some() {
             self.key_renaming(key)
         } else if self.field == Some(Field::Note) {

@@ -591,6 +591,10 @@ impl Spreadsheet {
             }
         }
 
+        if self.print.break_preview {
+            ops.extend(self.page_break_ops(gx, gy, grid_clip));
+        }
+
         // Freeze lines.
         if fc > 0 && fw < gw {
             ops.push(Op::Quad(fill(b(gx + fw - 1.0, oy, 1.0, vh), t.ink_faint), all));
