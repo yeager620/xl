@@ -986,6 +986,7 @@ impl Render for Spreadsheet {
                 window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, this.clone()), cx);
                 let ops = this.read(cx).build_frame(bounds, window);
                 paint_ops(ops, window, cx);
+                crate::pictures::PictureCache::prune(&this, cx);
             },
         )
         .size_full();

@@ -16,6 +16,8 @@ pub enum Op {
     Quad(PaintQuad, Bounds<Pixels>),
     Path(gpui::Path, Hsla, Bounds<Pixels>),
     Text { line: Box<ShapedLine>, origin: Point<Pixels>, clip: Bounds<Pixels>, line_height: Pixels },
+    /// A picture, decoded (once, in the background) when first painted.
+    Image { image: std::sync::Arc<gpui::Image>, bounds: Bounds<Pixels>, clip: Bounds<Pixels> },
 }
 
 pub fn paint_ops(ops: Vec<Op>, window: &mut Window, cx: &mut App) {
@@ -26,6 +28,12 @@ pub fn paint_ops(ops: Vec<Op>, window: &mut Window, cx: &mut App) {
             Op::Text { line, origin, clip, line_height } => window.with_content_mask(Some(ContentMask { bounds: clip }), |w| {
                 line.paint(origin, line_height, TextAlign::Left, None, w, cx).ok();
             }),
+            Op::Image { image, bounds, clip } => {
+                // None until decoded; the view is redrawn when it is.
+                if let Some(data) = image.use_render_image(window, cx) {
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |w| w.paint_image(clip, bounds, Corners::default(), data, 0, false).ok());
+                }
+            }
         }
     }
 }
@@ -681,6 +689,9 @@ impl Spreadsheet {
         }
 
         ops.extend(self.outline_ops(window));
+
+        // Pictures float over the cells, under the charts.
+        ops.extend(self.picture_ops(&clip_of));
 
         // Charts float over the cells.
         for (i, chart) in layout.charts.iter().enumerate() {

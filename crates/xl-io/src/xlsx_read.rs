@@ -916,7 +916,7 @@ fn read_sheet(wb: &mut Workbook, bytes: &[u8], cx: &SheetCtx, cells: &mut usize,
 
 /// Package parts xl doesn't model, by path prefix.
 const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
-    ("xl/media/", "drawings and images"),
+    ("xl/ctrlProps/", "form controls"),
     ("xl/threadedComments/", "comments"),
     ("xl/pivotTables/", "pivot tables"),
     ("xl/pivotCache/", "pivot tables"),
@@ -1058,6 +1058,8 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         }
     };
     let names: Vec<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
+    // Images that no shown picture uses (in headers, backgrounds, shapes…).
+    let mut unshown_media: std::collections::HashSet<String> = names.iter().filter(|n| n.starts_with("xl/media/")).cloned().collect();
     for name in names {
         if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix)) {
             note(label);
@@ -1090,8 +1092,14 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         crate::xlsx_charts::read_sheet_notes(&mut zip, &part, &mut wb, *id)?;
         crate::xlsx_charts::read_sheet_links(&mut zip, &part, &mut wb, *id)?;
         let drawn = crate::xlsx_charts::read_sheet_charts(&mut zip, &part, &mut wb, *id)?;
+        for p in &drawn.pictures {
+            unshown_media.remove(&p.part);
+        }
         if drawn.other_drawings {
-            note("drawings and images");
+            note("shapes and text boxes");
+        }
+        if drawn.undrawable_pictures {
+            note("pictures in formats xl can't show");
         }
         if drawn.unsupported_charts {
             note("some kinds of charts");
@@ -1099,6 +1107,9 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         if drawn.charts > 0 && drawn.styled_charts {
             note("chart styling (the charts themselves are kept)");
         }
+    }
+    if !unshown_media.is_empty() {
+        note("images xl doesn't show");
     }
     if list.iter().any(|(_, rid)| rels.get(rid).is_none_or(|t| !t.contains("worksheets/"))) {
         note("chart sheets");
