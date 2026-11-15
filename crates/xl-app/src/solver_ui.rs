@@ -17,12 +17,14 @@ pub(crate) enum FormKind {
     Validation,
     /// A pivot table's field panel forms.
     Pivot(crate::pivot_ui::PivotForm),
+    /// Format the selected chart.
+    Chart,
 }
 
 pub(crate) struct FormDialog {
     pub kind: FormKind,
     /// (label, hint, text) per field.
-    pub fields: Vec<(&'static str, &'static str, String)>,
+    pub fields: Vec<(SharedString, SharedString, String)>,
     /// Solver: maximize, minimize or hit a value (the value is field 1).
     pub goal: SolverGoalKind,
     pub non_negative: bool,
@@ -68,12 +70,24 @@ impl Spreadsheet {
                 ("Constraints", "e.g. B5 <= 100; B2:B4 int; C9 = D9", String::new()),
             ],
             FormKind::Pivot(k) => return self.open_pivot_form(k),
+            FormKind::Chart => {
+                self.select_some_chart();
+                let Some(fields) = self.chart_form_fields() else {
+                    self.message = Some(("Select a chart to format first".into(), true));
+                    return;
+                };
+                self.context = None;
+                self.form = Some(FormDialog { kind, fields, goal: SolverGoalKind::Max, non_negative: true });
+                self.field = Some(Field::Form(0));
+                return;
+            }
         };
+        let fields = fields.into_iter().map(|(l, h, t)| (l.into(), h.into(), t)).collect();
         self.form = Some(FormDialog { kind, fields, goal: SolverGoalKind::Max, non_negative: true });
         self.field = Some(Field::Form(match kind {
             FormKind::GoalSeek => 1,
             FormKind::Solver => 2,
-            FormKind::Link => 0,
+            FormKind::Link | FormKind::Chart => 0,
             FormKind::Validation => 2,
             FormKind::Pivot(_) => 0,
         }));
@@ -152,6 +166,16 @@ impl Spreadsheet {
             self.run_pivot_form(k, &texts);
             return;
         }
+        if kind == FormKind::Chart {
+            match self.apply_chart_form(&texts) {
+                Ok(()) => {
+                    self.form = None;
+                    self.field = None;
+                }
+                Err(e) => self.message = Some((e, true)),
+            }
+            return;
+        }
         if kind == FormKind::Validation {
             match self.apply_validation_form(&text(0), &text(1), &text(2), &text(3), &text(4)) {
                 Ok(()) => {
@@ -164,7 +188,7 @@ impl Spreadsheet {
             return;
         }
         let result: Result<(Vec<Addr>, String), String> = match kind {
-            FormKind::Link | FormKind::Validation | FormKind::Pivot(_) => unreachable!("handled above"),
+            FormKind::Link | FormKind::Validation | FormKind::Pivot(_) | FormKind::Chart => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -335,8 +359,9 @@ impl Spreadsheet {
             FormKind::Link => "Link",
             FormKind::Validation => "Data validation",
             FormKind::Pivot(k) => Spreadsheet::pivot_form_title(k),
+            FormKind::Chart => "Format chart",
         };
-        let mut body = div().flex().flex_col().gap(px(8.));
+        let mut body = div().id("form-body").max_h(px(560.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
             if form.kind == FormKind::Solver && i == 1 && form.goal != SolverGoalKind::Value {
                 continue;
@@ -347,7 +372,7 @@ impl Spreadsheet {
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .child(div().text_size(px(13.)).text_color(t.ink_muted).child(*label))
+                    .child(div().text_size(px(13.)).text_color(t.ink_muted).child(label.clone()))
                     .child(
                         div()
                             .id(("form-field", i))
@@ -363,7 +388,7 @@ impl Spreadsheet {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_size(px(14.))
-                            .when(text.is_empty() && !focused, |d| d.text_color(t.ink_faint).child(*hint))
+                            .when(text.is_empty() && !focused, |d| d.text_color(t.ink_faint).child(hint.clone()))
                             .when(!text.is_empty(), |d| d.text_color(t.ink).child(SharedString::from(text.clone())))
                             .when(focused, |d| d.child(div().w(px(1.5)).h(px(16.)).bg(t.accent)))
                             .on_mouse_down(
@@ -449,7 +474,7 @@ impl Spreadsheet {
             .child(
                 div()
                     .id("form-dialog")
-                    .w(px(420.))
+                    .w(px(if form.kind == FormKind::Chart { 600. } else { 420. }))
                     .p(px(20.))
                     .flex()
                     .flex_col()
@@ -478,6 +503,7 @@ impl Spreadsheet {
                                 FormKind::Solver => "Solve",
                                 FormKind::Link | FormKind::Validation => "Save",
                                 FormKind::Pivot(_) => "OK",
+                                FormKind::Chart => "Apply",
                             }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();

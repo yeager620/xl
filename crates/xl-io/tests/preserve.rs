@@ -531,12 +531,13 @@ fn xl_chart(wb: &xl_engine::Workbook, kind: xl_engine::chart::ChartKind, values:
     xl_engine::chart::Chart {
         kind,
         title: Some("Made in xl".into()),
-        series: vec![xl_engine::chart::ChartSeries { name: Some(e("\"Qty\"")), categories: Some(e("Data!$A$2:$A$4")), values: e(values) }],
+        series: vec![xl_engine::chart::ChartSeries::new(Some(e("\"Qty\"")), Some(e("Data!$A$2:$A$4")), e(values))],
         anchor: CellRef::parse(anchor).unwrap(),
         offset: (0.0, 0.0),
         size: (360.0, 200.0),
         stacked: false,
         pivot: None,
+        options: Default::default(),
     }
 }
 

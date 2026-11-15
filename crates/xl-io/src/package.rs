@@ -102,7 +102,7 @@ impl Package {
     pub(crate) fn chart_plan(&self, wb: &Workbook, sheet: SheetId) -> Option<ChartPlan> {
         let now = &wb.layout(sheet).charts;
         let places = self.chart_places.get(&sheet)?;
-        let same = |a: &Chart, b: &Chart| (a.kind, &a.title, &a.series, a.stacked) == (b.kind, &b.title, &b.series, b.stacked);
+        let same = |a: &Chart, b: &Chart| a.same_look(b);
         let expected: Vec<Chart> = places
             .iter()
             .map(|(orig, _, _)| {
@@ -199,7 +199,7 @@ pub(crate) fn sheet_digest(wb: &Workbook, id: SheetId) -> SheetDigest {
         freeze: hash_of(&[&l.freeze]),
         tables: hash_of(&[&l.tables]),
         objects: {
-            let charts: Vec<_> = l.charts.iter().map(|c| (c.kind, c.title.clone(), c.stacked, c.series.len())).collect();
+            let charts: Vec<_> = l.charts.iter().map(|c| (c.kind, c.title.clone(), c.stacked, c.series.iter().map(|s| &s.format).collect::<Vec<_>>(), &c.options)).collect();
             hash_of(&[&charts])
         },
         object_places: hash_of(&[&l.charts]),

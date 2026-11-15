@@ -83,6 +83,20 @@ pub fn commands() -> Vec<Command> {
                 p.query = "Run script: ".into();
             }
         }),
+        cmd!("Insert doughnut chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Doughnut)),
+        cmd!("Insert bubble chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Bubble)),
+        cmd!("Insert radar chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Radar)),
+        cmd!("Insert histogram", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Histogram)),
+        cmd!("Insert waterfall chart", "", |s, w, cx| s.insert_chart(xl_engine::chart::ChartKind::Waterfall)),
+        cmd!("Format chart… (types, axes, colors, trendlines)", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::Chart)),
+        cmd!("Chart: last series as a line on a secondary axis (combo)", "", |s, w, cx| s.chart_combo_last_series()),
+        cmd!("Chart: add linear trendlines", "", |s, w, cx| s.chart_series_edit(|c, i| c.series[i].format.trendline = Some(xl_engine::chart::Trendline::new(xl_engine::chart::TrendKind::Linear)))),
+        cmd!("Chart: add error bars (5%)", "", |s, w, cx| s.chart_series_edit(|c, i| c.series[i].format.error_bars = Some(xl_engine::chart::ErrorBars { kind: xl_engine::chart::ErrorKind::Percent, value: 5.0, dir: xl_engine::chart::ErrorDir::Both }))),
+        cmd!("Chart: show data labels", "", |s, w, cx| s.chart_series_edit(|c, i| c.series[i].format.labels.value = true)),
+        cmd!("Chart: remove trendlines, error bars and labels", "", |s, w, cx| s.chart_series_edit(|c, i| {
+            let f = &mut c.series[i].format;
+            (f.trendline, f.error_bars, f.labels) = (None, None, Default::default());
+        })),
         cmd!("Goal Seek…", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::GoalSeek)),
         cmd!("Solver…", "", |s, w, cx| s.open_form(crate::solver_ui::FormKind::Solver)),
         cmd!("Insert pivot table", "", |s, w, cx| s.insert_pivot()),

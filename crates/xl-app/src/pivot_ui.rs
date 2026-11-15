@@ -191,7 +191,7 @@ impl Spreadsheet {
         let categories = reference(column(out.label_cols.saturating_sub(1)));
         out.series_cols
             .iter()
-            .filter_map(|&c| Some(ChartSeries { name: reference(Range::single(CellRef::new(a.row, a.col + c as u32))), categories: categories.clone(), values: reference(column(c))? }))
+            .filter_map(|&c| Some(ChartSeries::new(reference(Range::single(CellRef::new(a.row, a.col + c as u32))), categories.clone(), reference(column(c))?)))
             .collect()
     }
 
@@ -393,7 +393,7 @@ impl Spreadsheet {
             return;
         }
         let anchor = CellRef::new(extent.start.row, (extent.end.col + 2).min(xl_engine::MAX_COLS - 1));
-        let chart = Chart { kind, title: Some(p.name.clone()), series, anchor, offset: (0.0, 0.0), size: (480.0, 288.0), stacked: false, pivot: Some(p.name.clone()) };
+        let chart = Chart { title: Some(p.name.clone()), pivot: Some(p.name.clone()), ..Chart::new(kind, series, anchor, (480.0, 288.0)) };
         let mut index = 0;
         self.change_layout(None, |s| {
             if let Some(l) = s.wb.layout_mut(sheet) {
@@ -499,6 +499,7 @@ impl Spreadsheet {
             PivotForm::ValueFilter(_) => 2,
             PivotForm::Ranges(_) => 2,
         };
+        let fields = fields.into_iter().map(|(l, h, v)| (l.into(), h.into(), v)).collect();
         self.form = Some(FormDialog { kind: FormKind::Pivot(kind), fields, goal: SolverGoalKind::Max, non_negative: false });
         self.field = Some(Field::Form(focus));
     }

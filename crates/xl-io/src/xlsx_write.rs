@@ -327,54 +327,6 @@ fn write_picture(ws: &mut Worksheet, p: &xl_engine::picture::Picture) -> Result<
     Ok(())
 }
 
-fn write_chart(ws: &mut Worksheet, wb: &Workbook, home: xl_engine::SheetId, chart: &xl_engine::chart::Chart) -> Result<(), rust_xlsxwriter::XlsxError> {
-    use rust_xlsxwriter::{Chart as XChart, ChartType};
-    use xl_engine::chart::ChartKind;
-    let ty = match (chart.kind, chart.stacked) {
-        (ChartKind::Column, false) => ChartType::Column,
-        (ChartKind::Column, true) => ChartType::ColumnStacked,
-        (ChartKind::Bar, false) => ChartType::Bar,
-        (ChartKind::Bar, true) => ChartType::BarStacked,
-        (ChartKind::Line, _) => ChartType::Line,
-        (ChartKind::Area, false) => ChartType::Area,
-        (ChartKind::Area, true) => ChartType::AreaStacked,
-        (ChartKind::Pie, _) => ChartType::Pie,
-        (ChartKind::Scatter, _) => ChartType::Scatter,
-    };
-    let mut c = XChart::new(ty);
-    // A reference as (sheet name, rows, columns).
-    let span = |e: &xl_engine::formula::Expr| -> Option<(String, u32, u16, u32, u16)> {
-        let (sheet, r) = e.reference()?;
-        Some((wb.sheet_name(sheet.unwrap_or(home)).to_string(), r.start.row, r.start.col as u16, r.end.row, r.end.col as u16))
-    };
-    for s in &chart.series {
-        let Some(values) = span(&s.values) else { continue };
-        let ser = c.add_series();
-        ser.set_values((values.0.as_str(), values.1, values.2, values.3, values.4));
-        if let Some(cats) = s.categories.as_deref().and_then(span) {
-            ser.set_categories((cats.0.as_str(), cats.1, cats.2, cats.3, cats.4));
-        }
-        if let Some(e) = s.name.as_deref() {
-            match (span(e), e) {
-                (Some(n), _) => {
-                    ser.set_name((n.0.as_str(), n.1, n.2));
-                }
-                (None, xl_engine::formula::Expr::Text(t)) => {
-                    ser.set_name(t.as_ref());
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(title) = &chart.title {
-        c.title().set_name(title);
-    }
-    c.set_width(excel_px_x(chart.size.0));
-    c.set_height(excel_px_y(chart.size.1));
-    ws.insert_chart_with_offset(chart.anchor.row, chart.anchor.col as u16, &c, excel_px_x(chart.offset.0), excel_px_y(chart.offset.1))?;
-    Ok(())
-}
-
 /// Runs of consecutive lines at each outline level, outer levels first:
 /// grouping each run once per level reproduces the levels.
 fn outline_runs(levels: &std::collections::BTreeMap<u32, u8>) -> Vec<(u32, u32)> {
@@ -551,9 +503,6 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         for p in &layout.pictures {
             write_picture(ws, p).map_err(err)?;
         }
-        for chart in &layout.charts {
-            write_chart(ws, wb, id, chart).map_err(err)?;
-        }
         for sp in &layout.sparklines {
             use rust_xlsxwriter::{Sparkline, SparklineType};
             use xl_engine::chart::SparkKind;
@@ -633,10 +582,26 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
     // xl's pivot definitions ride along in a custom XML part.
     let bytes = crate::xlsx_pivots::add_to_new(bytes, wb)?;
     std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+    // Charts go in through the writer patched saves use, so both kinds of
+    // save write the same chart parts (combos, styling, chartex and all).
+    if wb.sheet_ids().iter().any(|&id| !wb.layout(id).charts.is_empty()) {
+        add_charts(wb, path)?;
+    }
     if !wb.scripts().is_empty() {
         crate::xlsx_scripts::add_to_file(path, wb.scripts())?;
     }
     Ok(())
+}
+
+/// Patch every chart into a file just written without them.
+fn add_charts(wb: &Workbook, path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut pkg = crate::package::Package::new(bytes, wb)?;
+    let ids: Vec<xl_engine::SheetId> = pkg.sheets.iter().map(|s| s.id).collect();
+    for id in ids {
+        pkg.chart_places.insert(id, Vec::new());
+    }
+    crate::xlsx_patch::write_patched(wb, &pkg, path)
 }
 
 #[cfg(test)]

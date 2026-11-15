@@ -74,9 +74,9 @@ fn book() -> (Workbook, SheetId, SheetId) {
     l.slicers.push(Slicer { caption: "Fruit (table)".into(), field: "Fruit".into(), source: SlicerSource::Table("Sales".into()), selected: Default::default(), anchor: CellRef::new(14, 8), offset: (0.0, 0.0), size: (180.0, 200.0) });
     l.timelines.push(Timeline { caption: "Date".into(), field: "Date".into(), pivots: vec!["PivotTable1".into()], level: DateLevel::Quarters, range: Some((45292.0, 45383.0)), anchor: CellRef::new(1, 12), offset: (0.0, 0.0), size: (360.0, 120.0) });
     let e = |s: &str| Arc::new(parse_formula(s, wb.sheets()).unwrap());
-    let series = vec![ChartSeries { name: Some(e("'Pivot 1'!$C$1")), categories: Some(e("'Pivot 1'!$B$2:$B$3")), values: e("'Pivot 1'!$C$2:$C$3") }];
-    let plain = Chart { kind: ChartKind::Line, title: Some("Not a pivot chart".into()), series: vec![ChartSeries { name: None, categories: None, values: e("'Sales & Co'!$C$2:$C$5") }], anchor: CellRef::new(20, 0), offset: (0.0, 0.0), size: (300.0, 200.0), stacked: false, pivot: None };
-    let chart = Chart { kind: ChartKind::Column, title: Some("By fruit".into()), series, anchor: CellRef::new(20, 6), offset: (0.0, 0.0), size: (300.0, 200.0), stacked: false, pivot: Some("PivotTable1".into()) };
+    let series = vec![ChartSeries::new(Some(e("'Pivot 1'!$C$1")), Some(e("'Pivot 1'!$B$2:$B$3")), e("'Pivot 1'!$C$2:$C$3"))];
+    let plain = Chart { title: Some("Not a pivot chart".into()), ..Chart::new(ChartKind::Line, vec![ChartSeries::new(None, None, e("'Sales & Co'!$C$2:$C$5"))], CellRef::new(20, 0), (300.0, 200.0)) };
+    let chart = Chart { title: Some("By fruit".into()), pivot: Some("PivotTable1".into()), ..Chart::new(ChartKind::Column, series, CellRef::new(20, 6), (300.0, 200.0)) };
     let l = wb.layout_mut(out).unwrap();
     l.charts.push(plain);
     l.charts.push(chart);

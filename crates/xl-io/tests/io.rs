@@ -449,8 +449,8 @@ fn charts_roundtrip_through_xlsx() {
         }
     }
     let e = |src: &str| Arc::new(parse_formula(src, wb.sheets()).unwrap());
-    let series = |col: &str| ChartSeries { name: Some(e(&format!("Sheet1!${col}$1"))), categories: Some(e("Sheet1!$A$2:$A$4")), values: e(&format!("Sheet1!${col}$2:${col}$4")) };
-    let chart = Chart { kind: ChartKind::Bar, title: Some("Q1".into()), series: vec![series("B"), series("C")], anchor: CellRef::new(1, 4), offset: (0.0, 0.0), size: (480.0, 286.0), stacked: true, pivot: None };
+    let series = |col: &str| ChartSeries::new(Some(e(&format!("Sheet1!${col}$1"))), Some(e("Sheet1!$A$2:$A$4")), e(&format!("Sheet1!${col}$2:${col}$4")));
+    let chart = Chart { kind: ChartKind::Bar, title: Some("Q1".into()), series: vec![series("B"), series("C")], anchor: CellRef::new(1, 4), offset: (0.0, 0.0), size: (480.0, 286.0), stacked: true, options: Default::default(), pivot: None };
     wb.layout_mut(s).unwrap().charts.push(chart.clone());
     let p = tmp("chart.xlsx");
     xl_io::save(&wb, &p, s, None).unwrap();

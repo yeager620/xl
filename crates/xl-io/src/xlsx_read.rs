@@ -163,7 +163,7 @@ pub(crate) fn read_shared_strings(zip: &mut Zip) -> Result<Vec<Arc<str>>, String
 }
 
 /// Theme colors in Excel's theme-index order (lt1, dk1, lt2, dk2, accent1..6, hlink, folHlink).
-fn read_theme(zip: &mut Zip) -> Result<Vec<Rgb>, String> {
+pub(crate) fn read_theme(zip: &mut Zip) -> Result<Vec<Rgb>, String> {
     // Office defaults, used when the file has no theme.
     let mut scheme: Vec<Rgb> = vec![0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47, 0x0563C1, 0x954F72];
     if let Some(bytes) = read_entry(zip, "xl/theme/theme1.xml")? {

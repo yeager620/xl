@@ -629,7 +629,7 @@ impl Spreadsheet {
             for (i, k) in xl_engine::chart::ChartKind::ALL.into_iter().enumerate() {
                 let on = current.is_some_and(|c| c.0 == k);
                 panel = panel.child(menu_item(&t, ("chart-kind", i), format!("{}{}", k.label(), if on { "  ✓" } else { "" }), "").on_click(cx.listener(move |this, _, _, cx| {
-                    this.update_chart(|c| c.kind = k);
+                    this.update_chart(|c| crate::charts::switch_kind(c, k));
                     cx.notify();
                 })));
             }
@@ -642,6 +642,14 @@ impl Spreadsheet {
                 })))
                 .child(menu_item(&t, "chart-title", "Edit title…", "Double-click").on_click(cx.listener(|this, _, _, cx| {
                     this.edit_chart_title();
+                    cx.notify();
+                })))
+                .child(menu_item(&t, "chart-format", "Format chart…", "").on_click(cx.listener(|this, _, _, cx| {
+                    this.open_form(crate::solver_ui::FormKind::Chart);
+                    cx.notify();
+                })))
+                .child(menu_item(&t, "chart-combo", "Last series as line on 2nd axis", "").on_click(cx.listener(|this, _, _, cx| {
+                    this.chart_combo_last_series();
                     cx.notify();
                 })))
                 .child(menu_separator(&t))
