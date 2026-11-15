@@ -191,3 +191,12 @@ Checklist (tick as each lands with tests):
 - [x] Sparklines (line/column/win-loss) + xlsx
 - [x] Goal Seek; Solver (min/max/target, constraints)
 - [x] Remove duplicates; text-to-columns; grouping/outline (+ collapse/expand) + xlsx
+
+## M6 — Lossless xlsx (started 2026-11-15)
+
+Save by patching the opened package instead of writing a new file.
+- [x] Phase 1: keep the package; fingerprint what xl modeled per sheet at load; copy unchanged parts verbatim (no-op save is byte-identical per part); regenerate only changed elements of changed sheets (sheetData, dimension, cols, mergeCells, conditionalFormatting, autoFilter, frozen pane) and splice them between the original's other elements; new sheets, renames, reorders and defined names patch workbook.xml (built-in names kept and remapped); drop calcChain when cells change; table parts follow row growth; recovery copies are patched copies; warn only when a save can't patch, with the reason.
+- [x] Phase 2: append-only styles (cells keep their original xf when they still look the same, so unmodeled formatting like rotation survives; new xfs/fonts/fills/borders/numFmts/dxfs appended) and shared strings (existing indexes reused, new strings appended or a part created).
+- [ ] Phase 3: rewrite cell addresses in preserved parts after inserted/deleted rows/columns and moved cells (validation, hyperlinks, comments/VML anchors, drawings, x14 sqref/f, print areas, chart and pivot-cache formulas) and after sheet renames; then those saves patch too.
+- [ ] Phase 4: model comments/notes, data validation, hyperlinks, images (read-only), rich text, full styles (gradients, rotation, indent, protection), sheet protection, page setup, array/dynamic-array formulas, 1904 dates; patch new charts/tables/sparklines into packages.
+- [ ] Phase 5: corpus in CI (examples/roundtrip.rs over Excel/LibreOffice/Sheets/openpyxl/POI files); headless LibreOffice open check.

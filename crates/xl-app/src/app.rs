@@ -263,8 +263,10 @@ pub struct Spreadsheet {
     pub(crate) field: Option<Field>,
     pub(crate) name_text: String,
     pub(crate) find: crate::find::FindState,
-    /// Parts of the opened xlsx that xl can't keep ("charts", …).
+    /// Parts of the opened xlsx that xl doesn't model ("comments", …).
     pub(crate) unsupported: Vec<&'static str>,
+    /// The opened xlsx, so saves patch it and keep those parts.
+    pub(crate) package: Option<xl_io::Package>,
     /// Asking whether to overwrite a file and drop those parts.
     pub(crate) lossy_prompt: bool,
     /// Sheet whose delete button was clicked once (click again to confirm).
@@ -349,6 +351,7 @@ impl Spreadsheet {
             name_text: String::new(),
             find: Default::default(),
             unsupported: Vec::new(),
+            package: None,
             lossy_prompt: false,
             confirm_delete: None,
             menu: None,
@@ -1585,6 +1588,7 @@ impl Spreadsheet {
                 self.menu = None;
                 self.dirty = false;
                 self.unsupported = loaded.unsupported;
+                self.package = loaded.package;
                 self.message = Some(match loaded.warnings.first() {
                     Some(w) => (format!("Opened {name} with {} warning(s): {w}", loaded.warnings.len()), true),
                     None => (format!("Opened {name} ({} cells)", loaded.cells), false),
@@ -1602,17 +1606,30 @@ impl Spreadsheet {
         }
     }
 
-    /// Saving over the opened file would drop parts xl can't keep.
+    /// Saving over the opened file would drop parts xl can't keep: it has
+    /// some, and this save can't patch the original (see [`Self::rewrite_reasons`]).
     pub(crate) fn would_lose_parts(&self) -> bool {
-        !self.unsupported.is_empty() && self.path.as_deref().and_then(xl_io::FileKind::of) == Some(xl_io::FileKind::Xlsx)
+        !self.unsupported.is_empty() && self.path.as_deref().and_then(xl_io::FileKind::of) == Some(xl_io::FileKind::Xlsx) && !self.rewrite_reasons().is_empty()
+    }
+
+    /// Why saving must write a new file instead of patching the original.
+    pub(crate) fn rewrite_reasons(&self) -> Vec<String> {
+        match &self.package {
+            Some(pkg) => match xl_io::save_plan(&self.wb, pkg) {
+                xl_io::SavePlan::Patch => Vec::new(),
+                xl_io::SavePlan::Rewrite(why) => why,
+            },
+            None => vec!["the original file couldn't be read for saving back into".into()],
+        }
     }
 
     pub(crate) fn save_to(&mut self, path: PathBuf) {
         if self.edit.is_some() && !self.commit_edit() {
             return;
         }
-        match xl_io::save(&self.wb, &path, self.cur) {
-            Ok(()) => {
+        match xl_io::save(&self.wb, &path, self.cur, self.package.as_ref()) {
+            Ok(package) => {
+                self.package = package;
                 let csv = xl_io::FileKind::of(&path) == Some(xl_io::FileKind::Csv);
                 self.dirty = false;
                 self.clear_recovery();

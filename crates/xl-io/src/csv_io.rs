@@ -40,7 +40,7 @@ pub fn read_csv(path: &Path) -> Result<Loaded, String> {
     }
     let cells = items.len();
     let recalc = wb.set_inputs(items);
-    Ok(Loaded { workbook: wb, cells, warnings, recalc, unsupported: Vec::new() })
+    Ok(Loaded { workbook: wb, cells, warnings, recalc, unsupported: Vec::new(), package: None })
 }
 
 /// CSV holds what you see: formatted values, not formulas.

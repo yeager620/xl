@@ -82,7 +82,7 @@ pub(crate) struct DrawingNotes {
 const STYLING: &[&str] = &["<c:spPr", "<c:txPr", "<c:dLbls", "<c:trendline", "<c:errBars", "<c:dTable", "<c:dPt", "<c:style ", "<a:solidFill"];
 
 /// `target` relative to the folder of `part` (or absolute with a leading /).
-fn resolve(part: &str, target: &str) -> String {
+pub(crate) fn resolve(part: &str, target: &str) -> String {
     if let Some(abs) = target.strip_prefix('/') {
         return abs.to_string();
     }
@@ -100,7 +100,7 @@ fn resolve(part: &str, target: &str) -> String {
     segs.join("/")
 }
 
-fn rels_of(part: &str) -> String {
+pub(crate) fn rels_of(part: &str) -> String {
     match part.rsplit_once('/') {
         Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
         None => format!("_rels/{part}.rels"),

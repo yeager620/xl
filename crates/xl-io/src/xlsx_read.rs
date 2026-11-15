@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ use zip::ZipArchive;
 
 use crate::{Loaded, from_excel_height, from_excel_width};
 
-pub(crate) type Zip = ZipArchive<BufReader<File>>;
+pub(crate) type Zip = ZipArchive<Cursor<Vec<u8>>>;
 
 pub(crate) fn local(name: &str) -> &str {
     match name.rfind(':') {
@@ -123,7 +123,7 @@ fn read_sheet_list(zip: &mut Zip) -> Result<WorkbookXml, String> {
     Ok((out, names))
 }
 
-fn read_shared_strings(zip: &mut Zip) -> Result<Vec<Arc<str>>, String> {
+pub(crate) fn read_shared_strings(zip: &mut Zip) -> Result<Vec<Arc<str>>, String> {
     let mut out = Vec::new();
     let Some(bytes) = read_entry(zip, "xl/sharedStrings.xml")? else { return Ok(out) };
     let mut r = xml(&bytes);
@@ -232,14 +232,14 @@ fn flag(e: &BytesStart) -> bool {
 /// What one cellXfs entry contributes to a cell.
 #[derive(Clone, Default)]
 pub(crate) struct Xf {
-    num_fmt: Option<String>,
-    style: Style,
+    pub(crate) num_fmt: Option<String>,
+    pub(crate) style: Style,
 }
 
 /// Cell formats, conditional-format styles (dxfs) and theme colors.
 type StylesXml = (Vec<Xf>, Vec<CfStyle>, Vec<Rgb>);
 
-fn read_styles(zip: &mut Zip) -> Result<StylesXml, String> {
+pub(crate) fn read_styles(zip: &mut Zip) -> Result<StylesXml, String> {
     let theme = read_theme(zip)?;
     let mut out = Vec::new();
     let mut dxfs: Vec<CfStyle> = Vec::new();
@@ -899,7 +899,7 @@ fn parse_range(s: &str) -> Option<Range> {
     Some(Range::new(CellRef::parse(a)?, CellRef::parse(b)?))
 }
 
-fn sheet_path(target: &str) -> String {
+pub(crate) fn sheet_path(target: &str) -> String {
     match target.strip_prefix('/') {
         Some(abs) => abs.to_string(),
         None => format!("xl/{}", target.trim_start_matches("./")),
@@ -907,8 +907,9 @@ fn sheet_path(target: &str) -> String {
 }
 
 pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| format!("not an xlsx file: {e}"))?;
+    let mut bytes = Vec::new();
+    File::open(path).and_then(|mut f| f.read_to_end(&mut bytes)).map_err(|e| e.to_string())?;
+    let mut zip = ZipArchive::new(Cursor::new(bytes.clone())).map_err(|e| format!("not an xlsx file: {e}"))?;
     let rels = read_rels(&mut zip, "xl/_rels/workbook.xml.rels")?;
     let (list, defined_names) = read_sheet_list(&mut zip)?;
     let shared = read_shared_strings(&mut zip)?;
@@ -993,5 +994,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     // Formulas using tables get their dependencies once the tables are known.
     let has_tables = wb.sheet_ids().iter().any(|&s| !wb.layout(s).tables.is_empty());
     let stats = if has_tables { wb.rebuild() } else { wb.recalc_all() };
-    Ok(Loaded { workbook: wb, cells, warnings, recalc: stats, unsupported })
+    // Keep the original to save back into (if it can be indexed).
+    let package = crate::package::Package::new(bytes, &wb).ok();
+    Ok(Loaded { workbook: wb, cells, warnings, recalc: stats, unsupported, package })
 }

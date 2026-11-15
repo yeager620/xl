@@ -45,7 +45,7 @@ fn xlsx_roundtrip_preserves_everything_we_model() {
     wb.set_col_width(data, 0, Some(250.0));
 
     let path = tmp("roundtrip.xlsx");
-    xl_io::save(&wb, &path, s1).unwrap();
+    xl_io::save(&wb, &path, s1, None).unwrap();
     let loaded = xl_io::open(&path).unwrap();
     let back = loaded.workbook;
     assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
@@ -186,7 +186,7 @@ fn csv_roundtrip_detects_types() {
     assert_eq!(wb.display(a(s, "C3")).text, "1,204");
     assert_eq!(*wb.value(a(s, "A3")), Value::text("Lovelace, A"));
     let out = tmp("people_out.csv");
-    xl_io::save(wb, &out, s).unwrap();
+    xl_io::save(wb, &out, s, None).unwrap();
     let text = std::fs::read_to_string(&out).unwrap();
     assert_eq!(text, "Name,Joined,Score,Rate\nAda,2026-01-05,91,12.50%\n\"Lovelace, A\",1/2/2025,\"1,204\",3%\n");
 }
@@ -213,7 +213,7 @@ fn styles_roundtrip_through_xlsx() {
     wb.set_style(a(s, "A2"), &note);
     wb.set_style(a(s, "C3"), &boxed); // styled but empty
     let path = tmp("styles.xlsx");
-    xl_io::save(&wb, &path, s).unwrap();
+    xl_io::save(&wb, &path, s, None).unwrap();
     let back = xl_io::open(&path).unwrap().workbook;
     let bs = back.sheet_ids()[0];
     assert_eq!(back.style(a(bs, "A1")), &header);
@@ -299,7 +299,7 @@ fn defined_names_roundtrip() {
     wb.set_input(a(s, "B1"), "4").unwrap();
     wb.set_input(a(s, "C1"), "=SUM(Local)*Rate").unwrap();
     let path = tmp("names.xlsx");
-    xl_io::save(&wb, &path, s).unwrap();
+    xl_io::save(&wb, &path, s, None).unwrap();
     let back = xl_io::open(&path).unwrap();
     assert!(back.warnings.is_empty(), "{:?}", back.warnings);
     let wb2 = back.workbook;
@@ -326,7 +326,7 @@ fn layout_roundtrips_through_xlsx() {
         l.freeze = (1, 2);
     }
     let p = tmp("layout.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap().workbook;
     let s2 = back.sheet_ids()[0];
     let l = back.layout(s2);
@@ -368,7 +368,7 @@ fn reports_parts_it_cannot_keep() {
     assert_eq!(*loaded.workbook.value(a(loaded.workbook.sheet_ids()[0], "A2")), Value::Number(2.0));
     // A file xl wrote itself has nothing to lose.
     let p2 = tmp("plain.xlsx");
-    xl_io::save(&loaded.workbook, &p2, loaded.workbook.sheet_ids()[0]).unwrap();
+    xl_io::save(&loaded.workbook, &p2, loaded.workbook.sheet_ids()[0], None).unwrap();
     assert!(xl_io::open(&p2).unwrap().unsupported.is_empty());
 }
 
@@ -391,7 +391,7 @@ fn autofilter_roundtrips_through_xlsx() {
     wb.reapply_filter(s);
     assert_eq!(wb.layout(s).filtered_rows.iter().copied().collect::<Vec<_>>(), vec![2], "only Pear is hidden");
     let p = tmp("filter.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap();
     assert!(!back.unsupported.contains(&"advanced filters"));
     let l = back.workbook.layout(back.workbook.sheet_ids()[0]);
@@ -426,7 +426,7 @@ fn conditional_formats_roundtrip_through_xlsx() {
     ];
     wb.layout_mut(s).unwrap().cond = rules.clone();
     let p = tmp("cond.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap();
     assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
     let got = &back.workbook.layout(back.workbook.sheet_ids()[0]).cond;
@@ -454,7 +454,7 @@ fn charts_roundtrip_through_xlsx() {
     let chart = Chart { kind: ChartKind::Bar, title: Some("Q1".into()), series: vec![series("B"), series("C")], anchor: CellRef::new(1, 4), offset: (0.0, 0.0), size: (480.0, 286.0), stacked: true };
     wb.layout_mut(s).unwrap().charts.push(chart.clone());
     let p = tmp("chart.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap();
     let got = &back.workbook.layout(back.workbook.sheet_ids()[0]).charts;
     assert_eq!(got.len(), 1);
@@ -485,7 +485,7 @@ fn outline_levels_roundtrip_through_xlsx() {
         l.col_levels.insert(5, 1);
     }
     let p = tmp("outline.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap().workbook;
     let l = back.layout(back.sheet_ids()[0]);
     assert_eq!(l.row_levels, wb.layout(s).row_levels);
@@ -511,7 +511,7 @@ fn sparklines_roundtrip_through_xlsx() {
     ];
     wb.layout_mut(s).unwrap().sparklines = lines.clone();
     let p = tmp("spark.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap();
     assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
     let mut got = back.workbook.layout(back.workbook.sheet_ids()[0]).sparklines.clone();
@@ -545,7 +545,7 @@ fn tables_roundtrip_through_xlsx() {
     ]);
     assert_eq!(*wb.value(Addr::new(s, CellRef::new(0, 5))), Value::Number(27.0));
     let p = tmp("table.xlsx");
-    xl_io::save(&wb, &p, s).unwrap();
+    xl_io::save(&wb, &p, s, None).unwrap();
     let back = xl_io::open(&p).unwrap();
     assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
     let b = &back.workbook;

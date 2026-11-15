@@ -111,7 +111,9 @@ impl Spreadsheet {
         if std::fs::create_dir_all(&self.recovery_dir).is_err() {
             return;
         }
-        if xl_io::save(&self.wb, &file, self.cur).is_ok() {
+        // Patch a copy of the original when there is one, so a restored
+        // recovery file still has everything the original had.
+        if xl_io::save(&self.wb, &file, self.cur, self.package.as_ref()).is_ok() {
             let original = self.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             std::fs::write(file.with_extension("path"), original).ok();
             self.autosaved_generation = Some(self.edit_generation);
@@ -376,8 +378,11 @@ impl Spreadsheet {
                     .border_color(t.divider)
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(SharedString::from(format!("“{}” has {parts} that xl can’t keep", self.file_name()))))
-                    .child(div().text_size(px(14.)).text_color(t.ink_muted).child("Saving over it would remove them. Save a copy to keep the original file intact."))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(SharedString::from(format!("“{}” has {parts}", self.file_name()))))
+                    .child(div().text_size(px(14.)).text_color(t.ink_muted).child(SharedString::from(format!(
+                        "xl normally saves around them, but can't this time: {}. Saving over the file would remove them — save a copy to keep the original intact.",
+                        self.rewrite_reasons().join("; ")
+                    ))))
                     .child(
                         div()
                             .mt(px(12.))

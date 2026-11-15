@@ -1,9 +1,13 @@
 //! xl-io: reading and writing workbooks (xlsx, csv).
 
 mod csv_io;
+mod package;
 mod xlsx_charts;
+mod xlsx_patch;
 mod xlsx_read;
 mod xlsx_write;
+
+pub use package::{Package, SavePlan, save_plan};
 
 use std::path::Path;
 
@@ -23,6 +27,9 @@ pub struct Loaded {
     /// Parts of the file xl can't keep (e.g. "charts", "comments"); saving
     /// over the file would drop them.
     pub unsupported: Vec<&'static str>,
+    /// The original file, for saving back into without losing what xl
+    /// doesn't model (xlsx only).
+    pub package: Option<Package>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -50,10 +57,21 @@ pub fn open(path: &Path) -> Result<Loaded, String> {
 }
 
 /// Save the workbook. CSV files hold one sheet: `sheet` picks which.
-pub fn save(wb: &Workbook, path: &Path, sheet: SheetId) -> Result<(), String> {
+///
+/// With the package of the xlsx the workbook came from, xlsx saves patch
+/// that package (when [`save_plan`] allows), keeping everything xl doesn't
+/// model. Returns the package of the file just written, to save into next.
+pub fn save(wb: &Workbook, path: &Path, sheet: SheetId, package: Option<&Package>) -> Result<Option<Package>, String> {
     match FileKind::of(path) {
-        Some(FileKind::Xlsx) => xlsx_write::write_xlsx(wb, path),
-        Some(FileKind::Csv) => csv_io::write_csv(wb, sheet, path),
+        Some(FileKind::Xlsx) => {
+            match package {
+                Some(pkg) if save_plan(wb, pkg) == SavePlan::Patch => xlsx_patch::write_patched(wb, pkg, path)?,
+                _ => xlsx_write::write_xlsx(wb, path)?,
+            }
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok(Package::new(bytes, wb).ok())
+        }
+        Some(FileKind::Csv) => csv_io::write_csv(wb, sheet, path).map(|_| None),
         None => Err("Unsupported file type (xl saves .xlsx and .csv)".into()),
     }
 }

@@ -571,6 +571,9 @@ pub struct Workbook {
     formats: FormatTable,
     styles: StyleTable,
     names: Names,
+    /// Per sheet, how many structural edits (inserted/deleted lines, moved
+    /// cells) it has had: tells savers when cell addresses have shifted.
+    structure: FxHashMap<SheetId, u64>,
 }
 
 enum Parsed {
@@ -595,6 +598,11 @@ impl Workbook {
 
     pub fn sheets(&self) -> &Sheets {
         &self.sheets
+    }
+
+    /// Structural edits so far on a sheet (see `structure`).
+    pub fn structure_version(&self, sheet: SheetId) -> u64 {
+        self.structure.get(&sheet).copied().unwrap_or(0)
     }
 
     pub fn sheet_ids(&self) -> &[SheetId] {
@@ -973,6 +981,7 @@ impl Workbook {
         let remap = |c: CellRef| -> Option<CellRef> {
             if rows { Some(CellRef::new(op.map_pos(c.row)?, c.col)) } else { Some(CellRef::new(c.row, op.map_pos(c.col)?)) }
         };
+        *self.structure.entry(target).or_default() += 1;
         let Some(sd) = self.sheets.get_mut(target) else { return RecalcStats::default() };
         sd.store.apply_shift(op);
         sd.formats = sd.formats.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
@@ -1010,6 +1019,8 @@ impl Workbook {
     /// that every reference to it — from any sheet, from names, from inside
     /// the block — follows. References to cells it overwrites become #REF!.
     pub fn move_range(&mut self, mv: Move) -> RecalcStats {
+        *self.structure.entry(mv.from_sheet).or_default() += 1;
+        *self.structure.entry(mv.to_sheet).or_default() += 1;
         let to = mv.to_range();
         // What's moving, captured before anything is rewritten.
         let mut moving: Vec<(CellRef, Option<Cell>, Option<String>, Style)> = Vec::new();
