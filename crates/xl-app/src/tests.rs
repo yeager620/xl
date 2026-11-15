@@ -1785,3 +1785,65 @@ fn pictures_are_drawn_and_follow_inserted_rows(cx: &mut TestAppContext) {
     cx.run_until_parked();
     view.read_with(cx, |s, _| assert_eq!(s.picture_cache.len(), 0));
 }
+
+/// Texts the grid paints (one frame at a typical window size).
+fn painted_texts(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext) -> Vec<String> {
+    let bounds = gpui::Bounds::new(gpui::point(gpui::px(0.), gpui::px(0.)), gpui::size(gpui::px(1200.), gpui::px(800.)));
+    view.update_in(cx, |s, window, _| {
+        s.build_frame(bounds, window)
+            .into_iter()
+            .filter_map(|op| match op {
+                crate::paint::Op::Text { line, .. } => Some(line.text.to_string()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn spilling_formula_shows_across_cells_and_blocks(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    go(&view, cx, "F2");
+    cx.simulate_input("=SEQUENCE(3)*7");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(shown(&view, cx, "F2"), "7");
+    assert_eq!(shown(&view, cx, "F3"), "14");
+    assert_eq!(shown(&view, cx, "F4"), "21");
+    let texts = painted_texts(&view, cx);
+    for t in ["7", "14", "21"] {
+        assert!(texts.iter().any(|x| x == t), "{t} not painted: {texts:?}");
+    }
+    // A spilled cell isn't an input: the formula lives in the anchor.
+    assert_eq!(input(&view, cx, "F4"), "");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.spill_anchor(s.at(CellRef::parse("F4").unwrap())), Some(CellRef::parse("F2").unwrap())));
+    // Typing into the spill range blocks it.
+    go(&view, cx, "F3");
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(shown(&view, cx, "F2"), "#SPILL!");
+    assert_eq!(shown(&view, cx, "F4"), "");
+    assert!(painted_texts(&view, cx).iter().any(|x| x == "#SPILL!"));
+    // Clearing it lets the array spill again; undo blocks it again.
+    go(&view, cx, "F3");
+    cx.simulate_keystrokes("delete");
+    assert_eq!(shown(&view, cx, "F2"), "7");
+    assert_eq!(shown(&view, cx, "F4"), "21");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(shown(&view, cx, "F2"), "#SPILL!");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(shown(&view, cx, "F3"), "14");
+    // Copying the whole spill pastes the formula, which spills again; a
+    // spilled value copied alone pastes as a value.
+    go(&view, cx, "F2");
+    cx.simulate_keystrokes("shift-down shift-down ctrl-c");
+    go(&view, cx, "H2");
+    cx.simulate_keystrokes("ctrl-v");
+    assert_eq!(input(&view, cx, "H2"), "=SEQUENCE(3)*7");
+    assert_eq!(input(&view, cx, "H4"), "");
+    assert_eq!(shown(&view, cx, "H4"), "21");
+    go(&view, cx, "F4");
+    cx.simulate_keystrokes("ctrl-c");
+    go(&view, cx, "J1");
+    cx.simulate_keystrokes("ctrl-v");
+    assert_eq!(input(&view, cx, "J1"), "21");
+}

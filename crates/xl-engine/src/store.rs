@@ -15,6 +15,9 @@ pub enum CellInput {
     /// A formula from a file that we can't evaluate (unsupported syntax or
     /// functions). Kept verbatim with the value cached in the file.
     Opaque(Arc<str>),
+    /// A value spilled by the dynamic-array formula anchored at this cell
+    /// (on the same sheet). Not an input: it's rewritten on recalc.
+    Spill(CellRef),
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +29,11 @@ pub struct Cell {
 impl Cell {
     pub fn is_formula(&self) -> bool {
         matches!(self.input, CellInput::Formula(_))
+    }
+
+    /// A value spilled by a dynamic-array formula elsewhere (not an input).
+    pub fn is_spill(&self) -> bool {
+        matches!(self.input, CellInput::Spill(_))
     }
 }
 

@@ -636,11 +636,15 @@ struct SheetCtx<'a> {
     col_styles: HashMap<u32, String>,
     validations_changed: bool,
     sparklines_changed: bool,
+    /// The `cm` index of the dynamic-array cell metadata (XLDAPR).
+    dyn_cm: u32,
+    /// Whether a dynamic-array formula was written (metadata.xml needs XLDAPR).
+    wrote_dynamic: bool,
 }
 
 fn formula_text(wb: &Workbook, sheet: SheetId, cell: CellRef) -> String {
     let a = Addr::new(sheet, cell);
-    let mut src = prefix_future_functions(&wb.formula_source(a).unwrap_or_default());
+    let mut src = prefix_future_functions(&wb.formula_source_xlsx(a).unwrap_or_default());
     if src.contains("[@") {
         src = expand_this_row(&src, wb.table_at(sheet, cell).map_or("", |t| t.name.as_str()));
     }
@@ -705,13 +709,24 @@ impl SheetCtx<'_> {
         let r = cell.to_string();
         // Attributes xl doesn't model come back when the cell is unchanged.
         let extra = self.extras.and_then(|m| m.get(&cell)).filter(|(_, input)| *input == wb.input_text(a)).map(|(e, _)| e);
+        // A dynamic-array anchor: `<f t="array" ref=…>` with the range it
+        // spills into now, and cell metadata marking it dynamic (`cm`).
+        let dynamic = wb.cell(a).is_some_and(|c| c.is_formula()) && wb.is_dynamic_formula(a);
         let mut s_attr = s_attr;
         if let Some(e) = extra {
             for (k, v) in &e.c_attrs {
-                s_attr.push_str(&format!(" {k}=\"{}\"", esc(v)));
+                if !(dynamic && k == "cm") {
+                    s_attr.push_str(&format!(" {k}=\"{}\"", esc(v)));
+                }
             }
         }
-        let f_attrs: String = extra.map_or(String::new(), |e| e.f_attrs.iter().map(|(k, v)| format!(" {k}=\"{}\"", esc(v))).collect());
+        let f_attrs: String = if dynamic {
+            self.wrote_dynamic = true;
+            s_attr.push_str(&format!(" cm=\"{}\"", self.dyn_cm));
+            format!(" t=\"array\" ref=\"{}\"", range_ref(wb.spill_range(a).unwrap_or(Range::single(cell))))
+        } else {
+            extra.map_or(String::new(), |e| e.f_attrs.iter().map(|(k, v)| format!(" {k}=\"{}\"", esc(v))).collect())
+        };
         let Some(c) = wb.cell(a) else { return format!("<c r=\"{r}\"{s_attr}/>") };
         // A 1904-based file gets its dates back in its own system.
         let to_file = |n: f64| if wb.date1904() && n >= 1.0 + xl_engine::DATE1904_OFFSET && wb.format(a).is_some_and(|f| f.has_date()) { n - xl_engine::DATE1904_OFFSET } else { n };
@@ -726,7 +741,8 @@ impl SheetCtx<'_> {
                     Value::Empty => format!("<c r=\"{r}\"{s_attr}>{f}</c>"),
                 }
             }
-            CellInput::Value(v) => match v {
+            // Spilled values are saved as plain values.
+            CellInput::Value(_) | CellInput::Spill(_) => match &c.value {
                 Value::Number(n) => format!("<c r=\"{r}\"{s_attr}><v>{}</v></c>", precise(to_file(*n))),
                 Value::Text(t) => format!("<c r=\"{r}\"{s_attr} t=\"s\"><v>{}</v></c>", self.strings.index(t)),
                 Value::Bool(b) => format!("<c r=\"{r}\"{s_attr} t=\"b\"><v>{}</v></c>", *b as u8),
@@ -1416,7 +1432,109 @@ const CT_WORKSHEET: &str = "application/vnd.openxmlformats-officedocument.spread
 const CT_SST: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
 
 /// Add and remove relationships in a .rels part (by target).
+const REL_METADATA: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata";
+const CT_METADATA: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml";
+
+const XLDAPR_TYPE: &str = "<metadataType name=\"XLDAPR\" minSupportedVersion=\"120000\" copy=\"1\" pasteAll=\"1\" pasteValues=\"1\" merge=\"1\" splitFirst=\"1\" rowColShift=\"1\" clearFormats=\"1\" clearComments=\"1\" assign=\"1\" coerce=\"1\" cellMeta=\"1\"/>";
+const XLDAPR_FUTURE: &str = "<futureMetadata name=\"XLDAPR\" count=\"1\"><bk><extLst><ext uri=\"{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}\"><xda:dynamicArrayProperties fDynamic=\"1\" fCollapsed=\"0\"/></ext></extLst></bk></futureMetadata>";
+const XDA_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray";
+
+/// The dynamic-array cell metadata (Excel's XLDAPR) of a package: the `cm`
+/// index that marks a formula as a dynamic array, and the metadata part to
+/// write if it doesn't define one yet.
+pub(crate) struct DynamicMetadata {
+    pub cm: u32,
+    pub existed: bool,
+    /// metadata.xml with XLDAPR added (None when it already has it).
+    pub patched: Option<String>,
+}
+
+impl DynamicMetadata {
+    pub(crate) fn plan(doc: Option<&[u8]>) -> DynamicMetadata {
+        let Some(doc) = doc else {
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<metadata xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:xda=\"{XDA_NS}\"><metadataTypes count=\"1\">{XLDAPR_TYPE}</metadataTypes>{XLDAPR_FUTURE}<cellMetadata count=\"1\"><bk><rc t=\"1\" v=\"0\"/></bk></cellMetadata></metadata>"
+            );
+            return DynamicMetadata { cm: 1, existed: false, patched: Some(xml) };
+        };
+        // Find XLDAPR's type index and the cell-metadata block that uses it.
+        let mut r = crate::xlsx_read::xml(doc);
+        let mut buf = Vec::new();
+        let (mut types, mut xldapr, mut bks, mut in_cell_meta) = (0u32, None::<u32>, 0u32, false);
+        loop {
+            match r.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match crate::xlsx_read::local(e.name().as_ref()) {
+                    "metadataType" => {
+                        types += 1;
+                        if crate::xlsx_read::attr(e, "name").as_deref() == Some("XLDAPR") {
+                            xldapr = Some(types);
+                        }
+                    }
+                    "cellMetadata" => in_cell_meta = true,
+                    "bk" if in_cell_meta => bks += 1,
+                    "rc" if in_cell_meta => {
+                        let t = crate::xlsx_read::attr(e, "t").and_then(|t| t.parse::<u32>().ok());
+                        if t.is_some() && t == xldapr {
+                            return DynamicMetadata { cm: bks, existed: true, patched: None };
+                        }
+                    }
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) if crate::xlsx_read::local(e.name().as_ref()) == "cellMetadata" => in_cell_meta = false,
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        // Add XLDAPR to the existing part.
+        let mut text = String::from_utf8_lossy(doc).into_owned();
+        let insert_before = |text: &mut String, markers: &[&str], what: &str| {
+            let at = markers.iter().filter_map(|m| text.find(m)).min().unwrap_or(text.len());
+            text.insert_str(at, what);
+        };
+        let bump = |text: &mut String, tag: &str| -> u32 {
+            let Some(start) = text.find(&format!("<{tag}")) else { return 0 };
+            let end = start + text[start..].find('>').unwrap_or(0);
+            let open = text[start..end].to_string();
+            let n = open.split("count=\"").nth(1).and_then(|s| s.split('"').next()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let new_open = if open.contains("count=\"") { open.replace(&format!("count=\"{n}\""), &format!("count=\"{}\"", n + 1)) } else { format!("{open} count=\"{}\"", n + 1) };
+            text.replace_range(start..end, &new_open);
+            n
+        };
+        let type_index = match xldapr {
+            Some(t) => t,
+            None => {
+                if text.contains("</metadataTypes>") {
+                    bump(&mut text, "metadataTypes");
+                    insert_before(&mut text, &["</metadataTypes>"], XLDAPR_TYPE);
+                } else {
+                    let root_end = text.find("<metadata").and_then(|s| text[s..].find('>').map(|e| s + e + 1)).unwrap_or(0);
+                    text.insert_str(root_end, &format!("<metadataTypes count=\"1\">{XLDAPR_TYPE}</metadataTypes>"));
+                }
+                types + 1
+            }
+        };
+        if !text.contains("<futureMetadata name=\"XLDAPR\"") {
+            insert_before(&mut text, &["<cellMetadata", "<valueMetadata", "<extLst", "</metadata>"], XLDAPR_FUTURE);
+        }
+        let cm = if text.contains("</cellMetadata>") {
+            let n = bump(&mut text, "cellMetadata");
+            insert_before(&mut text, &["</cellMetadata>"], &format!("<bk><rc t=\"{type_index}\" v=\"0\"/></bk>"));
+            n + 1
+        } else {
+            insert_before(&mut text, &["<valueMetadata", "<extLst", "</metadata>"], &format!("<cellMetadata count=\"1\"><bk><rc t=\"{type_index}\" v=\"0\"/></bk></cellMetadata>"));
+            1
+        };
+        if !text.contains("xmlns:xda=") {
+            let root = text.find("<metadata").unwrap_or(0);
+            text.insert_str(root + "<metadata".len(), &format!(" xmlns:xda=\"{XDA_NS}\""));
+        }
+        DynamicMetadata { cm, existed: true, patched: Some(text) }
+    }
+}
+
 fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[String]) -> Result<Vec<u8>, String> {
+
     let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let text = String::from_utf8_lossy(doc).to_string();
@@ -1528,7 +1646,7 @@ fn patch_workbook(doc: &[u8], wb: &Workbook, pkg: &Package, new_sheets: &[(Sheet
         }
         for d in wb.names().iter() {
             let local = d.scope.and_then(|s| wb.sheet_ids().iter().position(|x| *x == s)).map_or(String::new(), |i| format!(" localSheetId=\"{i}\""));
-            names.push_str(&format!("<definedName name=\"{}\"{local}>{}</definedName>", esc(&d.name), esc(&prefix_future_functions(&wb.name_formula(d)))));
+            names.push_str(&format!("<definedName name=\"{}\"{local}>{}</definedName>", esc(&d.name), esc(&prefix_future_functions(&wb.name_formula_xlsx(d)))));
         }
         replace.insert("definedNames", (!names.is_empty()).then(|| format!("<definedNames>{names}</definedNames>")));
     }
@@ -1955,6 +2073,8 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     let mut added_parts: Vec<(String, Vec<u8>)> = Vec::new();
     let mut removed: BTreeSet<String> = BTreeSet::new();
     let mut any_data = false;
+    let meta = DynamicMetadata::plan(pkg.part("xl/metadata.xml").as_deref());
+    let mut wrote_dynamic = false;
 
     for s in &pkg.sheets {
         if !wb.sheet_ids().contains(&s.id) {
@@ -1982,8 +2102,11 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             col_styles,
             validations_changed,
             sparklines_changed,
+            dyn_cm: meta.cm,
+            wrote_dynamic: false,
         };
         let patched = patch_sheet(&doc, &mut ctx, &before, &now)?;
+        wrote_dynamic |= ctx.wrote_dynamic;
         replaced.insert(s.part.clone(), patched);
     }
     // Sheets new in xl.
@@ -2002,8 +2125,22 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             n += 1;
         }
         let part = format!("xl/worksheets/sheet{n}.xml");
-        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new(), validations_changed: true, sparklines_changed: true };
+        let mut ctx = SheetCtx {
+            wb,
+            id,
+            styles: &mut styles,
+            strings: &mut strings,
+            original_xfs: None,
+            extras: None,
+            row_attrs: HashMap::new(),
+            col_styles: HashMap::new(),
+            validations_changed: true,
+            sparklines_changed: true,
+            dyn_cm: meta.cm,
+            wrote_dynamic: false,
+        };
         added_parts.push((part.clone(), new_sheet(&mut ctx).into_bytes()));
+        wrote_dynamic |= ctx.wrote_dynamic;
         new_sheet_parts.push((id, part.clone()));
         let rid = format!("rIdXl{n}");
         rel_adds.push((rid.clone(), REL_WORKSHEET, format!("worksheets/sheet{n}.xml")));
@@ -2182,6 +2319,16 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     // Rewritten parts not otherwise changed.
     for (name, bytes) in rewritten {
         replaced.entry(name).or_insert(bytes);
+    }
+    // Dynamic arrays written: metadata.xml must define XLDAPR.
+    if wrote_dynamic && let Some(doc) = &meta.patched {
+        if meta.existed {
+            replaced.insert("xl/metadata.xml".into(), doc.clone().into_bytes());
+        } else {
+            added_parts.push(("xl/metadata.xml".into(), doc.clone().into_bytes()));
+            rel_adds.push(("rIdXlMeta".into(), REL_METADATA, "metadata.xml".into()));
+            ct_adds.push(("/xl/metadata.xml".into(), CT_METADATA));
+        }
     }
     if !rel_adds.is_empty() || !rel_removes.is_empty() {
         let doc = pkg.part("xl/_rels/workbook.xml.rels").ok_or("missing workbook relationships")?;

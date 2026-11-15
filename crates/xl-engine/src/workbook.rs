@@ -10,6 +10,17 @@
 //! 3. Evaluate in order, only cells whose inputs changed ("early cutoff").
 //! 4. If Kahn stalls, mark exactly the cycle members (Tarjan SCC) `#CIRC!`
 //!    and release cells merely downstream of them.
+//!
+//! Dynamic arrays: a formula whose result is an array is the *anchor* of a
+//! spill. Its cell holds the top-left value; the other values are written
+//! into the cells below/right as [`CellInput::Spill`] cells, so everything
+//! that reads cells (ranges, SUM, painting, saving) sees them. Each sheet
+//! keeps its anchors' spill ranges (and the ranges blocked ones would need,
+//! for `#SPILL!`). In the graph an anchor counts as a precedent of whatever
+//! reads its spill cells, so it evaluates first; when a spill grows,
+//! shrinks or moves cells, the changed cells seed another pass, until
+//! nothing changes. Typing into a spill range (or clearing what blocks one)
+//! makes the anchor recalculate.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -18,14 +29,14 @@ use std::time::{Duration, Instant};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::address::{Addr, CellRef, Range, SheetId};
-use crate::eval::{Ctx, Func, eval};
+use crate::address::{Addr, CellRef, MAX_COLS, MAX_ROWS, Range, SheetId};
+use crate::eval::{Ctx, Func, Val, eval_val};
 use crate::format::{Formatted, NumberFormat};
 use crate::formula::{Expr, Move, ParseError, SheetNames, Shift, parse_formula};
 use crate::input::classify_literal;
 use crate::store::{Cell, CellInput, CellStore};
 use crate::style::Style;
-use crate::value::{ErrorKind, Value};
+use crate::value::{Array, ErrorKind, Value};
 
 // ------------------------------------------------------------------- sheets
 
@@ -36,6 +47,17 @@ pub struct SheetData {
     formats: FxHashMap<CellRef, FmtId>,
     styles: FxHashMap<CellRef, StyleId>,
     layout: SheetLayout,
+    /// Anchor → the range its dynamic array spills into (anchor included).
+    spills: FxHashMap<CellRef, Range>,
+    /// Anchor → the range it would spill into but can't (`#SPILL!`).
+    blocked: FxHashMap<CellRef, Range>,
+}
+
+impl SheetData {
+    /// Anchors whose spill range (or blocked range) holds `c`, other than `c`.
+    fn anchors_covering(&self, c: CellRef) -> Vec<CellRef> {
+        self.spills.iter().chain(self.blocked.iter()).filter(|(a, r)| **a != c && r.contains(c)).map(|(a, _)| *a).collect()
+    }
 }
 
 /// Row/column sizes and visibility, merged cells and frozen panes.
@@ -238,6 +260,17 @@ impl Sheets {
 
     pub fn store(&self, id: SheetId) -> Option<&CellStore> {
         self.get(id).map(|s| &s.store)
+    }
+
+    /// The range `A1#` means: the anchor's spill range, or just the cell
+    /// for a formula with a single value. None if it isn't a formula or its
+    /// spill is blocked.
+    pub(crate) fn spill_range(&self, sheet: SheetId, cell: CellRef) -> Option<Range> {
+        let sd = self.get(sheet)?;
+        if let Some(r) = sd.spills.get(&cell) {
+            return Some(*r);
+        }
+        (sd.store.get(cell)?.is_formula() && !sd.blocked.contains_key(&cell)).then(|| Range::single(cell))
     }
 
     fn get(&self, id: SheetId) -> Option<&SheetData> {
@@ -602,9 +635,22 @@ pub struct CellSnapshot {
 #[derive(Clone, Debug)]
 pub enum LoadedCell {
     Value(Value),
-    /// Formula text (without '=') and the value the file cached for it.
+    /// Formula text (without '=') and the value the file cached for it,
+    /// with dynamic-array semantics.
     Formula { src: String, cached: Value },
+    /// A formula saved without dynamic arrays: where it took one value from
+    /// a range (implicit intersection) it gets an explicit `@`.
+    LegacyFormula { src: String, cached: Value },
 }
+
+/// What a formula evaluated to, ready to store.
+enum Out {
+    Value(Value),
+    Array(Arc<Array>),
+}
+
+/// Passes of re-evaluation after spills change, before giving up.
+const MAX_SPILL_PASSES: usize = 64;
 
 #[derive(Default)]
 pub struct Workbook {
@@ -622,6 +668,8 @@ pub struct Workbook {
     /// The file this came from counts dates from 1904 (old Mac Excel). xl
     /// always works in the 1900 system; savers convert back.
     date1904: bool,
+    /// Spill cells changed during the current recalc pass (seeds for the next).
+    spill_dirty: Vec<Addr>,
 }
 
 /// Days between the 1900 and 1904 date systems' day zero.
@@ -725,7 +773,16 @@ impl Workbook {
             None => self.next_sheet_name(),
         };
         let id = self.sheets.slots.len() as SheetId;
-        self.sheets.slots.push(Some(SheetData { id, name, store: CellStore::default(), formats: FxHashMap::default(), styles: FxHashMap::default(), layout: SheetLayout::default() }));
+        self.sheets.slots.push(Some(SheetData {
+            id,
+            name,
+            store: CellStore::default(),
+            formats: FxHashMap::default(),
+            styles: FxHashMap::default(),
+            layout: SheetLayout::default(),
+            spills: FxHashMap::default(),
+            blocked: FxHashMap::default(),
+        }));
         self.sheets.order.push(id);
         Ok(id)
     }
@@ -815,24 +872,94 @@ impl Workbook {
         match &self.cell(a)?.input {
             CellInput::Formula(e) => Some(e.to_source(0, 0, &self.sheets)),
             CellInput::Opaque(src) => Some(src.to_string()),
-            CellInput::Value(_) => None,
+            CellInput::Value(_) | CellInput::Spill(_) => None,
         }
+    }
+
+    /// Whether the formula in `a` is saved as a dynamic-array formula: it
+    /// spills (or would), uses dynamic-array functions or syntax, or relies
+    /// on array evaluation where older Excel took one value.
+    pub fn is_dynamic_formula(&self, a: Addr) -> bool {
+        let Some(sd) = self.sheets.get(a.sheet) else { return false };
+        let Some(CellInput::Formula(e)) = sd.store.get(a.cell).map(|c| &c.input) else { return false };
+        if sd.spills.contains_key(&a.cell) || sd.blocked.contains_key(&a.cell) {
+            return true;
+        }
+        // Saved plain, the formula would read back as `plain` with `@` added
+        // where old Excel took one value: dynamic unless that's the same.
+        let plain = e.legacy_unwrap();
+        plain.has_dynamic_construct() || plain.legacy_wrap(&|n| self.is_range_name(n, a.sheet)) != **e
+    }
+
+    /// Formula text as an xlsx file stores it (prefixed newer functions;
+    /// `@` the old semantics imply left out of non-dynamic formulas).
+    pub fn formula_source_xlsx(&self, a: Addr) -> Option<String> {
+        match &self.cell(a)?.input {
+            CellInput::Formula(e) if self.is_dynamic_formula(a) => Some(e.to_xlsx_source(&self.sheets)),
+            CellInput::Formula(e) => Some(e.legacy_unwrap().to_xlsx_source(&self.sheets)),
+            CellInput::Opaque(src) => Some(src.to_string()),
+            CellInput::Value(_) | CellInput::Spill(_) => None,
+        }
+    }
+
+    /// A defined name's formula as an xlsx file stores it.
+    pub fn name_formula_xlsx(&self, d: &DefinedName) -> String {
+        d.expr.to_xlsx_source(&self.sheets)
+    }
+
+    /// Whether a defined name stands for a multi-cell range.
+    fn is_range_name(&self, name: &str, sheet: SheetId) -> bool {
+        self.names.lookup(name, sheet).and_then(|d| d.expr.reference()).is_some_and(|(_, r)| r.start != r.end)
+    }
+
+    /// The range the dynamic array anchored at `a` spills into (anchor
+    /// included), if it spills.
+    pub fn spill_range(&self, a: Addr) -> Option<Range> {
+        self.sheets.get(a.sheet)?.spills.get(&a.cell).copied()
+    }
+
+    /// The range a blocked dynamic array anchored at `a` would need.
+    pub fn blocked_spill(&self, a: Addr) -> Option<Range> {
+        self.sheets.get(a.sheet)?.blocked.get(&a.cell).copied()
+    }
+
+    /// The anchor of the spill `a` is part of (`a` itself for an anchor).
+    pub fn spill_anchor(&self, a: Addr) -> Option<CellRef> {
+        let sd = self.sheets.get(a.sheet)?;
+        match sd.store.get(a.cell).map(|c| &c.input) {
+            Some(CellInput::Spill(anchor)) => Some(*anchor),
+            _ => sd.spills.contains_key(&a.cell).then_some(a.cell),
+        }
+    }
+
+    /// Every spill on a sheet: (anchor, range).
+    pub fn spills(&self, sheet: SheetId) -> Vec<(CellRef, Range)> {
+        self.sheets.get(sheet).map(|sd| sd.spills.iter().map(|(a, r)| (*a, *r)).collect()).unwrap_or_default()
     }
 
     /// What the user sees and edits in the formula bar.
     pub fn input_text(&self, a: Addr) -> String {
         let Some(cell) = self.cell(a) else { return String::new() };
         match &cell.input {
+            // Spilled values aren't inputs (the anchor holds the formula).
+            CellInput::Spill(_) => String::new(),
             CellInput::Formula(_) | CellInput::Opaque(_) => format!("={}", self.formula_source(a).unwrap()),
-            CellInput::Value(Value::Text(t)) => {
+            CellInput::Value(v) => self.literal_text(v, a),
+        }
+    }
+
+    /// Input text that enters `v` as a constant in `a`.
+    fn literal_text(&self, v: &Value, a: Addr) -> String {
+        match v {
+            Value::Text(t) => {
                 if t.starts_with('=') || t.starts_with('\'') || classify_literal(t).is_some() {
                     format!("'{t}")
                 } else {
                     t.to_string()
                 }
             }
-            CellInput::Value(Value::Number(n)) => edit_number(*n, self.format(a)),
-            CellInput::Value(v) => v.display(),
+            Value::Number(n) => edit_number(*n, self.format(a)),
+            v => v.display(),
         }
     }
 
@@ -841,7 +968,10 @@ impl Workbook {
     pub fn input_text_shifted(&self, src: Addr, dr: i64, dc: i64) -> String {
         match self.cell(src).map(|c| &c.input) {
             Some(CellInput::Formula(e)) => format!("={}", e.to_source(dr, dc, &self.sheets)),
+            // A copied spilled value pastes as that value.
+            Some(CellInput::Spill(_)) => self.literal_text(self.value(src), src),
             _ => self.input_text(src),
+
         }
     }
 
@@ -1067,6 +1197,8 @@ impl Workbook {
     /// move; formulas on every sheet and defined names are rewritten (refs to
     /// deleted cells become #REF!); then everything recalculates.
     pub fn apply_shift(&mut self, op: Shift) -> RecalcStats {
+        // Spills are recomputed from their (moved) anchors.
+        self.clear_all_spills();
         let target = op.sheet();
         let rows = matches!(op, Shift::InsertRows { .. } | Shift::DeleteRows { .. });
         let remap = |c: CellRef| -> Option<CellRef> {
@@ -1114,6 +1246,7 @@ impl Workbook {
     /// that every reference to it — from any sheet, from names, from inside
     /// the block — follows. References to cells it overwrites become #REF!.
     pub fn move_range(&mut self, mv: Move) -> RecalcStats {
+        self.clear_all_spills();
         *self.structure.entry(mv.from_sheet).or_default() += 1;
         *self.structure.entry(mv.to_sheet).or_default() += 1;
         self.structure_log.push(StructOp::Move(mv));
@@ -1282,10 +1415,18 @@ impl Workbook {
         }
         let others: Vec<(Addr, String)> =
             self.store(sheet).iter_range(range).filter(|(c, _)| *c != range.start).map(|(c, _)| (Addr::new(sheet, c), String::new())).collect();
-        let stats = self.set_inputs(others);
+        // The merge goes in first, so a spill it lands on is blocked (#SPILL!).
         if let Some(l) = self.layout_mut(sheet) {
             l.merges.retain(|m| !(m.start.row <= range.end.row && range.start.row <= m.end.row && m.start.col <= range.end.col && range.start.col <= m.end.col));
             l.merges.push(range);
+        }
+        let overlaps = |r: &Range| r.start.row <= range.end.row && range.start.row <= r.end.row && r.start.col <= range.end.col && range.start.col <= r.end.col;
+        let anchors: Vec<Addr> = self.sheets.get(sheet).map(|sd| sd.spills.iter().filter(|(_, r)| overlaps(r)).map(|(a, _)| Addr::new(sheet, *a)).collect()).unwrap_or_default();
+        let mut stats = self.set_inputs(others);
+        if !anchors.is_empty() {
+            let more = self.propagate(anchors.clone(), anchors.into_iter().collect());
+            stats.dirty += more.dirty;
+            stats.evaluated += more.evaluated;
         }
         stats
     }
@@ -1428,21 +1569,51 @@ impl Workbook {
     /// we can't parse or evaluate are kept as opaque text with their cached
     /// value. Call [`Workbook::recalc_all`] after loading everything.
     pub fn load_cell(&mut self, a: Addr, cell: LoadedCell) {
+        let legacy = matches!(cell, LoadedCell::LegacyFormula { .. });
         let (input, value) = match cell {
             LoadedCell::Value(v) => (CellInput::Value(v.clone()), v),
-            LoadedCell::Formula { src, cached } => match parse_formula(&src, &self.sheets) {
-                // `=#N/A` is just a constant (writers use it for error values).
-                Ok(Expr::Error(e)) => (CellInput::Value(Value::Error(e)), Value::Error(e)),
-                Ok(e) if !e.has_unknown_func() => {
-                    let e = Arc::new(e);
-                    self.graph.add(a, &e, &self.sheets, &self.names);
-                    (CellInput::Formula(e), cached)
+            LoadedCell::Formula { src, cached } | LoadedCell::LegacyFormula { src, cached } => {
+                match parse_formula(&src, &self.sheets) {
+                    // `=#N/A` is just a constant (writers use it for error values).
+                    Ok(Expr::Error(e)) => (CellInput::Value(Value::Error(e)), Value::Error(e)),
+                    // Functions xl doesn't know are fine if they're named LAMBDAs.
+                    Ok(e) if e.unknown_funcs().iter().all(|n| self.names.lookup(n, a.sheet).is_some()) => {
+                        let e = if legacy { e.legacy_wrap(&|n| self.is_range_name(n, a.sheet)) } else { e };
+                        let e = Arc::new(e);
+                        self.graph.add(a, &e, &self.sheets, &self.names);
+                        (CellInput::Formula(e), cached)
+                    }
+                    _ => (CellInput::Opaque(src.into()), cached),
                 }
-                _ => (CellInput::Opaque(src.into()), cached),
-            },
+            }
         };
         if let Some(s) = self.sheets.get_mut(a.sheet) {
             s.store.insert(a.cell, Cell { input, value });
+        }
+    }
+
+    /// After loading: the dynamic-array formula at `anchor` spilled into
+    /// `range` (its cached values are already loaded as plain values there).
+    /// The values become spill cells; recalc keeps or replaces them.
+    pub fn load_spill(&mut self, sheet: SheetId, anchor: CellRef, range: Range) {
+        let Some(sd) = self.sheets.get_mut(sheet) else { return };
+        if range.start != anchor || !sd.store.get(anchor).is_some_and(Cell::is_formula) {
+            return;
+        }
+        for c in range.iter() {
+            if c == anchor {
+                continue;
+            }
+            match sd.store.get_mut(c) {
+                Some(cell) if matches!(cell.input, CellInput::Value(_)) => cell.input = CellInput::Spill(anchor),
+                Some(_) => return,
+                None => {
+                    sd.store.insert(c, Cell { input: CellInput::Spill(anchor), value: Value::Number(0.0) });
+                }
+            }
+        }
+        if range.cell_count() > 1 {
+            sd.spills.insert(anchor, range);
         }
     }
 
@@ -1479,9 +1650,24 @@ impl Workbook {
             for c in &p.cells {
                 if let Some(&j) = index.get(c) {
                     arena.push(j);
+                } else if let Some(CellInput::Spill(anchor)) = self.cell(*c).map(|x| &x.input)
+                    && let Some(&j) = index.get(&Addr::new(c.sheet, *anchor))
+                {
+                    // A spilled value comes from its anchor.
+                    arena.push(j);
                 }
             }
             for (s, r) in &p.ranges {
+                if let Some(sd) = self.sheets.get(*s) {
+                    for (anchor, sr) in &sd.spills {
+                        if sr.start.row <= r.end.row && r.start.row <= sr.end.row && sr.start.col <= r.end.col && r.start.col <= sr.end.col
+                            && let Some(&j) = index.get(&Addr::new(*s, *anchor))
+                        {
+                            arena.push(j);
+                        }
+                    }
+                }
+
                 for col in r.start.col..=r.end.col {
                     let Some(v) = rows.get(&(*s, col)) else { continue };
                     let lo = v.partition_point(|&row| row < r.start.row);
@@ -1530,10 +1716,12 @@ impl Workbook {
         for &i in &order {
             let a = formulas[i as usize];
             if let Some(v) = self.eval_cell(a) {
-                self.set_value(a, v);
+                self.set_result(a, v);
             }
         }
-        RecalcStats { dirty: n, evaluated: n, elapsed: start.elapsed() }
+        let mut stats = RecalcStats { dirty: n, evaluated: n, elapsed: start.elapsed() };
+        self.settle_spills(&mut stats);
+        stats
     }
 
     // ------------------------------------------------------------ internals
@@ -1541,7 +1729,19 @@ impl Workbook {
     fn apply(&mut self, a: Addr, input: Option<CellInput>, seeds: &mut Vec<Addr>, forced: &mut FxHashSet<Addr>) {
         self.graph.remove(a);
         forced.remove(&a);
+        // A replaced anchor takes its spilled values with it.
+        let freed = self.clear_spill(a, None);
+        seeds.extend(freed);
         let Some(sheet) = self.sheets.get_mut(a.sheet) else { return };
+        sheet.spills.remove(&a.cell);
+        sheet.blocked.remove(&a.cell);
+        // Typing into a spill range blocks it; clearing what blocked one
+        // lets it spill: either way its anchor recalculates.
+        for anchor in sheet.anchors_covering(a.cell) {
+            let anchor = Addr::new(a.sheet, anchor);
+            seeds.push(anchor);
+            forced.insert(anchor);
+        }
         let old_value = sheet.store.get(a.cell).map(|c| c.value.clone()).unwrap_or_default();
         match input {
             None => {
@@ -1560,6 +1760,7 @@ impl Workbook {
             Some(CellInput::Opaque(src)) => {
                 sheet.store.insert(a.cell, Cell { input: CellInput::Opaque(src), value: old_value });
             }
+            Some(CellInput::Spill(_)) => {}
             Some(CellInput::Formula(expr)) => {
                 sheet.store.insert(a.cell, Cell { input: CellInput::Formula(expr.clone()), value: old_value });
                 self.graph.add(a, &expr, &self.sheets, &self.names);
@@ -1569,10 +1770,24 @@ impl Workbook {
         }
     }
 
-    fn eval_cell(&self, a: Addr) -> Option<Value> {
+    fn eval_cell(&self, a: Addr) -> Option<Out> {
         let cell = self.sheets.store(a.sheet)?.get(a.cell)?;
         let CellInput::Formula(expr) = &cell.input else { return None };
-        Some(eval(expr, &Ctx::new(&self.sheets, &self.names, a.sheet, a.cell)))
+        let cx = Ctx::new(&self.sheets, &self.names, a.sheet, a.cell);
+        Some(match eval_val(expr, &cx) {
+            Val::S(v) => Out::Value(v),
+            Val::Omitted => Out::Value(Value::Number(0.0)),
+            Val::L(_) => Out::Value(Value::Error(ErrorKind::Calc)),
+            Val::R(rr) if rr.range.start == rr.range.end => Out::Value(crate::eval::scalar(Val::R(rr), &cx)),
+            v => match crate::eval::to_array(v, &cx) {
+                Ok(arr) if arr.is_scalar() => Out::Value(match &arr.data[0] {
+                    Value::Empty => Value::Number(0.0),
+                    v => v.clone(),
+                }),
+                Ok(arr) => Out::Array(arr),
+                Err(e) => Out::Value(Value::Error(e)),
+            },
+        })
     }
 
     fn set_value(&mut self, a: Addr, v: Value) -> bool {
@@ -1585,21 +1800,171 @@ impl Workbook {
         }
     }
 
-    fn propagate(&mut self, seeds: Vec<Addr>, mut needs: FxHashSet<Addr>) -> RecalcStats {
+    /// Remove the values the anchor at `a` spilled, except inside `keep`.
+    /// Returns the cells removed (also noted in `spill_dirty`).
+    fn clear_spill(&mut self, a: Addr, keep: Option<Range>) -> Vec<Addr> {
+        let Some(sd) = self.sheets.get_mut(a.sheet) else { return Vec::new() };
+        let Some(old) = sd.spills.get(&a.cell).copied() else { return Vec::new() };
+        let mut freed = Vec::new();
+        for c in old.iter() {
+            if keep.is_some_and(|k| k.contains(c)) {
+                continue;
+            }
+            if sd.store.get(c).is_some_and(|x| matches!(x.input, CellInput::Spill(anchor) if anchor == a.cell)) {
+                sd.store.remove(c);
+                freed.push(Addr::new(a.sheet, c));
+            }
+        }
+        if keep.is_none() {
+            sd.spills.remove(&a.cell);
+        }
+        self.spill_dirty.extend(freed.iter().copied());
+        freed
+    }
+
+    /// Forget every spill (before moving cells around; recalc rebuilds them).
+    fn clear_all_spills(&mut self) {
+        for id in self.sheets.order.clone() {
+            let Some(sd) = self.sheets.get_mut(id) else { continue };
+            let anchors: Vec<CellRef> = sd.spills.keys().copied().collect();
+            for anchor in anchors {
+                self.clear_spill(Addr::new(id, anchor), None);
+            }
+            if let Some(sd) = self.sheets.get_mut(id) {
+                sd.blocked.clear();
+            }
+        }
+        self.spill_dirty.clear();
+    }
+
+    /// Store a formula's result: a value, or an array that spills from the
+    /// anchor (`#SPILL!` if anything is in the way). True if anything the
+    /// formula shows changed.
+    fn set_result(&mut self, a: Addr, out: Out) -> bool {
+        let arr = match out {
+            Out::Value(v) => {
+                let freed = !self.clear_spill(a, None).is_empty();
+                let unblocked = self.sheets.get_mut(a.sheet).is_some_and(|sd| sd.blocked.remove(&a.cell).is_some());
+                return self.set_value(a, v) | freed | unblocked;
+            }
+            Out::Array(arr) => arr,
+        };
+        let fits = (a.cell.row as usize + arr.rows) <= MAX_ROWS as usize && (a.cell.col as usize + arr.cols) <= MAX_COLS as usize;
+        let target = Range::new(a.cell, CellRef::new((a.cell.row as usize + arr.rows - 1).min(MAX_ROWS as usize - 1) as u32, (a.cell.col as usize + arr.cols - 1).min(MAX_COLS as usize - 1) as u32));
+        // Reading its own spill range is a circular reference.
+        let circular = self.graph.precedents.get(&a).is_some_and(|p| {
+            let hit = |s: SheetId, r: Range| s == a.sheet && r.start.row <= target.end.row && target.start.row <= r.end.row && r.start.col <= target.end.col && target.start.col <= r.end.col && !(r.start == a.cell && r.end == a.cell);
+            p.cells.iter().any(|c| hit(c.sheet, Range::single(c.cell))) || p.ranges.iter().any(|(s, r)| hit(*s, *r))
+        });
+        if circular {
+            return self.set_result(a, Out::Value(Value::Error(ErrorKind::Circ)));
+        }
+        let Some(sd) = self.sheets.get(a.sheet) else { return false };
+        let in_way = |c: CellRef| c != a.cell && sd.store.get(c).is_some_and(|x| !matches!(x.input, CellInput::Spill(anchor) if anchor == a.cell));
+        let merged = sd.layout.merges.iter().any(|m| m.start.row <= target.end.row && target.start.row <= m.end.row && m.start.col <= target.end.col && target.start.col <= m.end.col);
+        let blocked = !fits || merged || sd.store.iter_range(target).any(|(c, _)| in_way(c));
+        if blocked {
+            let freed = !self.clear_spill(a, None).is_empty();
+            let sd = self.sheets.get_mut(a.sheet).unwrap();
+            let newly = sd.blocked.insert(a.cell, target) != Some(target);
+            return self.set_value(a, Value::Error(ErrorKind::Spill)) | freed | newly;
+        }
+        let mut changed = !self.clear_spill(a, Some(target)).is_empty();
+        let sd = self.sheets.get_mut(a.sheet).unwrap();
+        changed |= sd.blocked.remove(&a.cell).is_some();
+        changed |= sd.spills.insert(a.cell, target) != Some(target);
+        let shown = |v: &Value| if v.is_empty() { Value::Number(0.0) } else { v.clone() };
+        for r in 0..arr.rows {
+            for c in 0..arr.cols {
+                if r == 0 && c == 0 {
+                    continue;
+                }
+                let cell = CellRef::new(a.cell.row + r as u32, a.cell.col + c as u32);
+                let v = shown(arr.get(r, c));
+                match sd.store.get_mut(cell) {
+                    Some(x) if x.value == v => {}
+                    Some(x) => {
+                        x.value = v;
+                        self.spill_dirty.push(Addr::new(a.sheet, cell));
+                        changed = true;
+                    }
+                    None => {
+                        sd.store.insert(cell, Cell { input: CellInput::Spill(a.cell), value: v });
+                        self.spill_dirty.push(Addr::new(a.sheet, cell));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed | self.set_value(a, shown(&arr.data[0]))
+    }
+
+    /// Dependents of `a`, counting readers of the cells it spills into.
+    fn for_each_dependent(&self, a: Addr, mut f: impl FnMut(Addr)) {
+        self.graph.for_each_dependent(a, &mut f);
+        if let Some(r) = self.sheets.get(a.sheet).and_then(|sd| sd.spills.get(&a.cell)) {
+            for c in r.iter() {
+                if c != a.cell {
+                    self.graph.for_each_dependent(Addr::new(a.sheet, c), &mut f);
+                }
+            }
+        }
+    }
+
+    /// Re-run recalc while spills keep changing cells: changed spill cells
+    /// seed the next pass, and blocked spills that may now fit retry.
+    fn settle_spills(&mut self, stats: &mut RecalcStats) {
+        for _ in 0..MAX_SPILL_PASSES {
+            let dirty = std::mem::take(&mut self.spill_dirty);
+            if dirty.is_empty() {
+                return;
+            }
+            let mut forced = FxHashSet::default();
+            for &id in &self.sheets.order {
+                let Some(sd) = self.sheets.get(id) else { continue };
+                for (anchor, r) in &sd.blocked {
+                    if dirty.iter().any(|d| d.sheet == id && r.contains(d.cell)) {
+                        forced.insert(Addr::new(id, *anchor));
+                    }
+                }
+            }
+            let mut seeds = dirty;
+            seeds.extend(forced.iter().copied());
+            let s = self.propagate_pass(seeds, forced, false);
+            stats.dirty += s.dirty;
+            stats.evaluated += s.evaluated;
+        }
+        // Spills that keep changing each other: give up (like a cycle).
+        self.spill_dirty.clear();
+    }
+
+    fn propagate(&mut self, seeds: Vec<Addr>, needs: FxHashSet<Addr>) -> RecalcStats {
+        let start = Instant::now();
+        let mut stats = self.propagate_pass(seeds, needs, true);
+        self.settle_spills(&mut stats);
+        stats.elapsed = start.elapsed();
+        stats
+    }
+
+    fn propagate_pass(&mut self, seeds: Vec<Addr>, mut needs: FxHashSet<Addr>, volatile: bool) -> RecalcStats {
         let start = Instant::now();
         let changed_seeds: FxHashSet<Addr> = seeds.iter().copied().filter(|c| !needs.contains(c)).collect();
-        needs.extend(self.graph.volatile.iter().copied());
+        if volatile {
+            needs.extend(self.graph.volatile.iter().copied());
+        }
 
         // 1. Collect the dirty subgraph with its adjacency.
         let mut adj: FxHashMap<Addr, SmallVec<[Addr; 4]>> = FxHashMap::default();
         let mut stack: Vec<Addr> = seeds;
-        stack.extend(self.graph.volatile.iter().copied());
+        if volatile {
+            stack.extend(self.graph.volatile.iter().copied());
+        }
         while let Some(c) = stack.pop() {
             if adj.contains_key(&c) {
                 continue;
             }
-            let mut deps = SmallVec::new();
-            self.graph.for_each_dependent(c, |d| deps.push(d));
+            let mut deps: SmallVec<[Addr; 4]> = SmallVec::new();
+            self.for_each_dependent(c, |d| deps.push(d));
             stack.extend(deps.iter().copied().filter(|d| !adj.contains_key(d)));
             adj.insert(c, deps);
         }
@@ -1630,7 +1995,7 @@ impl Workbook {
                     && let Some(v) = self.eval_cell(c)
                 {
                     evaluated += 1;
-                    if self.set_value(c, v) {
+                    if self.set_result(c, v) {
                         needs.extend(adj[&c].iter().copied());
                     }
                 }
@@ -1652,7 +2017,7 @@ impl Workbook {
             for &c in &cyclic {
                 processed += 1;
                 if self.cell(c).is_some_and(Cell::is_formula) {
-                    self.set_value(c, Value::Error(ErrorKind::Circ));
+                    self.set_result(c, Out::Value(Value::Error(ErrorKind::Circ)));
                 }
                 needs.extend(adj[&c].iter().copied());
             }
