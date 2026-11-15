@@ -1759,6 +1759,163 @@ fn sync_tables(wb: &Workbook, pkg: &Package, sheet: SheetId, sheet_part: &str, s
     Ok(Some(splice(&doc, SHEET_ORDER, rep)?))
 }
 
+/// The parts of a save being made: replaced, added, or as they were.
+struct PartSet<'a> {
+    pkg: &'a Package,
+    rewritten: &'a HashMap<String, Vec<u8>>,
+    replaced: &'a mut HashMap<String, Vec<u8>>,
+    added: &'a mut Vec<(String, Vec<u8>)>,
+}
+
+impl PartSet<'_> {
+    fn get(&self, name: &str) -> Option<Vec<u8>> {
+        self.replaced
+            .get(name)
+            .cloned()
+            .or_else(|| self.added.iter().find(|(p, _)| p == name).map(|(_, b)| b.clone()))
+            .or_else(|| self.rewritten.get(name).cloned())
+            .or_else(|| self.pkg.part(name))
+    }
+
+    fn set(&mut self, name: &str, bytes: Vec<u8>) {
+        if let Some(slot) = self.added.iter_mut().find(|(p, _)| p == name) {
+            slot.1 = bytes;
+        } else if self.pkg.part(name).is_some() {
+            self.replaced.insert(name.to_string(), bytes);
+        } else {
+            self.added.push((name.to_string(), bytes));
+        }
+    }
+
+    /// A relationships part with some relationships added and some (by id) removed.
+    fn edit_rels(&mut self, rels_path: &str, adds: &[(String, &str, String)], remove_ids: &[String]) -> Result<(), String> {
+        let add: String = adds.iter().map(|(id, ty, t)| format!("<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{}\"/>", esc(t))).collect();
+        let new = match self.get(rels_path) {
+            Some(doc) => {
+                let doc = expand_root(&doc);
+                let (_, root_close, prefix, kids) = children(&doc)?;
+                let text = String::from_utf8_lossy(&doc).to_string();
+                let mut edits: Vec<(usize, usize, String)> =
+                    kids.iter().filter(|k| remove_ids.iter().any(|id| text[k.start..k.end].contains(&format!("Id=\"{id}\"")))).map(|k| (k.start, k.end, String::new())).collect();
+                if !add.is_empty() {
+                    edits.push((root_close, root_close, prefixed(&add, &prefix)));
+                }
+                apply_edits(&doc, edits)
+            }
+            None => format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{add}</Relationships>").into_bytes(),
+        };
+        self.set(rels_path, new);
+        Ok(())
+    }
+}
+
+const REL_DRAWING: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
+const REL_CHART: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+const CT_DRAWING: &str = "application/vnd.openxmlformats-officedocument.drawing+xml";
+const CT_CHART: &str = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+
+fn free_name(taken: &mut BTreeSet<String>, stem: &str, ext: &str) -> (String, u32) {
+    let mut n = 1;
+    while taken.contains(&format!("{stem}{n}.{ext}")) {
+        n += 1;
+    }
+    let name = format!("{stem}{n}.{ext}");
+    taken.insert(name.clone());
+    (name, n)
+}
+
+/// Bring a sheet's drawing in line with its charts (see `ChartPlan`).
+#[allow(clippy::too_many_arguments)]
+fn sync_charts(
+    wb: &Workbook,
+    sheet: SheetId,
+    sheet_part: &str,
+    plan: &crate::package::ChartPlan,
+    parts: &mut PartSet,
+    removed: &mut BTreeSet<String>,
+    ct_adds: &mut Vec<(String, &'static str)>,
+    ct_removes: &mut Vec<String>,
+    taken: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    let charts = &wb.layout(sheet).charts;
+    let mut drawings: BTreeSet<&String> = plan.moved.iter().map(|m| &m.1).collect();
+    drawings.extend(plan.removed.iter().map(|r| &r.0));
+    for drawing in drawings {
+        let Some(mut doc) = parts.get(drawing) else { continue };
+        for (i, _, anchor) in plan.moved.iter().filter(|m| &m.1 == drawing) {
+            doc = reanchor(&doc, *anchor, &charts[*i], wb, sheet)?;
+        }
+        let mut gone: Vec<usize> = plan.removed.iter().filter(|r| &r.0 == drawing).map(|r| r.1).collect();
+        gone.sort_unstable_by(|a, b| b.cmp(a));
+        let drels_path = crate::xlsx_charts::rels_of(drawing);
+        let drels = parts.get(&drels_path).map(|d| crate::xlsx_read::rels_from(&d)).unwrap_or_default();
+        let mut rel_removes = Vec::new();
+        for anchor in gone {
+            let (_, _, _, kids) = children(&doc)?;
+            let anchors: Vec<&Child> = kids.iter().filter(|k| matches!(k.local.as_str(), "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor")).collect();
+            let Some(k) = anchors.get(anchor) else { continue };
+            let el = String::from_utf8_lossy(&doc[k.start..k.end]).to_string();
+            // The chart's relationship id, on its <c:chart r:id="…"/>.
+            let rid = el.find("chart ").and_then(|i| el[i..].split(":id=\"").nth(1)).and_then(|v| v.split('"').next()).map(str::to_string);
+            if let Some(rid) = rid {
+                if let Some(target) = drels.get(&rid) {
+                    let chart_part = crate::xlsx_charts::resolve(drawing, target);
+                    removed.insert(crate::xlsx_charts::rels_of(&chart_part));
+                    ct_removes.push(format!("/{chart_part}"));
+                    removed.insert(chart_part);
+                }
+                rel_removes.push(rid);
+            }
+            doc = apply_edits(&doc, vec![(k.start, k.end, String::new())]);
+        }
+        parts.set(drawing, doc);
+        if !rel_removes.is_empty() {
+            parts.edit_rels(&drels_path, &[], &rel_removes)?;
+        }
+    }
+    if plan.added.is_empty() {
+        return Ok(());
+    }
+    // The sheet's drawing, made if it has none.
+    let srels_path = crate::xlsx_charts::rels_of(sheet_part);
+    let srels = parts.get(&srels_path).map(|d| crate::xlsx_read::rels_from(&d)).unwrap_or_default();
+    let mut found: Vec<&String> = srels.values().filter(|t| t.contains("drawings/") && t.ends_with(".xml")).collect();
+    found.sort();
+    let drawing = match found.first() {
+        Some(t) => crate::xlsx_charts::resolve(sheet_part, t),
+        None => {
+            let (name, n) = free_name(taken, "xl/drawings/drawing", "xml");
+            parts.set(&name, crate::xlsx_chartxml::EMPTY_DRAWING.as_bytes().to_vec());
+            ct_adds.push((format!("/{name}"), CT_DRAWING));
+            let rid = format!("rIdXlDrawing{n}");
+            parts.edit_rels(&srels_path, &[(rid.clone(), REL_DRAWING, format!("../drawings/drawing{n}.xml"))], &[])?;
+            let sheet_doc = ensure_r_namespace(parts.get(sheet_part).ok_or_else(|| format!("missing {sheet_part}"))?)?;
+            let mut rep: HashMap<&str, Option<String>> = HashMap::new();
+            rep.insert("drawing", Some(format!("<drawing r:id=\"{rid}\"/>")));
+            let sheet_doc = splice(&sheet_doc, SHEET_ORDER, rep)?;
+            parts.set(sheet_part, sheet_doc);
+            name
+        }
+    };
+    let mut doc = expand_root(&parts.get(&drawing).ok_or_else(|| format!("missing {drawing}"))?);
+    let mut rel_adds = Vec::new();
+    for &i in &plan.added {
+        let (name, n) = free_name(taken, "xl/charts/chart", "xml");
+        parts.set(&name, crate::xlsx_chartxml::chart_xml(wb, sheet, &charts[i]).into_bytes());
+        ct_adds.push((format!("/{name}"), CT_CHART));
+        let rid = format!("rIdXlChart{n}");
+        rel_adds.push((rid.clone(), REL_CHART, format!("../charts/chart{n}.xml")));
+        let (_, root_close, _, kids) = children(&doc)?;
+        let index = kids.iter().filter(|k| matches!(k.local.as_str(), "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor")).count();
+        let anchor = crate::xlsx_chartxml::chart_anchor(&rid, 1000 + n, &format!("Chart {n}"));
+        doc = apply_edits(&doc, vec![(root_close, root_close, anchor)]);
+        doc = reanchor(&doc, index, &charts[i], wb, sheet)?;
+    }
+    parts.set(&drawing, doc);
+    parts.edit_rels(&crate::xlsx_charts::rels_of(&drawing), &rel_adds, &[])?;
+    Ok(())
+}
+
 /// Point a table part's range (and its filter's) at the table's new rows.
 fn patch_table_part(doc: &[u8], range: Range) -> Vec<u8> {
     let text = String::from_utf8_lossy(doc).to_string();
@@ -2004,11 +2161,22 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         let doc = part("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
         replaced.insert("xl/workbook.xml".into(), patch_workbook(&doc, wb, pkg, &new_sheets, names_changed)?);
     }
-    // Charts moved or resized by hand.
-    for s in pkg.sheets.iter().filter(|s| wb.sheet_ids().contains(&s.id)) {
-        for (i, drawing, anchor) in pkg.moved_charts(wb, s.id).unwrap_or_default() {
-            let Some(doc) = replaced.get(&drawing).cloned().or_else(|| part(&drawing)) else { continue };
-            replaced.insert(drawing, reanchor(&doc, anchor, &wb.layout(s.id).charts[i], wb, s.id)?);
+    // Charts: kept ones re-anchored when moved, removed ones dropped, new
+    // and edited ones written (on new sheets too).
+    {
+        let mut taken: BTreeSet<String> = existing.clone();
+        taken.extend(added_parts.iter().map(|(p, _)| p.clone()));
+        let chart_sheets: Vec<(SheetId, String, crate::package::ChartPlan)> = pkg
+            .sheets
+            .iter()
+            .filter(|s| wb.sheet_ids().contains(&s.id))
+            .filter_map(|s| pkg.chart_plan(wb, s.id).map(|p| (s.id, s.part.clone(), p)))
+            .chain(new_sheet_parts.iter().map(|(id, p)| (*id, p.clone(), crate::package::ChartPlan { added: (0..wb.layout(*id).charts.len()).collect(), ..Default::default() })))
+            .filter(|(_, _, p)| !(p.moved.is_empty() && p.removed.is_empty() && p.added.is_empty()))
+            .collect();
+        for (id, sheet_part, plan) in chart_sheets {
+            let mut parts = PartSet { pkg, rewritten: &rewritten, replaced: &mut replaced, added: &mut added_parts };
+            sync_charts(wb, id, &sheet_part, &plan, &mut parts, &mut removed, &mut ct_adds, &mut ct_removes, &mut taken)?;
         }
     }
     // Rewritten parts not otherwise changed.

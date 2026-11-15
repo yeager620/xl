@@ -92,7 +92,7 @@ impl Chart {
         }
     }
 
-    pub(crate) fn apply_move(&mut self, mv: &Move, home: SheetId) {
+    pub fn apply_move(&mut self, mv: &Move, home: SheetId) {
         for e in self.exprs_mut() {
             *e = Arc::new(e.moved(mv, home));
         }

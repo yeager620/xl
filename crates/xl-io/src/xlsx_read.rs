@@ -65,9 +65,18 @@ pub(crate) fn xml(bytes: &[u8]) -> Reader<&[u8]> {
 }
 
 pub(crate) fn read_rels(zip: &mut Zip, name: &str) -> Result<HashMap<String, String>, String> {
+    let Some(bytes) = read_entry(zip, name)? else { return Ok(HashMap::new()) };
+    rels_parse(&bytes)
+}
+
+/// Relationship id → target of a relationships part (empty if unreadable).
+pub(crate) fn rels_from(bytes: &[u8]) -> HashMap<String, String> {
+    rels_parse(bytes).unwrap_or_default()
+}
+
+fn rels_parse(bytes: &[u8]) -> Result<HashMap<String, String>, String> {
     let mut out = HashMap::new();
-    let Some(bytes) = read_entry(zip, name)? else { return Ok(out) };
-    let mut r = xml(&bytes);
+    let mut r = xml(bytes);
     loop {
         match r.read_event().map_err(|e| e.to_string())? {
             Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == "Relationship" => {

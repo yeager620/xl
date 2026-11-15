@@ -3,6 +3,7 @@
 //! style index each cell had, and fingerprints of what xl modeled at load
 //! (to tell what changed since).
 
+use xl_engine::chart::Chart;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -92,28 +93,43 @@ impl Package {
         expected.len() != before.len() || expected != wb.layout(sheet).notes
     }
 
-    /// Charts whose place differs from where inserted/deleted lines alone
-    /// would have put them: (index, drawing part, anchor index). None if
-    /// they can't be matched to the file's anchors.
-    pub(crate) fn moved_charts(&self, wb: &Workbook, sheet: SheetId) -> Option<Vec<(usize, String, usize)>> {
+    /// How a sheet's charts map onto the file's: charts read from the file
+    /// and still there unedited are kept (re-anchored if moved by hand), the
+    /// others' anchors are removed, and charts made or edited in xl added.
+    /// None if the sheet's drawings couldn't be read.
+    pub(crate) fn chart_plan(&self, wb: &Workbook, sheet: SheetId) -> Option<ChartPlan> {
         let now = &wb.layout(sheet).charts;
         let places = self.chart_places.get(&sheet)?;
-        if places.len() != now.len() {
-            return None;
-        }
-        let mut out = Vec::new();
-        for (i, ((orig, part, anchor), current)) in places.iter().zip(now).enumerate() {
-            let mut expected = orig.clone();
-            for op in wb.structure_log().iter().skip(self.log_len) {
-                if let xl_engine::StructOp::Shift(s) = op {
-                    expected.apply_shift(*s, sheet);
+        let same = |a: &Chart, b: &Chart| (a.kind, &a.title, &a.series, a.stacked) == (b.kind, &b.title, &b.series, b.stacked);
+        let expected: Vec<Chart> = places
+            .iter()
+            .map(|(orig, _, _)| {
+                let mut c = orig.clone();
+                for op in wb.structure_log().iter().skip(self.log_len) {
+                    match op {
+                        xl_engine::StructOp::Shift(s) => c.apply_shift(*s, sheet),
+                        xl_engine::StructOp::Move(m) => c.apply_move(m, sheet),
+                    }
                 }
-            }
-            if (expected.anchor, expected.offset, expected.size) != (current.anchor, current.offset, current.size) {
-                out.push((i, part.clone(), *anchor));
+                c
+            })
+            .collect();
+        let mut used = vec![false; places.len()];
+        let mut plan = ChartPlan::default();
+        for (i, current) in now.iter().enumerate() {
+            match (0..places.len()).find(|&j| !used[j] && same(&expected[j], current)) {
+                Some(j) => {
+                    used[j] = true;
+                    let e = &expected[j];
+                    if (e.anchor, e.offset, e.size) != (current.anchor, current.offset, current.size) {
+                        plan.moved.push((i, places[j].1.clone(), places[j].2));
+                    }
+                }
+                None => plan.added.push(i),
             }
         }
-        Some(out)
+        plan.removed = places.iter().zip(&used).filter(|(_, u)| !**u).map(|((_, d, a), _)| (d.clone(), *a)).collect();
+        Some(plan)
     }
 
     /// Did a sheet's sparklines change other than by moving with lines?
@@ -192,6 +208,17 @@ pub(crate) fn sheet_digest(wb: &Workbook, id: SheetId) -> SheetDigest {
 pub(crate) fn names_digest(wb: &Workbook) -> u64 {
     let names: Vec<(String, Option<SheetId>, String)> = wb.names().iter().map(|d| (d.name.clone(), d.scope, wb.name_formula(d))).collect();
     hash_of(&[&names])
+}
+
+/// See [`Package::chart_plan`].
+#[derive(Debug, Default)]
+pub(crate) struct ChartPlan {
+    /// (chart index, drawing part, anchor index) of kept charts moved by hand.
+    pub moved: Vec<(usize, String, usize)>,
+    /// (drawing part, anchor index) of charts no longer there (or edited).
+    pub removed: Vec<(String, usize)>,
+    /// Indexes of charts to write as new.
+    pub added: Vec<usize>,
 }
 
 /// What a cell's XML carried beyond xl's model, put back when the cell is
@@ -345,12 +372,9 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
             continue;
         }
         let now = sheet_digest(wb, s.id);
-        if now.objects != s.digest.objects {
-            why.push(format!("charts on “{}” were added, removed or edited", wb.sheet_name(s.id)));
-        }
-        // Charts moved by hand get new anchors; that needs them matched to the file's.
-        if now.object_places != s.digest.object_places && pkg.moved_charts(wb, s.id).is_none() {
-            why.push(format!("a chart on “{}” was moved or resized", wb.sheet_name(s.id)));
+        // Chart changes need the charts matched to the file's anchors.
+        if (now.objects != s.digest.objects || now.object_places != s.digest.object_places) && pkg.chart_plan(wb, s.id).is_none() {
+            why.push(format!("charts on “{}” changed, and its drawings couldn't be read", wb.sheet_name(s.id)));
         }
         if pkg.validations_changed(wb, s.id)
             && let Some(xml) = pkg.part(&s.part)

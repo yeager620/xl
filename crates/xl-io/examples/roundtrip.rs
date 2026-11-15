@@ -19,6 +19,7 @@
 //!   style        toggle bold on an existing cell
 //!   add-sheet    add a sheet with one value
 //!   rename       rename a sheet nothing refers to (n/a if every sheet is)
+//!   add-chart    add a column chart over the first sheet's data
 //!   insert-row   insert a row in the middle of the data; a save that has to
 //!                rewrite the file (the save plan says why) counts as
 //!                "fell back", not failed, until phase 3 patches these
@@ -93,7 +94,7 @@ struct FileReport {
     known: bool,
 }
 
-const SCENARIOS: &[&str] = &["noop", "edit-new", "edit-middle", "style", "add-sheet", "rename", "insert-row"];
+const SCENARIOS: &[&str] = &["noop", "edit-new", "edit-middle", "style", "add-sheet", "rename", "add-chart", "insert-row"];
 
 // ------------------------------------------------------------------ package helpers
 
@@ -514,6 +515,40 @@ fn add_sheet(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
     Ok(Edit { allowed: Allowed::Parts(allowed), rewrite_ok: false, check: None })
 }
 
+fn add_chart(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
+    use std::sync::Arc;
+    use xl_engine::chart::{Chart, ChartKind, ChartSeries};
+    let s = target_sheet(wb);
+    let extent = wb.store(s).extent().ok_or("no data")?;
+    let name = xl_engine::quote_sheet_name(wb.sheet_name(s));
+    let rows = extent.row.clamp(1, 20) + 1;
+    let values = xl_engine::formula::parse_formula(&format!("{name}!$A$1:$A${rows}"), wb.sheets()).map_err(|e| e.to_string())?;
+    let before = wb.layout(s).charts.len();
+    let anchor = CellRef::new(extent.row + 3, extent.col + 2);
+    wb.layout_mut(s).ok_or("no layout")?.charts.push(Chart {
+        kind: ChartKind::Column,
+        title: Some("xl check".into()),
+        series: vec![ChartSeries { name: None, categories: None, values: Arc::new(values) }],
+        anchor,
+        offset: (0.0, 0.0),
+        size: (320.0, 180.0),
+        stacked: false,
+    });
+    let mut allowed = part_of(ctx, wb, s);
+    allowed.extend(ctx.original.keys().filter(|k| k.starts_with("xl/drawings/") || k.starts_with("xl/worksheets/_rels/")).cloned());
+    let sheet_name = wb.sheet_name(s).to_string();
+    let check = move |wb: &Workbook| {
+        let s = wb.sheet_id(&sheet_name).ok_or("sheet gone")?;
+        let charts = &wb.layout(s).charts;
+        if charts.len() == before + 1 && charts.iter().any(|c| c.title.as_deref() == Some("xl check") && c.anchor == anchor) {
+            Ok(())
+        } else {
+            Err(format!("expected {} charts with the new one at {anchor}, found {}", before + 1, charts.len()))
+        }
+    };
+    Ok(Edit { allowed: Allowed::Parts(allowed), rewrite_ok: false, check: Some(Box::new(check)) })
+}
+
 fn rename(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
     // Referenced: named in a formula, or in any part but the shared strings
     // and app.xml (which lists sheet names as plain titles). A sheet's own
@@ -568,13 +603,14 @@ fn check_file(index: usize, path: &Path, out_root: &Path, outputs: &mut Vec<(Pat
     let (workbook_part, sheet_parts) = sheet_parts(&original);
     let mut ctx = Ctx { path, out_dir, original, sheet_parts, workbook_part, outputs: Vec::new() };
     type Run = fn(&mut Ctx) -> Outcome;
-    let runs: [(&'static str, Run); 7] = [
+    let runs: [(&'static str, Run); 8] = [
         ("noop", noop),
         ("edit-new", |c| scenario(c, "edit-new", edit_new)),
         ("edit-middle", |c| scenario(c, "edit-middle", edit_middle)),
         ("style", |c| scenario(c, "style", style)),
         ("add-sheet", |c| scenario(c, "add-sheet", add_sheet)),
         ("rename", |c| scenario(c, "rename", rename)),
+        ("add-chart", |c| scenario(c, "add-chart", add_chart)),
         ("insert-row", |c| scenario(c, "insert-row", insert_row)),
     ];
     let mut outcomes = Vec::new();

@@ -524,3 +524,77 @@ fn new_sparklines_are_patched_in() {
     xl_io::save(&wb2, &out2, s2, Some(&pkg2)).unwrap();
     assert!(!text(&parts(&out2), "xl/worksheets/sheet1.xml").contains("sparkline"));
 }
+
+fn xl_chart(wb: &xl_engine::Workbook, kind: xl_engine::chart::ChartKind, values: &str, anchor: &str) -> xl_engine::chart::Chart {
+    use std::sync::Arc;
+    let e = |s: &str| Arc::new(xl_engine::formula::parse_formula(s, wb.sheets()).unwrap());
+    xl_engine::chart::Chart {
+        kind,
+        title: Some("Made in xl".into()),
+        series: vec![xl_engine::chart::ChartSeries { name: Some(e("\"Qty\"")), categories: Some(e("Data!$A$2:$A$4")), values: e(values) }],
+        anchor: CellRef::parse(anchor).unwrap(),
+        offset: (0.0, 0.0),
+        size: (360.0, 200.0),
+        stacked: false,
+    }
+}
+
+#[test]
+fn charts_added_removed_and_edited_are_patched() {
+    use xl_engine::chart::ChartKind;
+    let src = tmp("charts-src.xlsx");
+    rich_file(&src);
+    // Add a second chart; the original stays byte for byte.
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let c = xl_chart(&loaded.workbook, ChartKind::Line, "Data!$B$2:$B$4", "H12");
+    loaded.workbook.layout_mut(s).unwrap().charts.push(c);
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("charts-add.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let (before, after) = (parts(&src), parts(&out));
+    assert_eq!(before["xl/charts/chart1.xml"], after["xl/charts/chart1.xml"]);
+    let back = xl_io::open(&out).unwrap();
+    let charts = &back.workbook.layout(back.workbook.sheet_ids()[0]).charts;
+    assert_eq!(charts.len(), 2);
+    let new = charts.iter().find(|c| c.kind == ChartKind::Line).expect("the new chart reads back");
+    assert_eq!((new.title.as_deref(), new.anchor), (Some("Made in xl"), CellRef::parse("H12").unwrap()));
+    assert!((new.size.0 - 360.0).abs() < 3.0 && (new.size.1 - 200.0).abs() < 3.0, "{:?}", new.size);
+
+    // Remove the original: its part, relationship and anchor go.
+    let mut wb = back.workbook;
+    let pkg = back.package.unwrap();
+    let s = wb.sheet_ids()[0];
+    wb.layout_mut(s).unwrap().charts.retain(|c| c.kind == ChartKind::Line);
+    // And edit the new one (regenerated in place of the old).
+    wb.layout_mut(s).unwrap().charts[0].title = Some("Renamed".into());
+    assert_eq!(xl_io::save_plan(&wb, &pkg), SavePlan::Patch);
+    let out2 = tmp("charts-edit.xlsx");
+    xl_io::save(&wb, &out2, s, Some(&pkg)).unwrap();
+    let p = parts(&out2);
+    let chart_parts: Vec<&String> = p.keys().filter(|k| k.starts_with("xl/charts/chart")).collect();
+    assert_eq!(chart_parts.len(), 1, "{chart_parts:?}");
+    let back = xl_io::open(&out2).unwrap();
+    let charts = &back.workbook.layout(back.workbook.sheet_ids()[0]).charts;
+    assert_eq!(charts.iter().map(|c| c.title.as_deref()).collect::<Vec<_>>(), [Some("Renamed")]);
+    assert!(back.unsupported.is_empty(), "{:?}", back.unsupported);
+}
+
+#[test]
+fn charts_on_new_sheets_are_written() {
+    use xl_engine::chart::ChartKind;
+    let src = tmp("charts-newsheet-src.xlsx");
+    rich_file(&src);
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.add_sheet(Some("Summary")).unwrap();
+    let c = xl_chart(&loaded.workbook, ChartKind::Pie, "Data!$B$2:$B$4", "B2");
+    loaded.workbook.layout_mut(s).unwrap().charts.push(c);
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("charts-newsheet.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let back = xl_io::open(&out).unwrap();
+    let ns = *back.workbook.sheet_ids().iter().find(|&&id| back.workbook.sheet_name(id) == "Summary").unwrap();
+    let charts = &back.workbook.layout(ns).charts;
+    assert_eq!(charts.len(), 1);
+    assert_eq!((charts[0].kind, charts[0].anchor), (ChartKind::Pie, CellRef::parse("B2").unwrap()));
+}
