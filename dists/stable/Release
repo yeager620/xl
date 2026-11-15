@@ -1,20 +1,20 @@
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Sun, 15 Nov 2026 10:36:08 +0000
+Date: Sun, 15 Nov 2026 12:25:41 +0000
 Description: xl spreadsheet
 Label: xl
 Origin: xl
 Suite: stable
 MD5Sum:
- e02b156296678a812dd60161986b8ee1             4053 main/binary-amd64/Packages
- 817f92fb3e15c9560128568aa13c1639             1279 main/binary-amd64/Packages.gz
+ 6f1529a2762be8653b4ae200b381d6b7             5067 main/binary-amd64/Packages
+ a6a4cff4a43fe2f28f43b2d378206f0a             1481 main/binary-amd64/Packages.gz
 SHA1:
- fa92f8e2c8cb13d73a63804abe5a667e1803581e             4053 main/binary-amd64/Packages
- 98c9df8cd507f486f6ab5283f15bd91df950893c             1279 main/binary-amd64/Packages.gz
+ a6c9b582273700445b156a300ad1a82ba46ab856             5067 main/binary-amd64/Packages
+ 37217d8f6c781583cbf9d668e7a34a79b3a9715b             1481 main/binary-amd64/Packages.gz
 SHA256:
- 05b2c45babefcffa732da36d0601d6420d65de6f0618bdb0f37740dc8ed43ceb             4053 main/binary-amd64/Packages
- 11f03e8fb71160b567a754f178d19a2f2324a79f52b3de9a47843199ecf33302             1279 main/binary-amd64/Packages.gz
+ 07e8bd96eda1fee09fe738d0117f73ddec7bb327bbb01b085a4eda0725c1c22c             5067 main/binary-amd64/Packages
+ d005a68fddd3ecc81f3da56e08d801d64fed8170bae4190a7c68746402a509d7             1481 main/binary-amd64/Packages.gz
 SHA512:
- a0254b3885a916ffc73da2b69c79430c4bdb8555d0cc0de142656fe984a3bca3cef88d55f4c6c32ae0213df6cbab7f978a34a9de0d8e0f3dc8e3d8edab8a7faf             4053 main/binary-amd64/Packages
- 753350cf69ceaaa36b753b6f1d606998dd7ac1c73ad0e618b0f6aabcf2b52c320209b94518e329d536abf39b7aae8b627ffdf8c140777bc783a1a36fcfe58a18             1279 main/binary-amd64/Packages.gz
+ d5734529969e4fd93ef68a44da6e5778b811c0db0f7a232b107fb044983b093b43776d811b3e96d815ac22deda53ed0494d0f23e669f2b39faef2493ab674961             5067 main/binary-amd64/Packages
+ 37abf35898bb91e27f0bfa940520f6fdcc39fe505a1345db2c0498a04ae86f737036c34431e1b54d95013f72059093d2c624009fb22d83c6b6e316e12194dfc5             1481 main/binary-amd64/Packages.gz

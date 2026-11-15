@@ -82,3 +82,24 @@ Description: Fast native spreadsheet
  Excel-style formulas, number formats, cell styles, multiple sheets,
  autosave and crash recovery.
 
+Package: xl
+Architecture: amd64
+Version: 0.4.0
+Priority: optional
+Section: misc
+Maintainer: xl contributors <xl@users.noreply.invalid>
+Installed-Size: 42692
+Depends: libc6 (>= 2.35), libgcc-s1 (>= 4.2), libxcb1 (>= 1.12), libxkbcommon-x11-0 (>= 0.5.0), libxkbcommon0 (>= 0.5.0), libvulkan1, libwayland-client0, libegl1, libx11-xcb1
+Recommends: mesa-vulkan-drivers | vulkan-icd
+Filename: pool/main/x/xl/xl_0.4.0_amd64.deb
+Size: 13613796
+MD5sum: 7b3ea9f9c1e4860c5fc1940bd141d027
+SHA1: 1a8408a2018f3ecca9bd32ec816fbf6f285f1596
+SHA256: e83da20cc63cdd0854b4af0910bcd77f0b4414de6bb7fafe38f6039c0405af4e
+SHA512: b3ff41ddac464ee5fe3e6f3bf434ecc703139aa2c11a92254d323708c55afeffe43592298841657423a8921f901c29ad48a608cc51e31f69b6a44170b974f622
+Description: Fast native spreadsheet
+ xl opens and saves Excel workbooks and CSV files and recalculates only
+ what changed, so edits show up instantly even in large sheets. It has
+ Excel-style formulas, number formats, cell styles, multiple sheets,
+ autosave and crash recovery.
+
