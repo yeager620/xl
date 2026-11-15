@@ -353,7 +353,7 @@ impl Spreadsheet {
     pub(crate) fn render_lossy_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let parts = match self.unsupported.as_slice() {
-            [] => String::new(),
+            [] => "formatting and parts xl doesn't model".to_string(),
             [one] => one.to_string(),
             [init @ .., last] => format!("{} and {last}", init.join(", ")),
         };

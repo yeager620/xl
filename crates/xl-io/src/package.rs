@@ -62,6 +62,9 @@ pub struct Package {
     pub(crate) notes: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Note>>,
     pub(crate) links: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Link>>,
     pub(crate) validations: HashMap<SheetId, Vec<xl_engine::validation::Validation>>,
+    /// Per sheet, each chart as read with its drawing part and anchor index
+    /// (only when they line up one-to-one with the workbook's charts).
+    pub(crate) chart_places: HashMap<SheetId, Vec<crate::xlsx_charts::FoundChart>>,
 }
 
 /// A per-cell map after the structural edits since the package was read.
@@ -84,6 +87,30 @@ impl Package {
     pub(crate) fn notes_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
         let Some(before) = self.notes.get(&sheet) else { return !wb.layout(sheet).notes.is_empty() };
         shifted(before, wb, self, sheet) != wb.layout(sheet).notes
+    }
+
+    /// Charts whose place differs from where inserted/deleted lines alone
+    /// would have put them: (index, drawing part, anchor index). None if
+    /// they can't be matched to the file's anchors.
+    pub(crate) fn moved_charts(&self, wb: &Workbook, sheet: SheetId) -> Option<Vec<(usize, String, usize)>> {
+        let now = &wb.layout(sheet).charts;
+        let places = self.chart_places.get(&sheet)?;
+        if places.len() != now.len() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for (i, ((orig, part, anchor), current)) in places.iter().zip(now).enumerate() {
+            let mut expected = orig.clone();
+            for op in wb.structure_log().iter().skip(self.log_len) {
+                if let xl_engine::StructOp::Shift(s) = op {
+                    expected.apply_shift(*s, sheet);
+                }
+            }
+            if (expected.anchor, expected.offset, expected.size) != (current.anchor, current.offset, current.size) {
+                out.push((i, part.clone(), *anchor));
+            }
+        }
+        Some(out)
     }
 
     /// Did a sheet's validation rules change other than by moving with lines?
@@ -258,7 +285,15 @@ impl Package {
             cell_extras.insert(id, with_input);
             sheets.push(PackageSheet { id, name: name.clone(), part, digest: sheet_digest(wb, id), structure: wb.structure_version(id) });
         }
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect() })
+        let mut chart_places = HashMap::new();
+        for s in &sheets {
+            if let Ok((found, _)) = crate::xlsx_charts::scan_charts(&mut zip, &s.part, wb, s.id)
+                && found.len() == wb.layout(s.id).charts.len()
+            {
+                chart_places.insert(s.id, found);
+            }
+        }
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.
@@ -291,8 +326,7 @@ pub enum SavePlan {
 
 pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
     let mut why = Vec::new();
-    let structural = wb.structure_log().len() > pkg.log_len;
-    for s in &pkg.sheets {
+        for s in &pkg.sheets {
         if !wb.sheet_ids().contains(&s.id) {
             why.push(format!("the sheet “{}” was deleted", s.name));
             continue;
@@ -301,9 +335,8 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         if now.objects != s.digest.objects {
             why.push(format!("charts or sparklines on “{}” were added, removed or edited", wb.sheet_name(s.id)));
         }
-        // Positions follow inserted/deleted lines (rewritten in the drawing);
-        // a move by hand isn't patched yet.
-        if now.object_places != s.digest.object_places && !structural {
+        // Charts moved by hand get new anchors; that needs them matched to the file's.
+        if now.object_places != s.digest.object_places && pkg.moved_charts(wb, s.id).is_none() {
             why.push(format!("a chart on “{}” was moved or resized", wb.sheet_name(s.id)));
         }
         if pkg.validations_changed(wb, s.id)

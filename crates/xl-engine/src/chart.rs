@@ -72,7 +72,7 @@ impl Chart {
 
     /// Follow inserted/deleted lines: data references on any sheet; the
     /// chart's own position when `on_sheet` is the shifted sheet.
-    pub(crate) fn apply_shift(&mut self, op: Shift, home: SheetId) {
+    pub fn apply_shift(&mut self, op: Shift, home: SheetId) {
         for e in self.exprs_mut() {
             *e = Arc::new(e.shifted(op, home));
         }

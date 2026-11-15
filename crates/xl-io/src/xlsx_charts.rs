@@ -229,10 +229,26 @@ struct Marker {
 }
 
 pub(crate) fn read_sheet_charts(zip: &mut Zip, sheet_part: &str, wb: &mut Workbook, sheet: SheetId) -> Result<DrawingNotes, String> {
+    let (charts, notes) = scan_charts(zip, sheet_part, wb, sheet)?;
+    if let Some(l) = wb.layout_mut(sheet) {
+        l.charts.extend(charts.into_iter().map(|c| c.0));
+    }
+    Ok(notes)
+}
+
+/// A chart found in a sheet's drawings, with the drawing part and the
+/// index of its anchor there (so a moved chart can be re-anchored).
+pub(crate) type FoundChart = (Chart, String, usize);
+
+/// The charts xl can read in a sheet's drawings, in a stable order.
+pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet: SheetId) -> Result<(Vec<FoundChart>, DrawingNotes), String> {
     let mut notes = DrawingNotes::default();
+    let mut found = Vec::new();
     let rels = read_rels(zip, &rels_of(sheet_part))?;
-    let drawings: Vec<String> = rels.values().filter(|t| t.contains("drawings/") && t.ends_with(".xml")).map(|t| resolve(sheet_part, t)).collect();
+    let mut drawings: Vec<String> = rels.values().filter(|t| t.contains("drawings/") && t.ends_with(".xml")).map(|t| resolve(sheet_part, t)).collect();
+    drawings.sort();
     for drawing in drawings {
+        let mut anchor_index = 0usize;
         let Some(bytes) = read_entry(zip, &drawing)? else { continue };
         let drels = read_rels(zip, &rels_of(&drawing))?;
         let mut r = xml(&bytes);
@@ -286,6 +302,8 @@ pub(crate) fn read_sheet_charts(zip: &mut Zip, sheet_part: &str, wb: &mut Workbo
                         field.clear();
                     }
                     "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                        anchor_index += 1;
+                        let this_anchor = anchor_index - 1;
                         let Some(target) = chart_rid.take().and_then(|id| drels.get(&id).cloned()) else { continue };
                         let part = resolve(&drawing, &target);
                         let Some(chart_xml) = read_entry(zip, &part)? else { continue };
@@ -314,9 +332,7 @@ pub(crate) fn read_sheet_charts(zip: &mut Zip, sheet_part: &str, wb: &mut Workbo
                                     size: (from_excel_width_px(w).max(80.0), from_excel_height(h * 0.75).max(60.0)),
                                     stacked,
                                 };
-                                if let Some(l) = wb.layout_mut(sheet) {
-                                    l.charts.push(chart);
-                                }
+                                found.push((chart, drawing.clone(), this_anchor));
                                 notes.charts += 1;
                             }
                             _ => notes.unsupported_charts = true,
@@ -330,7 +346,7 @@ pub(crate) fn read_sheet_charts(zip: &mut Zip, sheet_part: &str, wb: &mut Workbo
             buf.clear();
         }
     }
-    Ok(notes)
+    Ok((found, notes))
 }
 
 type ParsedChart = (ChartKind, bool, Option<String>, Vec<ChartSeries>);

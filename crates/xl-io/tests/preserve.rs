@@ -417,3 +417,29 @@ impl PipeItems for xl_engine::validation::ValidationRule {
         }
     }
 }
+
+#[test]
+fn moved_and_resized_charts_are_reanchored() {
+    let src = tmp("chartmove.xlsx");
+    rich_file(&src);
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    {
+        let c = &mut loaded.workbook.layout_mut(s).unwrap().charts[0];
+        c.anchor = CellRef::new(10, 2);
+        c.offset = (12.0, 4.0);
+        c.size = (400.0, 220.0);
+    }
+    // Plus an inserted row above, which moves it further down by one.
+    loaded.workbook.apply_shift(xl_engine::Shift::InsertRows { sheet: s, at: 0, count: 1 });
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("chartmove-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let back = xl_io::open(&out).unwrap();
+    let c = &back.workbook.layout(back.workbook.sheet_ids()[0]).charts[0];
+    assert_eq!(c.anchor, CellRef::new(11, 2));
+    assert!((c.offset.0 - 12.0).abs() < 2.0 && (c.offset.1 - 4.0).abs() < 2.0, "{:?}", c.offset);
+    assert!((c.size.0 - 400.0).abs() < 3.0 && (c.size.1 - 220.0).abs() < 3.0, "{:?}", c.size);
+    // The chart part itself (styling and all) is untouched apart from the shifted series.
+    assert!(text(&parts(&out), "xl/charts/chart1.xml").contains("Data!$B$3:$B$5"));
+}

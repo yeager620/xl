@@ -1501,6 +1501,57 @@ fn strip_prefix_close(rest: &str) -> String {
     }
 }
 
+/// Re-anchor the `index`-th anchor of a drawing at a chart's place and size.
+fn reanchor(doc: &[u8], index: usize, chart: &xl_engine::chart::Chart, wb: &Workbook, sheet: SheetId) -> Result<Vec<u8>, String> {
+    const EMU: f64 = 9525.0;
+    let (_, _, _, kids) = children(doc)?;
+    let anchors: Vec<&Child> = kids.iter().filter(|k| matches!(k.local.as_str(), "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor")).collect();
+    let Some(k) = anchors.get(index) else { return Err("a chart's anchor wasn't found".into()) };
+    let text = String::from_utf8_lossy(doc).to_string();
+    let el = &text[k.start..k.end];
+    let prefix = el[1..].split([' ', '>']).next().and_then(|n| n.rfind(':').map(|i| n[..=i].to_string())).unwrap_or_default();
+    // Excel pixels per column/row (hidden ones are zero wide).
+    let l = wb.layout(sheet);
+    let col_px = |c: u32| if l.hidden_cols.contains(&c) { 0.0 } else { wb.col_width(sheet, c).map_or(64.0, |px| to_excel_width_px(px) as f64) };
+    let row_px = |r: u32| if l.hidden_rows.contains(&r) { 0.0 } else { wb.row_height(sheet, r).map_or(20.0, |px| to_excel_height(px) * 4.0 / 3.0) };
+    let (c0, r0) = (chart.anchor.col, chart.anchor.row);
+    let (x_off, y_off) = (to_excel_width_px(chart.offset.0) as f64, to_excel_height(chart.offset.1) * 4.0 / 3.0);
+    let (w, h) = (to_excel_width_px(chart.size.0) as f64, to_excel_height(chart.size.1) * 4.0 / 3.0);
+    let (mut c1, mut x_rest) = (c0, x_off + w);
+    while c1 + 1 < xl_engine::MAX_COLS && x_rest >= col_px(c1) && col_px(c1) > 0.0 {
+        x_rest -= col_px(c1);
+        c1 += 1;
+    }
+    let (mut r1, mut y_rest) = (r0, y_off + h);
+    while r1 + 1 < xl_engine::MAX_ROWS && y_rest >= row_px(r1) && row_px(r1) > 0.0 {
+        y_rest -= row_px(r1);
+        r1 += 1;
+    }
+    let marker = |name: &str, c: u32, cx: f64, r: u32, ry: f64| {
+        format!("<{prefix}{name}><{prefix}col>{c}</{prefix}col><{prefix}colOff>{}</{prefix}colOff><{prefix}row>{r}</{prefix}row><{prefix}rowOff>{}</{prefix}rowOff></{prefix}{name}>", (cx * EMU).round() as i64, (ry * EMU).round() as i64)
+    };
+    let replace_el = |src: &str, name: &str, with: &str| -> String {
+        let (open, close) = (format!("<{prefix}{name}"), format!("</{prefix}{name}>"));
+        match (src.find(&open), src.find(&close)) {
+            (Some(a), Some(b)) if b > a => format!("{}{}{}", &src[..a], with, &src[b + close.len()..]),
+            _ => src.to_string(),
+        }
+    };
+    let mut new = replace_el(el, "from", &marker("from", c0, x_off, r0, y_off));
+    if k.local == "twoCellAnchor" {
+        new = replace_el(&new, "to", &marker("to", c1, x_rest, r1, y_rest));
+    } else {
+        // One-cell anchors carry their size as an extent after the marker.
+        let ext = format!("<{prefix}ext cx=\"{}\" cy=\"{}\"/>", (w * EMU).round() as i64, (h * EMU).round() as i64);
+        if let Some(a) = new.find(&format!("<{prefix}ext "))
+            && let Some(len) = new[a..].find("/>")
+        {
+            new = format!("{}{}{}", &new[..a], ext, &new[a + len + 2..]);
+        }
+    }
+    Ok(apply_edits(doc, vec![(k.start, k.end, new)]))
+}
+
 /// Point a table part's range (and its filter's) at the table's new rows.
 fn patch_table_part(doc: &[u8], range: Range) -> Vec<u8> {
     let text = String::from_utf8_lossy(doc).to_string();
@@ -1725,6 +1776,13 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     if names_changed || renamed || reordered || !new_sheets.is_empty() {
         let doc = part("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
         replaced.insert("xl/workbook.xml".into(), patch_workbook(&doc, wb, pkg, &new_sheets, names_changed)?);
+    }
+    // Charts moved or resized by hand.
+    for s in pkg.sheets.iter().filter(|s| wb.sheet_ids().contains(&s.id)) {
+        for (i, drawing, anchor) in pkg.moved_charts(wb, s.id).unwrap_or_default() {
+            let Some(doc) = replaced.get(&drawing).cloned().or_else(|| part(&drawing)) else { continue };
+            replaced.insert(drawing, reanchor(&doc, anchor, &wb.layout(s.id).charts[i], wb, s.id)?);
+        }
     }
     // Rewritten parts not otherwise changed.
     for (name, bytes) in rewritten {

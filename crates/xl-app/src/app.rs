@@ -1601,7 +1601,10 @@ impl Spreadsheet {
     /// Saving over the opened file would drop parts xl can't keep: it has
     /// some, and this save can't patch the original (see [`Self::rewrite_reasons`]).
     pub(crate) fn would_lose_parts(&self) -> bool {
-        !self.unsupported.is_empty() && self.path.as_deref().and_then(xl_io::FileKind::of) == Some(xl_io::FileKind::Xlsx) && !self.rewrite_reasons().is_empty()
+        // A rewrite of a file xl opened always drops something it doesn't
+        // model (themes, unusual formatting…), even with nothing listed.
+        let xlsx = self.path.as_deref().and_then(xl_io::FileKind::of) == Some(xl_io::FileKind::Xlsx);
+        xlsx && (self.package.is_some() || !self.unsupported.is_empty()) && !self.rewrite_reasons().is_empty()
     }
 
     /// Why saving must write a new file instead of patching the original.
