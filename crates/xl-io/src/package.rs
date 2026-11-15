@@ -62,6 +62,7 @@ pub struct Package {
     pub(crate) notes: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Note>>,
     pub(crate) links: HashMap<SheetId, std::collections::BTreeMap<CellRef, xl_engine::Link>>,
     pub(crate) validations: HashMap<SheetId, Vec<xl_engine::validation::Validation>>,
+    pub(crate) sparklines: HashMap<SheetId, Vec<xl_engine::chart::Sparkline>>,
     /// Per sheet, each chart as read with its drawing part and anchor index
     /// (only when they line up one-to-one with the workbook's charts).
     pub(crate) chart_places: HashMap<SheetId, Vec<crate::xlsx_charts::FoundChart>>,
@@ -111,6 +112,17 @@ impl Package {
             }
         }
         Some(out)
+    }
+
+    /// Did a sheet's sparklines change other than by moving with lines?
+    pub(crate) fn sparklines_changed(&self, wb: &Workbook, sheet: SheetId) -> bool {
+        let mut expected = self.sparklines.get(&sheet).cloned().unwrap_or_default();
+        for op in wb.structure_log().iter().skip(self.log_len) {
+            if let xl_engine::StructOp::Shift(s) = op {
+                expected.retain_mut(|sp| sp.apply_shift(*s, sheet));
+            }
+        }
+        expected != wb.layout(sheet).sparklines
     }
 
     /// Did a sheet's validation rules change other than by moving with lines?
@@ -168,10 +180,9 @@ pub(crate) fn sheet_digest(wb: &Workbook, id: SheetId) -> SheetDigest {
         tables: hash_of(&[&l.tables]),
         objects: {
             let charts: Vec<_> = l.charts.iter().map(|c| (c.kind, c.title.clone(), c.stacked, c.series.len())).collect();
-            let sparks: Vec<_> = l.sparklines.iter().map(|s| (s.kind, s.color)).collect();
-            hash_of(&[&charts, &sparks])
+            hash_of(&[&charts])
         },
-        object_places: hash_of(&[&l.charts, &l.sparklines]),
+        object_places: hash_of(&[&l.charts]),
         notes: hash_of(&[&l.notes]),
     }
 }
@@ -293,7 +304,7 @@ impl Package {
                 chart_places.insert(s.id, found);
             }
         }
-        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect() })
+        Ok(Package { bytes, sheets, cell_xfs, cell_extras, chart_places, names: names_digest(wb), log_len: wb.structure_log().len(), notes: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).notes.clone())).collect(), links: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).links.clone())).collect(), validations: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).validations.clone())).collect(), sparklines: wb.sheet_ids().iter().map(|&id| (id, wb.layout(id).sparklines.clone())).collect() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.
@@ -333,7 +344,7 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         }
         let now = sheet_digest(wb, s.id);
         if now.objects != s.digest.objects {
-            why.push(format!("charts or sparklines on “{}” were added, removed or edited", wb.sheet_name(s.id)));
+            why.push(format!("charts on “{}” were added, removed or edited", wb.sheet_name(s.id)));
         }
         // Charts moved by hand get new anchors; that needs them matched to the file's.
         if now.object_places != s.digest.object_places && pkg.moved_charts(wb, s.id).is_none() {
@@ -352,9 +363,6 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
             && let Some(problem) = notes_unpatchable(pkg, s)
         {
             why.push(format!("notes on “{}” changed, and {problem}", wb.sheet_name(s.id)));
-        }
-        if now.tables != s.digest.tables && !tables_patchable(wb, pkg, s) {
-            why.push(format!("tables on “{}” were added, removed or changed columns", wb.sheet_name(s.id)));
         }
     }
     // Addresses in preserved parts after inserted/deleted lines and renames.
@@ -383,39 +391,3 @@ fn notes_unpatchable(pkg: &Package, s: &PackageSheet) -> Option<&'static str> {
     None
 }
 
-/// Did the sheet's tables only change their row extent (same names, same
-/// first row, same columns)? Those are patched in their table parts.
-pub(crate) fn tables_patchable(wb: &Workbook, pkg: &Package, s: &PackageSheet) -> bool {
-    let now = &wb.layout(s.id).tables;
-    let Some(before) = original_tables(pkg, s) else { return false };
-    // Same tables and the same number of columns: only the range moved or grew.
-    now.len() == before.len() && now.iter().all(|t| before.iter().any(|(name, start_col, end_col)| name.eq_ignore_ascii_case(&t.name) && end_col - start_col == t.range.end.col - t.range.start.col))
-}
-
-/// (name, first column, last column) of the tables in the original sheet.
-pub(crate) fn original_tables(pkg: &Package, s: &PackageSheet) -> Option<Vec<(String, u32, u32)>> {
-    let mut zip = pkg.zip().ok()?;
-    let rels = read_rels(&mut zip, &crate::xlsx_charts::rels_of(&s.part)).ok()?;
-    let mut out = Vec::new();
-    for target in rels.values().filter(|t| t.contains("tables/")) {
-        let part = crate::xlsx_charts::resolve(&s.part, target);
-        let bytes = pkg.part(&part)?;
-        let mut r = xml(&bytes);
-        let mut buf = Vec::new();
-        loop {
-            match r.read_event_into(&mut buf).ok()? {
-                Event::Start(ref e) | Event::Empty(ref e) if local(e.name().as_ref()) == "table" => {
-                    let name = attr(e, "displayName").or_else(|| attr(e, "name"))?;
-                    let reference = attr(e, "ref")?;
-                    let (a, b) = reference.split_once(':').unwrap_or((&reference, &reference));
-                    out.push((name, CellRef::parse(a)?.col, CellRef::parse(b)?.col));
-                    break;
-                }
-                Event::Eof => break,
-                _ => {}
-            }
-            buf.clear();
-        }
-    }
-    Some(out)
-}

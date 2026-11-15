@@ -18,7 +18,7 @@ use xl_engine::cond::{CfOp, CfRule, CfStyle, CfValue, CondFormat, TextMatch};
 use xl_engine::format::builtin_format;
 use xl_engine::{Addr, CellInput, CellRef, Range, SheetId, Style, VAlign, Value, Workbook, precise};
 
-use crate::package::{Package, SheetDigest, names_digest, original_tables, sheet_digest};
+use crate::package::{Package, SheetDigest, names_digest, sheet_digest};
 use crate::xlsx_read::{Xf, attr, local, read_rels, xml};
 use crate::xlsx_write::{expand_this_row, prefix_future_functions};
 use crate::{to_excel_height, to_excel_width_px};
@@ -635,6 +635,7 @@ struct SheetCtx<'a> {
     /// The original `<col>` style indexes, per column.
     col_styles: HashMap<u32, String>,
     validations_changed: bool,
+    sparklines_changed: bool,
 }
 
 fn formula_text(wb: &Workbook, sheet: SheetId, cell: CellRef) -> String {
@@ -1108,6 +1109,36 @@ fn drop_ext(el: &str, uri: &str) -> String {
     el.to_string()
 }
 
+const X14_SPARKLINE_EXT: &str = "{05C60535-1F16-4fd2-B633-F4F36F0B64E0}";
+
+/// The extension holding a sheet's sparklines (None if it has none).
+fn sparklines_ext(wb: &Workbook, sheet: SheetId) -> Option<String> {
+    let list = &wb.layout(sheet).sparklines;
+    if list.is_empty() {
+        return None;
+    }
+    let mut groups = String::new();
+    for sp in list {
+        let Some((data_sheet, r)) = sp.data.reference() else { continue };
+        let name = xl_engine::quote_sheet_name(wb.sheet_name(data_sheet.unwrap_or(sheet)));
+        let kind = match sp.kind {
+            xl_engine::chart::SparkKind::Line => "",
+            xl_engine::chart::SparkKind::Column => " type=\"column\"",
+            xl_engine::chart::SparkKind::WinLoss => " type=\"stacked\"",
+        };
+        let color = rgb_attr(sp.color.unwrap_or(0x376092));
+        groups.push_str(&format!(
+            "<x14:sparklineGroup{kind} displayEmptyCellsAs=\"gap\"><x14:colorSeries rgb=\"{color}\"/><x14:colorNegative rgb=\"FFD00000\"/><x14:colorAxis rgb=\"FF000000\"/><x14:colorMarkers rgb=\"FFD00000\"/><x14:colorFirst rgb=\"FFD00000\"/><x14:colorLast rgb=\"FFD00000\"/><x14:colorHigh rgb=\"FFD00000\"/><x14:colorLow rgb=\"FFD00000\"/><x14:sparklines><x14:sparkline><xm:f>{}!{}</xm:f><xm:sqref>{}</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup>",
+            esc(&name),
+            range_ref(r),
+            sp.cell
+        ));
+    }
+    Some(format!(
+        "<ext uri=\"{X14_SPARKLINE_EXT}\" xmlns:x14=\"http://schemas.microsoft.com/office/spreadsheetml/2009/9/main\"><x14:sparklineGroups xmlns:xm=\"http://schemas.microsoft.com/office/excel/2006/main\">{groups}</x14:sparklineGroups></ext>"
+    ))
+}
+
 /// Rewrite the parts of a worksheet that changed.
 fn patch_sheet(doc: &[u8], ctx: &mut SheetCtx, before: &SheetDigest, now: &SheetDigest) -> Result<Vec<u8>, String> {
     let mut replace: HashMap<&str, Option<String>> = HashMap::new();
@@ -1138,6 +1169,22 @@ fn patch_sheet(doc: &[u8], ctx: &mut SheetCtx, before: &SheetDigest, now: &Sheet
             let empty = !cleaned.contains("<ext") && !cleaned.contains(":ext");
             replace.insert("extLst", if empty { None } else { Some(cleaned) });
         }
+    }
+    if ctx.sparklines_changed {
+        // Replace the sparkline extension, keeping any others.
+        let current = replace.get("extLst").cloned().flatten().or_else(|| original("extLst"));
+        let mut ext = current.map(|e| drop_ext(&e, X14_SPARKLINE_EXT));
+        if let Some(new) = sparklines_ext(ctx.wb, ctx.id) {
+            ext = Some(match ext {
+                Some(e) => match e.rfind("</") {
+                    Some(i) => format!("{}{new}{}", &e[..i], &e[i..]),
+                    None => format!("<extLst>{new}</extLst>"),
+                },
+                None => format!("<extLst>{new}</extLst>"),
+            });
+        }
+        let empty = ext.as_ref().is_some_and(|e| !e.contains("<ext") && !e.contains(":ext"));
+        replace.insert("extLst", if empty { None } else { ext });
     }
     if ctx.validations_changed {
         replace.insert("dataValidations", validations_xml(ctx.wb, ctx.id));
@@ -1552,6 +1599,166 @@ fn reanchor(doc: &[u8], index: usize, chart: &xl_engine::chart::Chart, wb: &Work
     Ok(apply_edits(doc, vec![(k.start, k.end, new)]))
 }
 
+const REL_TABLE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+const CT_TABLE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml";
+
+/// A table as it is in the file: name, part, relationship id, column count, id.
+struct TablePart {
+    name: String,
+    part: String,
+    rid: String,
+    cols: u32,
+    id: u32,
+}
+
+fn original_table_parts(pkg: &Package, sheet_part: &str) -> Vec<TablePart> {
+    let Ok(mut zip) = pkg.zip() else { return Vec::new() };
+    let rels = read_rels(&mut zip, &crate::xlsx_charts::rels_of(sheet_part)).unwrap_or_default();
+    let mut out = Vec::new();
+    for (rid, target) in rels.iter().filter(|(_, t)| t.contains("tables/")) {
+        let part = crate::xlsx_charts::resolve(sheet_part, target);
+        let Some(bytes) = pkg.part(&part) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        let attr_of = |k: &str| text.split(&format!(" {k}=\"")).nth(1).and_then(|v| v.split('"').next()).map(str::to_string);
+        let (Some(name), Some(reference)) = (attr_of("displayName").or_else(|| attr_of("name")), attr_of("ref")) else { continue };
+        let (a, b) = reference.split_once(':').unwrap_or((&reference, &reference));
+        let cols = match (CellRef::parse(a), CellRef::parse(b)) {
+            (Some(a), Some(b)) => b.col - a.col + 1,
+            _ => continue,
+        };
+        out.push(TablePart { name, part, rid: rid.clone(), cols, id: attr_of("id").and_then(|v| v.parse().ok()).unwrap_or(1) });
+    }
+    out.sort_by(|a, b| a.part.cmp(&b.part));
+    out
+}
+
+/// A whole table part.
+fn table_xml(wb: &Workbook, sheet: SheetId, t: &xl_engine::Table, id: u32) -> String {
+    let r = t.range;
+    let reference = range_ref(r);
+    let style = match t.style {
+        xl_engine::TableStyle::Blue => "TableStyleMedium2",
+        xl_engine::TableStyle::Orange => "TableStyleMedium3",
+        xl_engine::TableStyle::Gray => "TableStyleMedium4",
+        xl_engine::TableStyle::Green => "TableStyleMedium7",
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let cols: String = (r.start.col..=r.end.col)
+        .enumerate()
+        .map(|(i, c)| {
+            let mut name = wb.display(Addr::new(sheet, CellRef::new(r.start.row, c))).text;
+            if name.is_empty() {
+                name = format!("Column{}", i + 1);
+            }
+            // Column names must be unique.
+            while seen.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                name.push('2');
+            }
+            seen.push(name.clone());
+            format!("<tableColumn id=\"{}\" name=\"{}\"/>", i + 1, esc(&name))
+        })
+        .collect();
+    let filter_ref = if t.totals { range_ref(Range::new(r.start, CellRef::new(r.end.row - 1, r.end.col))) } else { reference.clone() };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<table xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" id=\"{id}\" name=\"{n}\" displayName=\"{n}\" ref=\"{reference}\"{totals}><autoFilter ref=\"{filter_ref}\"/><tableColumns count=\"{}\">{cols}</tableColumns><tableStyleInfo name=\"{style}\" showFirstColumn=\"0\" showLastColumn=\"0\" showRowStripes=\"{}\" showColumnStripes=\"0\"/></table>",
+        r.cols(),
+        if t.banded { 1 } else { 0 },
+        n = esc(&t.name),
+        totals = if t.totals { " totalsRowCount=\"1\"" } else { " totalsRowShown=\"0\"" },
+    )
+}
+
+/// The parts of a save that table syncing adds to.
+struct TableCtx<'a> {
+    replaced: &'a mut HashMap<String, Vec<u8>>,
+    added_parts: &'a mut Vec<(String, Vec<u8>)>,
+    removed: &'a mut BTreeSet<String>,
+    ct_adds: &'a mut Vec<(String, &'static str)>,
+    ct_removes: &'a mut Vec<String>,
+    taken: &'a mut BTreeSet<String>,
+    next_id: &'a mut u32,
+}
+
+/// Bring a sheet's table parts in line with its tables. Returns the sheet
+/// XML if its `<tableParts>` changed.
+fn sync_tables(wb: &Workbook, pkg: &Package, sheet: SheetId, sheet_part: &str, sheet_doc: Vec<u8>, originals: &[TablePart], ctx: &mut TableCtx) -> Result<Option<Vec<u8>>, String> {
+    let tables = &wb.layout(sheet).tables;
+    let mut kept_rids: Vec<String> = Vec::new();
+    let mut rel_adds: Vec<(String, &str, String)> = Vec::new();
+    let mut rel_removes: Vec<String> = Vec::new();
+    for t in tables {
+        match originals.iter().find(|o| o.name.eq_ignore_ascii_case(&t.name)) {
+            Some(o) if o.cols == t.range.cols() => {
+                if let Some(doc) = ctx.replaced.get(&o.part).cloned().or_else(|| pkg.part(&o.part)) {
+                    ctx.replaced.insert(o.part.clone(), patch_table_part(&doc, t.range));
+                }
+                kept_rids.push(o.rid.clone());
+            }
+            // Columns changed: the part is rewritten (its id and place kept).
+            Some(o) => {
+                ctx.replaced.insert(o.part.clone(), table_xml(wb, sheet, t, o.id).into_bytes());
+                kept_rids.push(o.rid.clone());
+            }
+            None => {
+                let mut n = 1;
+                while ctx.taken.contains(&format!("xl/tables/table{n}.xml")) {
+                    n += 1;
+                }
+                let part = format!("xl/tables/table{n}.xml");
+                ctx.taken.insert(part.clone());
+                ctx.added_parts.push((part.clone(), table_xml(wb, sheet, t, *ctx.next_id).into_bytes()));
+                *ctx.next_id += 1;
+                ctx.ct_adds.push((format!("/{part}"), CT_TABLE));
+                let rid = format!("rIdXlTable{n}");
+                rel_adds.push((rid.clone(), REL_TABLE, format!("../tables/table{n}.xml")));
+                kept_rids.push(rid);
+            }
+        }
+    }
+    for o in originals.iter().filter(|o| !tables.iter().any(|t| t.name.eq_ignore_ascii_case(&o.name))) {
+        ctx.removed.insert(o.part.clone());
+        ctx.ct_removes.push(format!("/{}", o.part));
+        rel_removes.push(o.part.rsplit('/').next().unwrap_or("").to_string());
+    }
+    if rel_adds.is_empty() && rel_removes.is_empty() {
+        return Ok(None);
+    }
+    // The sheet's relationships: drop removed tables' (by file name), add new ones.
+    let rels_path = crate::xlsx_charts::rels_of(sheet_part);
+    let rels_doc = ctx.replaced.get(&rels_path).cloned().or_else(|| ctx.added_parts.iter().find(|(p, _)| *p == rels_path).map(|(_, b)| b.clone())).or_else(|| pkg.part(&rels_path));
+    let new_rels = match rels_doc {
+        Some(doc) => {
+            let doc = expand_root(&doc);
+            let (_, root_close, prefix, kids) = children(&doc)?;
+            let text = String::from_utf8_lossy(&doc).to_string();
+            let mut edits: Vec<(usize, usize, String)> = kids
+                .iter()
+                .filter(|k| rel_removes.iter().any(|f| text[k.start..k.end].contains(&format!("/{f}\"")) && text[k.start..k.end].contains("relationships/table\"")))
+                .map(|k| (k.start, k.end, String::new()))
+                .collect();
+            let add: String = rel_adds.iter().map(|(id, ty, t)| format!("<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{t}\"/>")).collect();
+            edits.push((root_close, root_close, prefixed(&add, &prefix)));
+            apply_edits(&doc, edits)
+        }
+        None => {
+            let add: String = rel_adds.iter().map(|(id, ty, t)| format!("<Relationship Id=\"{id}\" Type=\"{ty}\" Target=\"{t}\"/>")).collect();
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{add}</Relationships>").into_bytes()
+        }
+    };
+    if let Some(slot) = ctx.added_parts.iter_mut().find(|(p, _)| *p == rels_path) {
+        slot.1 = new_rels;
+    } else if pkg.part(&rels_path).is_some() || ctx.replaced.contains_key(&rels_path) {
+        ctx.replaced.insert(rels_path, new_rels);
+    } else {
+        ctx.added_parts.push((rels_path, new_rels));
+    }
+    let doc = ensure_r_namespace(sheet_doc)?;
+    let parts: String = kept_rids.iter().map(|r| format!("<tablePart r:id=\"{r}\"/>")).collect();
+    let mut rep: HashMap<&str, Option<String>> = HashMap::new();
+    rep.insert("tableParts", (!kept_rids.is_empty()).then(|| format!("<tableParts count=\"{}\">{parts}</tableParts>", kept_rids.len())));
+    Ok(Some(splice(&doc, SHEET_ORDER, rep)?))
+}
+
 /// Point a table part's range (and its filter's) at the table's new rows.
 fn patch_table_part(doc: &[u8], range: Range) -> Vec<u8> {
     let text = String::from_utf8_lossy(doc).to_string();
@@ -1599,7 +1806,8 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         let now = sheet_digest(wb, s.id);
         let before = s.digest;
         let validations_changed = pkg.validations_changed(wb, s.id);
-        if (now.data, now.cols, now.merges, now.cond, now.filter, now.freeze) == (before.data, before.cols, before.merges, before.cond, before.filter, before.freeze) && !validations_changed {
+        let sparklines_changed = pkg.sparklines_changed(wb, s.id);
+        if (now.data, now.cols, now.merges, now.cond, now.filter, now.freeze) == (before.data, before.cols, before.merges, before.cond, before.filter, before.freeze) && !validations_changed && !sparklines_changed {
             continue;
         }
         any_data |= now.data != before.data;
@@ -1616,27 +1824,10 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             row_attrs,
             col_styles,
             validations_changed,
+            sparklines_changed,
         };
         let patched = patch_sheet(&doc, &mut ctx, &before, &now)?;
         replaced.insert(s.part.clone(), patched);
-    }
-    // Tables whose row extent changed.
-    for s in pkg.sheets.iter().filter(|s| wb.sheet_ids().contains(&s.id)) {
-        if sheet_digest(wb, s.id).tables == s.digest.tables {
-            continue;
-        }
-        let rels = read_rels(&mut zip, &crate::xlsx_charts::rels_of(&s.part))?;
-        for target in rels.values().filter(|t| t.contains("tables/")) {
-            let part = crate::xlsx_charts::resolve(&s.part, target);
-            let Some(doc) = pkg.part(&part) else { continue };
-            let name = original_tables(pkg, s).and_then(|ts| {
-                let text = String::from_utf8_lossy(&doc).to_string();
-                ts.into_iter().map(|t| t.0).find(|n| text.contains(&format!("displayName=\"{n}\"")) || text.contains(&format!("name=\"{n}\"")))
-            });
-            if let Some(t) = name.and_then(|n| wb.layout(s.id).tables.iter().find(|t| t.name.eq_ignore_ascii_case(&n))) {
-                replaced.insert(part, patch_table_part(&doc, t.range));
-            }
-        }
     }
     // Sheets new in xl.
     let existing: BTreeSet<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
@@ -1644,6 +1835,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     let mut new_sheet_parts: Vec<(SheetId, String)> = Vec::new();
     let mut rel_adds: Vec<(String, &str, String)> = Vec::new();
     let mut ct_adds: Vec<(String, &'static str)> = Vec::new();
+    let mut ct_removes_tables: Vec<String> = Vec::new();
     let mut n = 1;
     for &id in wb.sheet_ids() {
         if pkg.sheets.iter().any(|s| s.id == id) {
@@ -1653,7 +1845,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             n += 1;
         }
         let part = format!("xl/worksheets/sheet{n}.xml");
-        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new(), validations_changed: true };
+        let mut ctx = SheetCtx { wb, id, styles: &mut styles, strings: &mut strings, original_xfs: None, extras: None, row_attrs: HashMap::new(), col_styles: HashMap::new(), validations_changed: true, sparklines_changed: true };
         added_parts.push((part.clone(), new_sheet(&mut ctx).into_bytes()));
         new_sheet_parts.push((id, part.clone()));
         let rid = format!("rIdXl{n}");
@@ -1663,6 +1855,41 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         any_data = true;
     }
     // Shared strings: append, or create the part.
+    // Tables: ranges patched in place; added, removed or re-columned tables
+    // get their parts, relationships and the sheet's <tableParts> updated.
+    let mut next_table_id = existing
+        .iter()
+        .filter(|n| n.starts_with("xl/tables/"))
+        .filter_map(|n| pkg.part(n))
+        .filter_map(|b| String::from_utf8_lossy(&b).split(" id=\"").nth(1).and_then(|v| v.split('"').next()).and_then(|v| v.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut taken_tables: BTreeSet<String> = existing.clone();
+    let table_sheets: Vec<(SheetId, String, bool)> = pkg
+        .sheets
+        .iter()
+        .filter(|s| wb.sheet_ids().contains(&s.id) && sheet_digest(wb, s.id).tables != s.digest.tables)
+        .map(|s| (s.id, s.part.clone(), false))
+        .chain(new_sheet_parts.iter().filter(|(id, _)| !wb.layout(*id).tables.is_empty()).map(|(id, p)| (*id, p.clone(), true)))
+        .collect();
+    for (id, sheet_part, is_new) in table_sheets {
+        let doc = replaced
+            .get(&sheet_part)
+            .cloned()
+            .or_else(|| added_parts.iter().find(|(p, _)| *p == sheet_part).map(|(_, b)| b.clone()))
+            .or_else(|| part(&sheet_part))
+            .ok_or_else(|| format!("missing {sheet_part}"))?;
+        let originals = if is_new { Vec::new() } else { original_table_parts(pkg, &sheet_part) };
+        let mut ctx = TableCtx { replaced: &mut replaced, added_parts: &mut added_parts, removed: &mut removed, ct_adds: &mut ct_adds, ct_removes: &mut ct_removes_tables, taken: &mut taken_tables, next_id: &mut next_table_id };
+        if let Some(new_doc) = sync_tables(wb, pkg, id, &sheet_part, doc, &originals, &mut ctx)? {
+            if let Some(slot) = added_parts.iter_mut().find(|(p, _)| *p == sheet_part) {
+                slot.1 = new_doc;
+            } else {
+                replaced.insert(sheet_part, new_doc);
+            }
+        }
+    }
     // Hyperlinks that changed (or appeared on new sheets).
     let link_sheets: Vec<(SheetId, String)> = pkg
         .sheets
@@ -1764,7 +1991,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     }
     // Excel rebuilds the calculation chain; a stale one makes it repair the file.
     let mut rel_removes = Vec::new();
-    let mut ct_removes = Vec::new();
+    let mut ct_removes = std::mem::take(&mut ct_removes_tables);
     if any_data && existing.contains("xl/calcChain.xml") {
         removed.insert("xl/calcChain.xml".into());
         rel_removes.push("calcChain.xml".to_string());

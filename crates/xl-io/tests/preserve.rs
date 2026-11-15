@@ -443,3 +443,78 @@ fn moved_and_resized_charts_are_reanchored() {
     // The chart part itself (styling and all) is untouched apart from the shifted series.
     assert!(text(&parts(&out), "xl/charts/chart1.xml").contains("Data!$B$3:$B$5"));
 }
+
+#[test]
+fn tables_added_and_removed_are_patched() {
+    use xl_engine::{Table, TableStyle};
+    let src = tmp("tables-src.xlsx");
+    {
+        let mut book = XlsxBook::new();
+        let ws = book.add_worksheet();
+        for (r, row) in [["Item", "Qty"], ["Pen", "3"], ["Pad", "5"]].iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                match v.parse::<f64>() {
+                    Ok(n) => ws.write_number(r as u32, c as u16, n).unwrap(),
+                    Err(_) => ws.write_string(r as u32, c as u16, *v).unwrap(),
+                };
+            }
+        }
+        ws.add_table(0, 0, 2, 1, &rust_xlsxwriter::Table::new().set_name("Stock")).unwrap();
+        ws.insert_note(5, 5, &Note::new("keep me")).unwrap();
+        book.save(&src).unwrap();
+    }
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    // Add a second table and remove the first.
+    for (r, row) in [["Who", "Score"], ["Ann", "9"], ["Bo", "7"]].iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            loaded.workbook.set_input(Addr::new(s, CellRef::new(r as u32, 4 + c as u32)), v).unwrap();
+        }
+    }
+    loaded.workbook.add_table(s, Table { name: "Scores".into(), range: xl_engine::Range::new(CellRef::new(0, 4), CellRef::new(2, 5)), totals: false, style: TableStyle::Green, banded: true }).unwrap();
+    loaded.workbook.layout_mut(s).unwrap().tables.retain(|t| t.name != "Stock");
+    loaded.workbook.set_input(Addr::new(s, CellRef::new(0, 7)), "=SUM(Scores[Score])").unwrap();
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("tables-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let p = parts(&out);
+    let sheet = text(&p, "xl/worksheets/sheet1.xml");
+    assert_eq!(sheet.matches("<tablePart ").count(), 1, "{sheet}");
+    assert!(!p.contains_key("xl/tables/table1.xml"), "the removed table's part is gone");
+    assert!(p.keys().any(|k| k.starts_with("xl/comments")), "everything else kept");
+    let back = xl_io::open(&out).unwrap();
+    let bs = back.workbook.sheet_ids()[0];
+    let tables = &back.workbook.layout(bs).tables;
+    assert_eq!(tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Scores"]);
+    assert_eq!(tables[0].style, TableStyle::Green);
+    assert_eq!(*back.workbook.value(Addr::new(bs, CellRef::new(0, 7))), Value::Number(16.0));
+}
+
+#[test]
+fn new_sparklines_are_patched_in() {
+    use std::sync::Arc;
+    use xl_engine::chart::{SparkKind, Sparkline};
+    let src = tmp("spark-src.xlsx");
+    rich_file(&src);
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    let data = Arc::new(xl_engine::formula::parse_formula("Data!$B$2:$B$4", loaded.workbook.sheets()).unwrap());
+    loaded.workbook.layout_mut(s).unwrap().sparklines.push(Sparkline { cell: CellRef::parse("C5").unwrap(), kind: SparkKind::Column, data, color: None });
+    assert_eq!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Patch);
+    let out = tmp("spark-edit.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, loaded.package.as_ref()).unwrap();
+    let sheet = text(&parts(&out), "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<dataValidations") && sheet.contains("<hyperlinks"), "the rest of the sheet is kept");
+    let back = xl_io::open(&out).unwrap();
+    let sp = &back.workbook.layout(back.workbook.sheet_ids()[0]).sparklines;
+    assert_eq!(sp.len(), 1);
+    assert_eq!((sp[0].cell, sp[0].kind), (CellRef::parse("C5").unwrap(), SparkKind::Column));
+    // And removing it again.
+    let mut wb2 = back.workbook;
+    let s2 = wb2.sheet_ids()[0];
+    let pkg2 = back.package.unwrap();
+    wb2.layout_mut(s2).unwrap().sparklines.clear();
+    let out2 = tmp("spark-edit2.xlsx");
+    xl_io::save(&wb2, &out2, s2, Some(&pkg2)).unwrap();
+    assert!(!text(&parts(&out2), "xl/worksheets/sheet1.xml").contains("sparkline"));
+}

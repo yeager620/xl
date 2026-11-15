@@ -165,7 +165,7 @@ pub struct Sparkline {
 
 impl Sparkline {
     /// False if its cell was deleted.
-    pub(crate) fn apply_shift(&mut self, op: Shift, home: SheetId) -> bool {
+    pub fn apply_shift(&mut self, op: Shift, home: SheetId) -> bool {
         self.data = Arc::new(self.data.shifted(op, home));
         if op.sheet() != home {
             return true;
