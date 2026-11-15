@@ -28,8 +28,11 @@ pub struct SheetDigest {
     pub filter: u64,
     pub freeze: u64,
     pub tables: u64,
-    /// Charts and sparklines (xl can't patch these into an existing file yet).
+    /// Charts and sparklines apart from where they are (xl can't patch
+    /// new or edited ones into an existing file yet).
     pub objects: u64,
+    /// Where charts and sparklines are, and the cells they read.
+    pub object_places: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +53,8 @@ pub struct Package {
     /// Style index (`s`) of every styled cell, per sheet.
     pub(crate) cell_xfs: HashMap<SheetId, HashMap<CellRef, u32>>,
     pub(crate) names: u64,
+    /// Structural edits the workbook had when this package was read.
+    pub(crate) log_len: usize,
 }
 
 impl std::fmt::Debug for Package {
@@ -87,7 +92,12 @@ pub(crate) fn sheet_digest(wb: &Workbook, id: SheetId) -> SheetDigest {
         filter: hash_of(&[&l.filter]),
         freeze: hash_of(&[&l.freeze]),
         tables: hash_of(&[&l.tables]),
-        objects: hash_of(&[&l.charts, &l.sparklines]),
+        objects: {
+            let charts: Vec<_> = l.charts.iter().map(|c| (c.kind, c.title.clone(), c.stacked, c.series.len())).collect();
+            let sparks: Vec<_> = l.sparklines.iter().map(|s| (s.kind, s.color)).collect();
+            hash_of(&[&charts, &sparks])
+        },
+        object_places: hash_of(&[&l.charts, &l.sparklines]),
     }
 }
 
@@ -155,7 +165,7 @@ impl Package {
             cell_xfs.insert(id, scan_cell_xfs(&data));
             sheets.push(PackageSheet { id, name: name.clone(), part, digest: sheet_digest(wb, id), structure: wb.structure_version(id) });
         }
-        Ok(Package { bytes, sheets, cell_xfs, names: names_digest(wb) })
+        Ok(Package { bytes, sheets, cell_xfs, names: names_digest(wb), log_len: wb.structure_log().len() })
     }
 
     /// Zip paths of the worksheet parts, in sheet order.
@@ -175,9 +185,6 @@ impl Package {
         Some(out)
     }
 
-    pub(crate) fn has_part_prefix(&self, prefix: &str) -> bool {
-        self.zip().is_ok_and(|z| z.file_names().flatten().any(|n| n.starts_with(prefix)))
-    }
 }
 
 /// How saving to the opened file will go.
@@ -189,13 +196,9 @@ pub enum SavePlan {
     Rewrite(Vec<String>),
 }
 
-/// Sheet XML that holds cell addresses xl can't yet adjust after inserted or
-/// deleted lines (phase 3 will rewrite these).
-const ADDRESSED: &[&str] = &["<dataValidations", "<hyperlinks", "<drawing", "<legacyDrawing", "xm:sqref", "<x14:", "<rowBreaks", "<colBreaks", "<protectedRanges", "<ignoredErrors"];
-
 pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
     let mut why = Vec::new();
-    let mut structural = false;
+    let structural = wb.structure_log().len() > pkg.log_len;
     for s in &pkg.sheets {
         if !wb.sheet_ids().contains(&s.id) {
             why.push(format!("the sheet “{}” was deleted", s.name));
@@ -203,53 +206,20 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
         }
         let now = sheet_digest(wb, s.id);
         if now.objects != s.digest.objects {
-            why.push(format!("charts or sparklines on “{}” changed", wb.sheet_name(s.id)));
+            why.push(format!("charts or sparklines on “{}” were added, removed or edited", wb.sheet_name(s.id)));
         }
-        if now.tables != s.digest.tables {
-            // Tables that only grew or shrank in rows can be patched; others can't.
-            if !tables_patchable(wb, pkg, s) {
-                why.push(format!("tables on “{}” were added, removed or changed columns", wb.sheet_name(s.id)));
-            }
+        // Positions follow inserted/deleted lines (rewritten in the drawing);
+        // a move by hand isn't patched yet.
+        if now.object_places != s.digest.object_places && !structural {
+            why.push(format!("a chart on “{}” was moved or resized", wb.sheet_name(s.id)));
         }
-        if wb.structure_version(s.id) != s.structure {
-            structural = true;
-            if let Some(xml) = pkg.part(&s.part) {
-                let found = ADDRESSED.iter().find(|m| xml.windows(m.len()).any(|w| w == m.as_bytes()));
-                if found.is_some() {
-                    why.push(format!("rows or columns were inserted or deleted on “{}”, which has links, validation, drawings or other addressed parts", wb.sheet_name(s.id)));
-                }
-            }
+        if now.tables != s.digest.tables && !tables_patchable(wb, pkg, s) {
+            why.push(format!("tables on “{}” were added, removed or changed columns", wb.sheet_name(s.id)));
         }
     }
-    // Renamed sheets: preserved parts that name the old sheet would break.
-    for s in pkg.sheets.iter().filter(|s| wb.sheet_ids().contains(&s.id) && wb.sheet_name(s.id) != s.name) {
-        let quoted = format!("'{}'!", s.name.replace('\'', "''"));
-        let plain = format!("{}!", s.name);
-        let mentions = |bytes: &[u8]| {
-            let t = String::from_utf8_lossy(bytes);
-            t.contains(&quoted) || t.contains(&plain)
-        };
-        let Ok(mut zip) = pkg.zip() else { continue };
-        let names: Vec<String> = zip.file_names().flatten().map(|n| n.into_owned()).collect();
-        let worksheet_parts: Vec<&str> = pkg.sheets.iter().map(|p| p.part.as_str()).collect();
-        for name in names.iter().filter(|n| n.ends_with(".xml") && !worksheet_parts.contains(&n.as_str()) && n.as_str() != "xl/sharedStrings.xml") {
-            let mut bytes = Vec::new();
-            if zip.by_name(name).is_ok_and(|mut f| f.read_to_end(&mut bytes).is_ok()) {
-                // Our own defined names are rewritten; only built-in ones (print areas) matter there.
-                let relevant = if name == "xl/workbook.xml" { String::from_utf8_lossy(&bytes).contains("_xlnm") && mentions(&bytes) } else { mentions(&bytes) };
-                if relevant {
-                    why.push(format!("the sheet “{}” was renamed and {name} refers to it", s.name));
-                    break;
-                }
-            }
-        }
-    }
-    if structural {
-        for (prefix, what) in [("xl/charts/", "charts"), ("xl/pivotCache/", "pivot tables"), ("xl/externalLinks/", "external links")] {
-            if pkg.has_part_prefix(prefix) {
-                why.push(format!("rows or columns were inserted or deleted, and the file has {what} that refer to cells"));
-            }
-        }
+    // Addresses in preserved parts after inserted/deleted lines and renames.
+    if let Err(e) = crate::xlsx_refs::rewrite_preserved(wb, pkg) {
+        why.push(e);
     }
     if why.is_empty() { SavePlan::Patch } else { SavePlan::Rewrite(why) }
 }
@@ -259,8 +229,8 @@ pub fn save_plan(wb: &Workbook, pkg: &Package) -> SavePlan {
 pub(crate) fn tables_patchable(wb: &Workbook, pkg: &Package, s: &PackageSheet) -> bool {
     let now = &wb.layout(s.id).tables;
     let Some(before) = original_tables(pkg, s) else { return false };
-    now.len() == before.len()
-        && now.iter().all(|t| before.iter().any(|(name, start_col, end_col)| name.eq_ignore_ascii_case(&t.name) && *start_col == t.range.start.col && *end_col == t.range.end.col))
+    // Same tables and the same number of columns: only the range moved or grew.
+    now.len() == before.len() && now.iter().all(|t| before.iter().any(|(name, start_col, end_col)| name.eq_ignore_ascii_case(&t.name) && end_col - start_col == t.range.end.col - t.range.start.col))
 }
 
 /// (name, first column, last column) of the tables in the original sheet.

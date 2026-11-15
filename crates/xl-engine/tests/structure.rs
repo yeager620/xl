@@ -182,3 +182,16 @@ fn overlapping_move() {
     assert_eq!(wb.input_text(a(s, "B1")), "=SUM(A2:A4)");
     assert_eq!(*wb.value(a(s, "B1")), n(6.0));
 }
+
+#[test]
+fn whole_row_ranges() {
+    let (mut wb, s) = book(&[("A2", "1"), ("C2", "4"), ("A3", "10"), ("E1", "=SUM(2:2)"), ("E5", "=SUM($2:$3)")]);
+    assert_eq!(*wb.value(a(s, "E1")), n(5.0));
+    assert_eq!(*wb.value(a(s, "E5")), n(15.0));
+    assert_eq!(wb.input_text(a(s, "E5")), "=SUM($2:$3)");
+    wb.apply_shift(Shift::InsertRows { sheet: s, at: 0, count: 1 });
+    assert_eq!(wb.input_text(a(s, "E2")), "=SUM(3:3)");
+    assert_eq!(*wb.value(a(s, "E2")), n(5.0));
+    wb.apply_shift(Shift::InsertCols { sheet: s, at: 0, count: 1 });
+    assert_eq!(wb.input_text(a(s, "F6")), "=SUM($3:$4)", "column inserts leave row ranges alone");
+}

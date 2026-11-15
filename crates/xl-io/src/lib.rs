@@ -5,6 +5,7 @@ mod package;
 mod xlsx_charts;
 mod xlsx_patch;
 mod xlsx_read;
+mod xlsx_refs;
 mod xlsx_write;
 
 pub use package::{Package, SavePlan, save_plan};

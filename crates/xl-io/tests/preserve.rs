@@ -149,20 +149,57 @@ fn renames_and_new_sheets_patch_the_workbook() {
 }
 
 #[test]
-fn falls_back_when_patching_would_be_unsafe() {
+fn inserted_rows_and_renames_move_preserved_addresses() {
     let src = tmp("rich3.xlsx");
     rich_file(&src);
     let mut loaded = xl_io::open(&src).unwrap();
     let s = loaded.workbook.sheet_ids()[0];
-    // Inserting a row would leave the validation, link and chart pointing at the wrong cells.
-    loaded.workbook.apply_shift(xl_engine::Shift::InsertRows { sheet: s, at: 0, count: 1 });
-    match xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()) {
-        SavePlan::Rewrite(why) => assert!(why.iter().any(|w| w.contains("inserted or deleted"))),
-        SavePlan::Patch => panic!("should not patch"),
-    }
-    // Renaming a sheet the print area and chart refer to also can't be patched yet.
+    // Two rows above the data, then rename the sheet.
+    loaded.workbook.apply_shift(xl_engine::Shift::InsertRows { sheet: s, at: 0, count: 2 });
+    loaded.workbook.rename_sheet(s, "Stock List").unwrap();
+    let pkg = loaded.package.as_ref().unwrap();
+    assert_eq!(xl_io::save_plan(&loaded.workbook, pkg), SavePlan::Patch);
+    let out = tmp("rich3-shifted.xlsx");
+    xl_io::save(&loaded.workbook, &out, s, Some(pkg)).unwrap();
+    let p = parts(&out);
+    let sheet = text(&p, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains(r#"sqref="B4:B6""#), "validation moved down two rows:\n{sheet}");
+    assert!(sheet.contains(r#"ref="A11""#), "hyperlink moved");
+    let comments = p.iter().find(|(k, _)| k.starts_with("xl/comments")).map(|(_, v)| String::from_utf8_lossy(v).to_string()).unwrap();
+    assert!(comments.contains(r#"ref="A4""#), "{comments}");
+    let vml = p.iter().find(|(k, _)| k.ends_with(".vml")).map(|(_, v)| String::from_utf8_lossy(v).to_string()).unwrap();
+    assert!(vml.contains("<x:Row>3</x:Row>"), "note box follows its cell");
+    let chart = text(&p, "xl/charts/chart1.xml");
+    assert!(chart.contains("'Stock List'!$B$4:$B$6"), "chart series renamed and moved:\n{chart}");
+    let drawing = text(&p, "xl/drawings/drawing1.xml");
+    assert!(drawing.contains("<xdr:row>3</xdr:row>"), "chart anchor moved down");
+    let wbx = text(&p, "xl/workbook.xml");
+    assert!(wbx.contains("'Stock List'!$A$3:$B$11"), "print area renamed and moved:\n{wbx}");
+    // And it all reads back consistently.
+    let back = xl_io::open(&out).unwrap();
+    let bs = back.workbook.sheet_ids()[0];
+    assert_eq!(back.workbook.sheet_name(bs), "Stock List");
+    assert_eq!(*back.workbook.value(Addr::new(bs, CellRef::parse("B7").unwrap())), Value::Number(10.0));
+    let chart = &back.workbook.layout(bs).charts[0];
+    assert_eq!(chart.anchor, CellRef::new(3, 4));
+    assert_eq!(back.workbook.chart_data(bs, chart).series[0].1, vec![Some(3.0), Some(5.0), Some(2.0)]);
+}
+
+#[test]
+fn falls_back_when_patching_would_be_unsafe() {
+    let src = tmp("rich4.xlsx");
+    rich_file(&src);
+    // Deleting the commented cell's row: its note box can't be removed safely yet.
     let mut loaded = xl_io::open(&src).unwrap();
     let s = loaded.workbook.sheet_ids()[0];
-    loaded.workbook.rename_sheet(s, "Stock").unwrap();
+    loaded.workbook.apply_shift(xl_engine::Shift::DeleteRows { sheet: s, at: 1, count: 1 });
     assert!(matches!(xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()), SavePlan::Rewrite(_)));
+    // Cut and paste isn't adjusted in preserved parts yet.
+    let mut loaded = xl_io::open(&src).unwrap();
+    let s = loaded.workbook.sheet_ids()[0];
+    loaded.workbook.move_range(xl_engine::Move { from_sheet: s, from: xl_engine::Range::single(CellRef::new(2, 0)), to_sheet: s, dr: 20, dc: 0 });
+    match xl_io::save_plan(&loaded.workbook, loaded.package.as_ref().unwrap()) {
+        SavePlan::Rewrite(why) => assert!(why.iter().any(|w| w.contains("moved"))),
+        SavePlan::Patch => panic!("should not patch"),
+    }
 }

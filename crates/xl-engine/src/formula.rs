@@ -49,6 +49,8 @@ pub enum RangeKind {
     Cells,
     /// `A:C` (whole columns)
     Columns,
+    /// `1:3` (whole rows)
+    Rows,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -484,7 +486,7 @@ impl Expr {
         match self {
             Expr::Ref(r) => map_ref(r).map_or(Expr::Error(ErrorKind::Ref), Expr::Ref),
             Expr::Range(a, b, kind) => {
-                if !on_sheet(a) || (rows && *kind == RangeKind::Columns) {
+                if !on_sheet(a) || (rows && *kind == RangeKind::Columns) || (!rows && *kind == RangeKind::Rows) {
                     return self.clone();
                 }
                 let (pa, pb) = if rows { (a.cell.row, b.cell.row) } else { (a.cell.col, b.cell.col) };
@@ -519,7 +521,7 @@ impl Expr {
 
 /// Moving a block of cells (cut and paste): references into the block follow
 /// it; references to cells it lands on (outside the block) break.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Move {
     pub from_sheet: SheetId,
     pub from: Range,
@@ -949,9 +951,30 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
+    /// `1:3` / `$1:$1` after the first row number (`abs` = it had a `$`).
+    fn row_range(&mut self, first: f64, abs: bool, sheet: Option<SheetId>) -> Option<Result<Expr, ParseError>> {
+        let whole = |n: f64| (n >= 1.0 && n.fract() == 0.0 && n <= MAX_ROWS as f64).then(|| n as u32 - 1);
+        let r1 = whole(first)?;
+        if self.peek() != Some(&Tok::Colon) {
+            return None;
+        }
+        let (r2, abs2) = match self.tokens.get(self.pos + 1) {
+            Some(Tok::Num(n)) => (whole(*n)?, false),
+            Some(Tok::Ident(id)) => (whole(id.strip_prefix('$')?.parse::<f64>().ok()?)?, true),
+            _ => return None,
+        };
+        self.pos += 2;
+        let a = RefAddr { sheet, cell: CellRef::new(r1, 0), col_abs: true, row_abs: abs };
+        let b = RefAddr { sheet, cell: CellRef::new(r2, crate::address::MAX_COLS - 1), col_abs: true, row_abs: abs2 };
+        Some(Ok(Expr::Range(a, b, RangeKind::Rows)))
+    }
+
     fn prefix(&mut self) -> Result<Expr, ParseError> {
         match self.next() {
-            Some(Tok::Num(n)) => Ok(Expr::Number(n)),
+            Some(Tok::Num(n)) => match self.row_range(n, false, None) {
+                Some(r) => r,
+                None => Ok(Expr::Number(n)),
+            },
             Some(Tok::Str(s)) => Ok(Expr::Text(s.into())),
             Some(Tok::Err(e)) => Ok(Expr::Error(e)),
             Some(Tok::Minus) => Ok(Expr::Neg(Box::new(self.expr(PREFIX_BP)?))),
@@ -964,6 +987,10 @@ impl Parser<'_> {
             Some(Tok::Sheet(name)) => {
                 let id = self.names.sheet_id(&name).ok_or_else(|| ParseError(format!("no sheet named '{name}'")))?;
                 match self.next() {
+                    Some(Tok::Num(n)) => self.row_range(n, false, Some(id)).ok_or_else(|| ParseError(format!("bad reference after {name}!")))?,
+                    Some(Tok::Ident(r)) if r.starts_with('$') && r[1..].bytes().all(|b| b.is_ascii_digit()) && !r[1..].is_empty() => {
+                        self.row_range(r[1..].parse().unwrap_or(0.0), true, Some(id)).ok_or_else(|| ParseError(format!("bad reference after {name}!")))?
+                    }
                     Some(Tok::Ident(r)) => self.reference(r, Some(id)).ok_or_else(|| ParseError(format!("bad reference {name}!{}", self.tokens[self.pos - 1].describe())))?,
                     _ => Err(ParseError(format!("expected a cell reference after {name}!"))),
                 }
@@ -1007,6 +1034,11 @@ impl Parser<'_> {
     }
 
     fn ident(&mut self, id: String) -> Result<Expr, ParseError> {
+        if let Some(digits) = id.strip_prefix('$').filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            && let Some(r) = self.row_range(digits.parse().unwrap_or(0.0), true, None)
+        {
+            return r;
+        }
         if self.peek() == Some(&Tok::LParen) {
             self.pos += 1;
             let mut args = Vec::new();
@@ -1127,6 +1159,7 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut Stri
             let (sa, sb) = match kind {
                 RangeKind::Cells => (shift_ref(a, dr, dc), shift_ref(b, dr, dc)),
                 RangeKind::Columns => (shift_ref(a, 0, dc), shift_ref(b, 0, dc)),
+                RangeKind::Rows => (shift_ref(a, dr, 0), shift_ref(b, dr, 0)),
             };
             let mark = out.len();
             match (sa, sb) {
@@ -1145,6 +1178,9 @@ fn write_expr(e: &Expr, dr: i64, dc: i64, names: &dyn SheetNames, out: &mut Stri
                             if b.col_abs { "$" } else { "" },
                             col_name(b.cell.col)
                         );
+                    }
+                    RangeKind::Rows => {
+                        let _ = write!(out, "{}{}:{}{}", if a.row_abs { "$" } else { "" }, a.cell.row + 1, if b.row_abs { "$" } else { "" }, b.cell.row + 1);
                     }
                 },
                 _ => {

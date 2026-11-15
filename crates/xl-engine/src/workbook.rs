@@ -574,6 +574,16 @@ pub struct Workbook {
     /// Per sheet, how many structural edits (inserted/deleted lines, moved
     /// cells) it has had: tells savers when cell addresses have shifted.
     structure: FxHashMap<SheetId, u64>,
+    /// Every structural edit in order, for savers that patch files written
+    /// before them.
+    structure_log: Vec<StructOp>,
+}
+
+/// A structural edit, as logged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StructOp {
+    Shift(Shift),
+    Move(Move),
 }
 
 enum Parsed {
@@ -598,6 +608,11 @@ impl Workbook {
 
     pub fn sheets(&self) -> &Sheets {
         &self.sheets
+    }
+
+    /// All structural edits so far, oldest first.
+    pub fn structure_log(&self) -> &[StructOp] {
+        &self.structure_log
     }
 
     /// Structural edits so far on a sheet (see `structure`).
@@ -982,6 +997,7 @@ impl Workbook {
             if rows { Some(CellRef::new(op.map_pos(c.row)?, c.col)) } else { Some(CellRef::new(c.row, op.map_pos(c.col)?)) }
         };
         *self.structure.entry(target).or_default() += 1;
+        self.structure_log.push(StructOp::Shift(op));
         let Some(sd) = self.sheets.get_mut(target) else { return RecalcStats::default() };
         sd.store.apply_shift(op);
         sd.formats = sd.formats.drain().filter_map(|(c, f)| Some((remap(c)?, f))).collect();
@@ -1021,6 +1037,7 @@ impl Workbook {
     pub fn move_range(&mut self, mv: Move) -> RecalcStats {
         *self.structure.entry(mv.from_sheet).or_default() += 1;
         *self.structure.entry(mv.to_sheet).or_default() += 1;
+        self.structure_log.push(StructOp::Move(mv));
         let to = mv.to_range();
         // What's moving, captured before anything is rewritten.
         let mut moving: Vec<(CellRef, Option<Cell>, Option<String>, Style)> = Vec::new();

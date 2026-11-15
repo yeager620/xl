@@ -1221,6 +1221,9 @@ fn patch_table_part(doc: &[u8], range: Range) -> Vec<u8> {
 
 pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result<(), String> {
     let mut zip = pkg.zip()?;
+    // Addresses in preserved parts, adjusted for inserted/deleted lines and renames.
+    let rewritten = crate::xlsx_refs::rewrite_preserved(wb, pkg)?;
+    let part = |name: &str| rewritten.get(name).cloned().or_else(|| pkg.part(name));
     let (xfs, dxfs, _) = crate::xlsx_read::read_styles(&mut zip)?;
     let styles_xml = pkg.part("xl/styles.xml");
     let mut styles = Styles::new(xfs, dxfs, styles_xml.as_deref());
@@ -1241,7 +1244,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
             continue;
         }
         any_data |= now.data != before.data;
-        let doc = pkg.part(&s.part).ok_or_else(|| format!("missing part {}", s.part))?;
+        let doc = part(&s.part).ok_or_else(|| format!("missing part {}", s.part))?;
         let same_structure = wb.structure_version(s.id) == s.structure;
         let (row_attrs, col_styles) = if same_structure { original_rows_and_cols(&doc) } else { Default::default() };
         let mut ctx = SheetCtx {
@@ -1339,8 +1342,12 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
     let renamed = pkg.sheets.iter().any(|s| wb.sheet_ids().contains(&s.id) && wb.sheet_name(s.id) != s.name);
     let reordered = wb.sheet_ids().iter().filter(|id| pkg.sheets.iter().any(|s| s.id == **id)).zip(pkg.sheets.iter().map(|s| &s.id)).any(|(a, b)| a != b);
     if names_changed || renamed || reordered || !new_sheets.is_empty() {
-        let doc = pkg.part("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
+        let doc = part("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
         replaced.insert("xl/workbook.xml".into(), patch_workbook(&doc, wb, pkg, &new_sheets, names_changed)?);
+    }
+    // Rewritten parts not otherwise changed.
+    for (name, bytes) in rewritten {
+        replaced.entry(name).or_insert(bytes);
     }
     if !rel_adds.is_empty() || !rel_removes.is_empty() {
         let doc = pkg.part("xl/_rels/workbook.xml.rels").ok_or("missing workbook relationships")?;
