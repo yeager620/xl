@@ -69,6 +69,15 @@ cargo test --workspace           # engine unit/property tests + headless UI inte
 cargo run --release -p xl-bench  # recalc benchmarks
 ```
 
+xlsx saving patches the opened file; `docs/xlsx-fidelity.md` explains what is
+preserved and how to run the round-trip checker over the real-world corpus
+(CI does on every push):
+
+```sh
+scripts/fetch-xlsx-corpus.sh && cargo run -p xl-io --release --example roundtrip -- \
+  --known-failures scripts/xlsx-corpus/known-failures.txt target/xlsx-corpus
+```
+
 ## Layout
 
 | Path | What |

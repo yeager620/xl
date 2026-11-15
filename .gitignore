@@ -3,3 +3,4 @@
 packaging/flathub/cargo-sources.json
 /.flatpak-builder
 /.claude/
+/.xlsx-corpus

@@ -1,0 +1,67 @@
+# Lossless xlsx saving, proven on real files: run the roundtrip checker
+# (crates/xl-io/examples/roundtrip.rs) over the pinned corpus
+# (scripts/xlsx-corpus/manifest.txt), then open every saved file in headless
+# LibreOffice. See docs/xlsx-fidelity.md.
+name: xlsx corpus
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CORPUS: ${{ github.workspace }}/.xlsx-corpus
+      OUT: ${{ github.workspace }}/roundtrip-out
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: ./packaging/setup-build-deps.sh
+      - name: LibreOffice
+        run: sudo apt-get install -y -qq --no-install-recommends libreoffice-calc-nogui >/dev/null && soffice --version
+      - name: Fetch GPUI
+        run: ./scripts/fetch-gpui.sh
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .xlsx-corpus
+          key: xlsx-corpus-${{ hashFiles('scripts/xlsx-corpus/manifest.txt') }}
+      - name: Fetch the corpus
+        run: ./scripts/fetch-xlsx-corpus.sh "$CORPUS"
+      - name: Build the checker
+        run: cargo build -p xl-io --release --example roundtrip
+      - name: Round-trip the corpus
+        run: |
+          target/release/examples/roundtrip --out "$OUT" \
+            --json "$OUT/report.json" --summary "$OUT/report.txt" \
+            --known-failures scripts/xlsx-corpus/known-failures.txt "$CORPUS"
+      - name: Open the saved files in LibreOffice
+        # Also after checker failures: whatever it saved should still open.
+        if: ${{ !cancelled() && hashFiles('roundtrip-out/outputs.tsv') != '' }}
+        run: LO_JOBS=4 ./scripts/lo-check-xlsx.sh "$OUT" scripts/xlsx-corpus/known-failures.txt
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### xlsx corpus round trip'
+            echo '```'
+            sed -n '/^[0-9]* files:/,$p' "$OUT/report.txt" 2>/dev/null || echo "no checker report"
+            if [ -f "$OUT/lo-report.txt" ]; then
+              echo "LibreOffice: $(grep -c '^OK' "$OUT/lo-report.txt") ok, $(grep -vc '^OK' "$OUT/lo-report.txt") not ok"
+              grep -v '^OK' "$OUT/lo-report.txt" || true
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: xlsx-roundtrip-report
+          path: |
+            roundtrip-out/report.txt
+            roundtrip-out/report.json
+            roundtrip-out/lo-report.txt
+            roundtrip-out/outputs.tsv
+          if-no-files-found: warn
