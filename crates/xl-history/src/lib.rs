@@ -683,9 +683,12 @@ mod tests {
         let store = Store::with_policy(dir.join("history"), Policy::default());
         let doc = dir.join("x.csv");
         let now = SystemTime::now();
-        // Two versions in the same hour, two days ago, then one now.
-        store.record_bytes(&doc, b"old-1", None, false, now - Duration::from_secs(2 * 86_400 + 120)).unwrap();
-        store.record_bytes(&doc, b"old-2", None, false, now - Duration::from_secs(2 * 86_400 + 60)).unwrap();
+        // Two versions in the same clock hour about two days ago (anchored to
+        // the hour so the test can't straddle a boundary), then one now.
+        let two_days_ago = (now - Duration::from_secs(2 * 86_400)).duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let hour = UNIX_EPOCH + Duration::from_secs(two_days_ago / 3600 * 3600);
+        store.record_bytes(&doc, b"old-1", None, false, hour + Duration::from_secs(600)).unwrap();
+        store.record_bytes(&doc, b"old-2", None, false, hour + Duration::from_secs(1200)).unwrap();
         store.record_bytes(&doc, b"new", None, false, now).unwrap();
         let vs = store.versions(&doc);
         assert_eq!(vs.len(), 2, "old-1 shares an hour with old-2");

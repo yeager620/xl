@@ -203,6 +203,18 @@ Save by patching the opened package instead of writing a new file.
   - [x] Notes (read, show, edit, save), hyperlinks (read, show, follow, edit, save), data validation (read, enforce, dropdowns, edit, save; cross-sheet x14 rules preserved only), array-formula attributes kept, 1904 dates.
   - [x] Charts: moved/resized ones re-anchored; added/removed/edited ones patched in (unedited chart parts kept byte for byte); charts on new sheets.
   - [x] Tables added/removed/re-columned and sparklines added/removed patched in.
-  - [ ] Pictures shown (read-only; in progress).
-  - [ ] Rich text, gradients/rotation/indent/protection, sheet protection, page setup: preserved by patching but not shown or editable.
+  - [x] Pictures shown (read-only), moving with inserted/deleted lines.
+  - [x] Page setup (read, edit, save; used for printing) and dynamic-array formulas (see M7).
+  - [ ] Rich text, gradients/rotation/indent/protection, sheet protection: preserved by patching but not shown or editable.
 - [x] Phase 5: corpus in CI (examples/roundtrip.rs over Excel/LibreOffice/Sheets/openpyxl/POI files); headless LibreOffice open check. Checker: no-op + six edit scenarios (insert-row counts "fell back" while it rewrites), JSON/text reports, non-zero exit, `--known-failures`; pinned 86-file corpus from POI/LibreOffice/calamine (`scripts/fetch-xlsx-corpus.sh`, manifest with sources, licenses, SHA-256s; no Google Sheets-made files yet); `.github/workflows/xlsx-corpus.yml` + `scripts/lo-check-xlsx.sh`; see `docs/xlsx-fidelity.md`.
+
+## M7 — Beyond parity (2026-11-15)
+
+- [x] Dynamic arrays: spilling, #SPILL!, `A1#`, `@`, array constants, broadcasting; FILTER/SORT/SORTBY/UNIQUE/SEQUENCE/RANDARRAY/TEXTSPLIT/VSTACK/HSTACK/TAKE/DROP/CHOOSECOLS/CHOOSEROWS/TOCOL/TOROW/WRAPROWS/WRAPCOLS/EXPAND; LET, LAMBDA (named, recursive), MAP/REDUCE/SCAN/BYROW/BYCOL/MAKEARRAY/ISOMITTED; xlsx with `_xlfn` prefixes and XLDAPR metadata.
+- [x] Printing: page setup model (xlsx read/write/patch), pagination, PDF export (krilla, selectable text, vector charts), print preview, portal/CUPS printing, page-break preview, `xl --pdf`.
+- [x] Charts: combo, secondary axis, per-series styling, trendlines, error bars, doughnut/radar/bubble/histogram/waterfall (chartex); one chart writer for fresh and patched saves. Maps skipped (need Bing geocoding data).
+- [x] Pivots: calculated fields, show-values-as, date/number/manual grouping, filters, sort by value, slicers (pivots and tables), timelines, pivot charts; definitions persisted in a custom XML part (not live Excel pivots).
+- [x] Bigger data: 16,777,216 rows, compact NaN-boxed store, parallel CSV import with safe type inference, SQL queries over sheets/tables/CSV (SQLite).
+- [x] Scripting: sandboxed Lua 5.4 custom functions (spill arrays) and macros (one undo step), consent per script hash, stored in a custom XML part, editor panel.
+- [x] Version history: deduplicated snapshots with retention, cell-level diffs with row/column alignment, history panel with restore, `xl diff` / `xl textconv` for git.
+- [ ] Follow-ups: print the new chart kinds natively (now approximated); persist SQL queries in the file; write live Excel pivot parts; editor selection/clipboard; check new chart kinds and dynamic arrays in real Excel.
