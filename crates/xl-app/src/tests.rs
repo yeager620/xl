@@ -1785,3 +1785,91 @@ fn pictures_are_drawn_and_follow_inserted_rows(cx: &mut TestAppContext) {
     cx.run_until_parked();
     view.read_with(cx, |s, _| assert_eq!(s.picture_cache.len(), 0));
 }
+
+#[gpui::test]
+fn every_chart_kind_and_format_draws(cx: &mut TestAppContext) {
+    use xl_engine::chart::{ChartKind, ErrorBars, ErrorDir, ErrorKind, TrendKind, Trendline};
+    let (view, cx) = setup(cx);
+    view.update(cx, |s, _| {
+        let rows = [["Month", "Sales", "Costs", "Size"], ["Jan", "10", "4", "3"], ["Feb", "14", "-6", "5"], ["Mar", "9", "5", "2"], ["Apr", "17", "7", "8"], ["May", "21", "8", "4"]];
+        let mut items = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                items.push((s.at(CellRef::new(r as u32, 10 + c as u32)), v.to_string()));
+            }
+        }
+        s.wb.set_inputs(items);
+    });
+    for kind in ChartKind::ALL {
+        go(&view, cx, "K1");
+        cx.simulate_keystrokes("shift-down shift-down shift-down shift-down shift-down shift-right shift-right shift-right");
+        view.update(cx, |s, _| s.insert_chart(kind));
+        cx.run_until_parked();
+    }
+    view.read_with(cx, |s, _| {
+        let charts = &s.wb.layout(s.cur).charts;
+        assert_eq!(charts.iter().map(|c| c.kind).collect::<Vec<_>>(), ChartKind::ALL.to_vec());
+        let bubble = charts.iter().find(|c| c.kind == ChartKind::Bubble).unwrap();
+        assert!(bubble.series[0].sizes.is_some(), "bubble sizes come from the next column");
+        let hist = charts.iter().find(|c| c.kind == ChartKind::Histogram).unwrap();
+        assert_eq!(s.wb.chart_data(s.cur, hist).series[0].1.iter().flatten().sum::<f64>(), 5.0, "histogram counts every value");
+    });
+    // Every format at once on the column chart, then draw it selected.
+    view.update(cx, |s, cx| {
+        s.selected_chart = Some(0);
+        s.update_chart(|c| {
+            c.options.style = Some(5);
+            c.options.legend = Some(xl_engine::chart::LegendPos::Right);
+            c.options.y_axis.log_base = Some(10.0);
+            c.options.x_axis.title = Some("Month".into());
+            c.options.y2_axis.title = Some("Costs".into());
+            for (i, sr) in c.series.iter_mut().enumerate() {
+                sr.format.trendline = Some(Trendline { kind: [TrendKind::Linear, TrendKind::Polynomial(2), TrendKind::MovingAverage(2)][i % 3], equation: true, r_squared: true, name: None });
+                sr.format.error_bars = Some(ErrorBars { kind: ErrorKind::StdDev, value: 1.0, dir: ErrorDir::Both });
+                sr.format.labels.value = true;
+                sr.format.smooth = true;
+            }
+        });
+        cx.notify();
+    });
+    view.update(cx, |s, _| s.chart_combo_last_series());
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| {
+        let c = &s.wb.layout(s.cur).charts[0];
+        let last = &c.series.last().unwrap().format;
+        assert_eq!((last.kind, last.secondary), (Some(ChartKind::Line), true));
+        assert!(c.has_secondary());
+    });
+    // The format form: change the type and add a trendline as text.
+    view.update(cx, |s, _| {
+        s.selected_chart = Some(2);
+        s.open_form(crate::solver_ui::FormKind::Chart);
+        let f = s.form.as_mut().expect("the chart form opens");
+        assert_eq!(f.fields[1].2, "line");
+        f.fields[1].2 = "area stacked".into();
+        f.fields[5].2 = "min 0, max 40, grid".into();
+        f.fields[8].2 = "color #C00000, trend exp eq, errors 10%".into();
+    });
+    cx.run_until_parked();
+    view.update(cx, |s, _| s.run_form());
+    cx.run_until_parked();
+    view.read_with(cx, |s, _| {
+        assert!(s.form.is_none(), "{:?}", s.message);
+        let c = &s.wb.layout(s.cur).charts[2];
+        assert_eq!((c.kind, c.stacked, c.options.y_axis.max), (ChartKind::Area, true, Some(40.0)));
+        let f = &c.series[0].format;
+        assert_eq!(f.fill, xl_engine::chart::Paint::Solid(0xC00000));
+        assert_eq!(f.trendline.as_ref().map(|t| t.kind), Some(TrendKind::Exponential));
+        assert_eq!(f.error_bars.map(|e| e.kind), Some(ErrorKind::Percent));
+    });
+    // One undo step puts it back.
+    cx.simulate_keystrokes("ctrl-z");
+    view.read_with(cx, |s, _| assert_eq!(s.wb.layout(s.cur).charts[2].kind, ChartKind::Line));
+    // A bad line is reported and the form stays open.
+    view.update(cx, |s, _| {
+        s.open_form(crate::solver_ui::FormKind::Chart);
+        s.form.as_mut().unwrap().fields[1].2 = "pyramid".into();
+        s.run_form();
+        assert!(s.form.is_some() && s.message.as_ref().is_some_and(|m| m.1));
+    });
+}

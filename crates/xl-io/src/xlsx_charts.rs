@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use quick_xml::events::Event;
 use quick_xml::XmlVersion;
-use xl_engine::chart::{Chart, ChartKind, ChartSeries};
+use xl_engine::chart::{Axis, BinMode, Chart, ChartKind, ChartOptions, ChartSeries, DataLabels, Dash, ErrorBars, ErrorDir, ErrorKind, LegendPos, MarkerShape, Paint, SeriesFormat, TrendKind, Trendline};
 use xl_engine::formula::parse_formula;
 use xl_engine::{CellRef, SheetId, Workbook};
 
@@ -190,7 +190,8 @@ pub(crate) struct DrawingNotes {
     pub undrawable_pictures: bool,
     /// Charts of kinds xl doesn't draw.
     pub unsupported_charts: bool,
-    /// Charts with colors, labels, trendlines and the like, which xl drops.
+    /// Charts with formatting xl doesn't model (fonts, data tables, 3-D…),
+    /// which is dropped if the chart is edited.
     pub styled_charts: bool,
 }
 
@@ -205,9 +206,6 @@ pub(crate) struct FoundPicture {
     pub name: String,
     pub alt: Option<String>,
 }
-
-/// Chart XML that carries formatting beyond kind, series and title.
-const STYLING: &[&str] = &["<c:spPr", "<c:txPr", "<c:dLbls", "<c:trendline", "<c:errBars", "<c:dTable", "<c:dPt", "<c:style ", "<a:solidFill"];
 
 /// `target` relative to the folder of `part` (or absolute with a leading /).
 pub(crate) fn resolve(part: &str, target: &str) -> String {
@@ -282,6 +280,7 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
     let rels = read_rels(zip, &rels_of(sheet_part))?;
     let mut drawings: Vec<String> = rels.values().filter(|t| t.contains("drawings/") && t.ends_with(".xml")).map(|t| resolve(sheet_part, t)).collect();
     drawings.sort();
+    let mut theme: Option<Vec<xl_engine::Rgb>> = None;
     for drawing in drawings {
         let mut anchor_index = 0usize;
         let Some(bytes) = read_entry(zip, &drawing)? else { continue };
@@ -300,8 +299,15 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
         let mut pic: Option<(Option<String>, String, Option<String>, bool)> = None;
         let mut group_depth = 0usize;
         let mut buf = Vec::new();
+        let mut skip = Vec::new();
         loop {
             match r.read_event_into(&mut buf).map_err(|e| e.to_string())? {
+                // Fallback content (the "chart isn't available" shape of chartex
+                // frames) stands in for what the choice holds: skip it.
+                Event::Start(ref e) if local(e.name().as_ref()) == "Fallback" => {
+                    let end = e.name().as_ref().to_string();
+                    r.read_to_end_into(quick_xml::name::QName(&end), &mut skip).map_err(|e| e.to_string())?;
+                }
                 Event::Start(ref e) | Event::Empty(ref e) => match local(e.name().as_ref()) {
                     k @ ("twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor") => {
                         (from, to, ext, chart_rid, in_frame) = (Marker::default(), Marker::default(), None, None, false);
@@ -420,19 +426,21 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
                         let Some(target) = chart_rid.take().and_then(|id| drels.get(&id).cloned()) else { continue };
                         let part = resolve(&drawing, &target);
                         let Some(chart_xml) = read_entry(zip, &part)? else { continue };
-                        if STYLING.iter().any(|m| chart_xml.windows(m.len()).any(|w| w == m.as_bytes())) {
-                            notes.styled_charts = true;
+                        if theme.is_none() {
+                            theme = Some(crate::xlsx_read::read_theme(zip)?);
                         }
-                        match parse_chart(&chart_xml, wb) {
-                            Some((kind, stacked, title, series)) if !series.is_empty() => {
+                        match parse_chart(&chart_xml, wb, theme.as_deref().unwrap_or(&[])) {
+                            Some(p) if !p.series.is_empty() => {
+                                notes.styled_charts |= p.lossy;
                                 let chart = Chart {
-                                    kind,
-                                    title,
-                                    series,
+                                    kind: p.kind,
+                                    title: p.title,
+                                    series: p.series,
                                     anchor: CellRef::new(from.row, from.col),
                                     offset: (from_excel_width_px(from.col_off), from_excel_height(from.row_off * 0.75)),
                                     size: (from_excel_width_px(w).max(80.0), from_excel_height(h * 0.75).max(60.0)),
-                                    stacked,
+                                    stacked: p.stacked,
+                                    options: p.options,
                                 };
                                 found.push((chart, drawing.clone(), this_anchor));
                                 notes.charts += 1;
@@ -451,132 +459,544 @@ pub(crate) fn scan_charts(zip: &mut Zip, sheet_part: &str, wb: &Workbook, sheet:
     Ok((found, notes))
 }
 
-type ParsedChart = (ChartKind, bool, Option<String>, Vec<ChartSeries>);
+// ------------------------------------------------------------ chart parts
 
-/// Kind, stacking, title and series of a chart part. None if it's a kind xl
-/// doesn't draw (or mixes several).
-fn parse_chart(bytes: &[u8], wb: &Workbook) -> Option<ParsedChart> {
+/// An element of a chart part, as a small tree (chart parts are small, and
+/// a tree is far easier to read correctly than a stream).
+#[derive(Default, Debug)]
+struct Node {
+    prefix: String,
+    name: String,
+    attrs: Vec<(String, String)>,
+    kids: Vec<Node>,
+    text: String,
+}
+
+impl Node {
+    fn child(&self, name: &str) -> Option<&Node> {
+        self.kids.iter().find(|k| k.name == name)
+    }
+
+    fn children<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Node> + 'a {
+        self.kids.iter().filter(move |k| k.name == name)
+    }
+
+    fn path(&self, names: &[&str]) -> Option<&Node> {
+        names.iter().try_fold(self, |n, name| n.child(name))
+    }
+
+    fn attr(&self, key: &str) -> Option<&str> {
+        self.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    fn val(&self) -> Option<&str> {
+        self.attr("val")
+    }
+
+    fn num(&self) -> Option<f64> {
+        self.val().and_then(|v| v.trim().parse().ok())
+    }
+
+    /// A CT_Boolean: no `val` means true.
+    fn flag(&self) -> bool {
+        self.val().is_none_or(|v| v == "1" || v == "true")
+    }
+
+    /// The text of every `<a:t>` run below, in order.
+    fn runs(&self) -> String {
+        let mut out = String::new();
+        self.walk(&mut |n| {
+            if n.name == "t" {
+                out.push_str(&n.text);
+            }
+        });
+        out
+    }
+
+    fn walk(&self, f: &mut impl FnMut(&Node)) {
+        f(self);
+        for k in &self.kids {
+            k.walk(f);
+        }
+    }
+
+    fn any(&self, pred: &impl Fn(&Node) -> bool) -> bool {
+        pred(self) || self.kids.iter().any(|k| k.any(pred))
+    }
+}
+
+fn dom(bytes: &[u8]) -> Option<Node> {
+    let node_of = |e: &quick_xml::events::BytesStart| {
+        let full = e.name().as_ref().to_string();
+        let (prefix, name) = match full.split_once(':') {
+            Some((p, n)) => (p.to_string(), n.to_string()),
+            None => (String::new(), full.clone()),
+        };
+        let attrs = e
+            .attributes()
+            .with_checks(false)
+            .flatten()
+            .map(|a| (local(a.key.as_ref()).to_string(), a.normalized_value(XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_default()))
+            .collect();
+        Node { prefix, name, attrs, kids: Vec::new(), text: String::new() }
+    };
     let mut r = xml(bytes);
-    let mut kind: Option<ChartKind> = None;
-    let mut kinds = 0;
-    let mut stacked = false;
-    let mut bar_dir_col = true;
-    let mut series: Vec<ChartSeries> = Vec::new();
-    // Inside a <c:ser>: which part (tx, cat, val, xVal, yVal) and its formula / literal.
-    let mut part = String::new();
-    let mut in_ser = false;
-    let (mut name, mut cats, mut vals): (Option<String>, Option<String>, Option<String>) = (None, None, None);
-    let mut literal_name: Option<String> = None;
-    let mut capture: Option<&'static str> = None;
-    let mut text = String::new();
-    // Title: only the chart's own (not an axis title), from <a:t> runs.
-    let mut depth_title: Option<usize> = None;
-    let mut depth = 0usize;
-    let mut stack: Vec<String> = Vec::new();
-    let mut title = String::new();
-    let mut auto_title_deleted = false;
+    let mut stack: Vec<Node> = vec![Node::default()];
     let mut buf = Vec::new();
     loop {
-        let ev = r.read_event_into(&mut buf).ok()?;
-        match ev {
-            Event::Start(ref e) | Event::Empty(ref e) => {
-                let empty = matches!(ev, Event::Empty(_));
-                let n = local(e.name().as_ref()).to_string();
-                match n.as_str() {
-                    "barChart" | "bar3DChart" | "lineChart" | "line3DChart" | "areaChart" | "area3DChart" | "pieChart" | "pie3DChart" | "doughnutChart" | "scatterChart" => {
-                        kinds += 1;
-                        kind = Some(match n.as_str() {
-                            "barChart" | "bar3DChart" => ChartKind::Column,
-                            "lineChart" | "line3DChart" => ChartKind::Line,
-                            "areaChart" | "area3DChart" => ChartKind::Area,
-                            "scatterChart" => ChartKind::Scatter,
-                            _ => ChartKind::Pie,
-                        });
-                    }
-                    "radarChart" | "stockChart" | "bubbleChart" | "surfaceChart" | "surface3DChart" | "ofPieChart" => return None,
-                    "barDir" => bar_dir_col = attr(e, "val").as_deref() != Some("bar"),
-                    "grouping" => stacked |= matches!(attr(e, "val").as_deref(), Some("stacked" | "percentStacked")),
-                    "autoTitleDeleted" => auto_title_deleted = attr(e, "val").as_deref() != Some("0"),
-                    "title" if stack.last().is_some_and(|p| p == "chart") => depth_title = Some(depth),
-                    "ser" => {
-                        in_ser = true;
-                        (name, cats, vals, literal_name) = (None, None, None, None);
-                    }
-                    p @ ("tx" | "cat" | "val" | "xVal" | "yVal") if in_ser => part = p.to_string(),
-                    "f" if in_ser => {
-                        capture = Some("f");
-                        text.clear();
-                    }
-                    "v" if in_ser && part == "tx" => {
-                        capture = Some("v");
-                        text.clear();
-                    }
-                    "t" if depth_title.is_some() => {
-                        capture = Some("t");
-                        text.clear();
-                    }
-                    _ => {}
-                }
-                if !empty {
-                    depth += 1;
-                    stack.push(n);
-                }
+        match r.read_event_into(&mut buf).ok()? {
+            Event::Start(ref e) => stack.push(node_of(e)),
+            Event::Empty(ref e) => {
+                let n = node_of(e);
+                stack.last_mut()?.kids.push(n);
             }
-            Event::Text(ref t) if capture.is_some() => text.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
-            Event::GeneralRef(ref g) if capture.is_some() => push_entity(&mut text, g),
-            Event::End(ref e) => {
-                let n = local(e.name().as_ref()).to_string();
-                depth = depth.saturating_sub(1);
-                stack.pop();
-                match (n.as_str(), capture) {
-                    ("f", Some("f")) => {
-                        let f = std::mem::take(&mut text);
-                        match part.as_str() {
-                            "tx" => name = Some(f),
-                            "cat" | "xVal" => cats = Some(f),
-                            _ => vals = Some(f),
-                        }
-                        capture = None;
-                    }
-                    ("v", Some("v")) => {
-                        literal_name = Some(std::mem::take(&mut text));
-                        capture = None;
-                    }
-                    ("t", Some("t")) => {
-                        title.push_str(&text);
-                        capture = None;
-                    }
-                    _ => {}
-                }
-                match n.as_str() {
-                    "title" if depth_title == Some(depth) => depth_title = None,
-                    "tx" | "cat" | "val" | "xVal" | "yVal" if in_ser => part.clear(),
-                    "ser" => {
-                        in_ser = false;
-                        let expr = |src: &str| parse_formula(src.trim_start_matches('='), wb.sheets()).ok().map(Arc::new);
-                        if let Some(values) = vals.as_deref().and_then(expr) {
-                            let name = name.as_deref().and_then(expr).or_else(|| literal_name.take().map(|t| Arc::new(xl_engine::formula::Expr::Text(t.into()))));
-                            series.push(ChartSeries { name, categories: cats.as_deref().and_then(expr), values });
-                        }
-                    }
-                    _ => {}
-                }
+            Event::Text(ref t) => stack.last_mut()?.text.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
+            Event::GeneralRef(ref g) => push_entity(&mut stack.last_mut()?.text, g),
+            Event::End(_) => {
+                let n = stack.pop()?;
+                stack.last_mut()?.kids.push(n);
             }
             Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-    if kinds != 1 {
-        return None;
+    let mut root = stack.pop()?;
+    root.kids.pop()
+}
+
+/// A chart part as xl models it.
+pub(crate) struct ParsedChart {
+    pub kind: ChartKind,
+    pub stacked: bool,
+    pub title: Option<String>,
+    pub series: Vec<ChartSeries>,
+    pub options: ChartOptions,
+    /// It has formatting xl doesn't model.
+    pub lossy: bool,
+}
+
+/// A DrawingML color element (srgbClr, schemeClr with luminance changes…).
+fn color(n: &Node, theme: &[xl_engine::Rgb]) -> Option<xl_engine::Rgb> {
+    let base = match n.name.as_str() {
+        "srgbClr" => u32::from_str_radix(n.val()?, 16).ok()?,
+        "sysClr" => u32::from_str_radix(n.attr("lastClr")?, 16).ok()?,
+        "schemeClr" => {
+            // Theme colors are in theme-index order: lt1, dk1, lt2, dk2, accent1–6, hlink, folHlink.
+            let i = match n.val()? {
+                "bg1" | "lt1" => 0,
+                "tx1" | "dk1" => 1,
+                "bg2" | "lt2" => 2,
+                "tx2" | "dk2" => 3,
+                "hlink" => 10,
+                "folHlink" => 11,
+                a => 3 + a.strip_prefix("accent")?.parse::<usize>().ok().filter(|k| (1..=6).contains(k))?,
+            };
+            *theme.get(i)?
+        }
+        "prstClr" => match n.val()? {
+            "black" => 0x000000,
+            "white" => 0xFFFFFF,
+            "red" => 0xFF0000,
+            "green" => 0x008000,
+            "blue" => 0x0000FF,
+            "yellow" => 0xFFFF00,
+            "gray" => 0x808080,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let pct = |name: &str| n.child(name).and_then(Node::num).map(|v| v / 100_000.0);
+    let (mut r, mut g, mut b) = (((base >> 16) & 255) as f64 / 255.0, ((base >> 8) & 255) as f64 / 255.0, (base & 255) as f64 / 255.0);
+    if pct("lumMod").is_some() || pct("lumOff").is_some() {
+        let (h, s, l) = rgb_to_hsl(r, g, b);
+        let l = (l * pct("lumMod").unwrap_or(1.0) + pct("lumOff").unwrap_or(0.0)).clamp(0.0, 1.0);
+        (r, g, b) = hsl_to_rgb(h, s, l);
     }
-    let mut kind = kind?;
-    if kind == ChartKind::Column && !bar_dir_col {
-        kind = ChartKind::Bar;
+    if let Some(s) = pct("shade") {
+        (r, g, b) = (r * s, g * s, b * s);
     }
-    let _ = auto_title_deleted;
-    let title = (!title.trim().is_empty()).then(|| title.trim().to_string());
-    Some((kind, stacked, title, series))
+    if let Some(t) = pct("tint") {
+        (r, g, b) = (1.0 - (1.0 - r) * t, 1.0 - (1.0 - g) * t, 1.0 - (1.0 - b) * t);
+    }
+    let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    Some((byte(r) << 16) | (byte(g) << 8) | byte(b))
+}
+
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (mx + mn) / 2.0;
+    if mx == mn {
+        return (0.0, 0.0, l);
+    }
+    let d = mx - mn;
+    let s = if l > 0.5 { d / (2.0 - mx - mn) } else { d / (mx + mn) };
+    let h = if mx == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if mx == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, s, l)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue = |mut t: f64| {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0))
+}
+
+/// A fill (`solidFill` / `noFill` child) as a paint; Auto if neither.
+fn paint_in(n: &Node, theme: &[xl_engine::Rgb]) -> Paint {
+    if n.child("noFill").is_some() {
+        return Paint::None;
+    }
+    match n.child("solidFill").and_then(|f| f.kids.iter().find_map(|c| color(c, theme))) {
+        Some(c) => Paint::Solid(c),
+        None => Paint::Auto,
+    }
+}
+
+/// Fill, line, width and dash of a shape-properties element.
+fn shape_props(sp: &Node, f: &mut SeriesFormat, theme: &[xl_engine::Rgb]) {
+    f.fill = paint_in(sp, theme);
+    if let Some(ln) = sp.child("ln") {
+        f.line = paint_in(ln, theme);
+        f.line_width = ln.attr("w").and_then(|w| w.parse::<f64>().ok()).map(|w| w / 12700.0);
+        f.dash = match ln.child("prstDash").and_then(Node::val) {
+            Some("dash" | "sysDash") => Dash::Dash,
+            Some("dot" | "sysDot") => Dash::Dot,
+            Some("dashDot" | "sysDashDot" | "lgDashDot" | "lgDashDotDot" | "sysDashDotDot") => Dash::DashDot,
+            Some("lgDash") => Dash::LongDash,
+            _ => Dash::Solid,
+        };
+    }
+}
+
+fn labels_of(d: &Node) -> DataLabels {
+    if d.child("delete").is_some_and(Node::flag) {
+        return DataLabels::default();
+    }
+    let on = |k: &str| d.child(k).is_some_and(Node::flag);
+    DataLabels { value: on("showVal"), category: on("showCatName"), series: on("showSerName"), percent: on("showPercent") }
+}
+
+fn axis_of(n: &Node) -> Axis {
+    let scaling = n.child("scaling");
+    let sc = |k: &str| scaling.and_then(|s| s.child(k)).and_then(Node::num);
+    let fmt = n.child("numFmt").filter(|f| f.attr("sourceLinked") != Some("1")).and_then(|f| f.attr("formatCode")).map(str::to_string);
+    Axis {
+        title: n.child("title").map(Node::runs).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+        min: sc("min"),
+        max: sc("max"),
+        major: n.child("majorUnit").and_then(Node::num),
+        log_base: sc("logBase"),
+        num_fmt: fmt,
+        gridlines: n.child("majorGridlines").is_some(),
+        minor_gridlines: n.child("minorGridlines").is_some(),
+        hidden: n.child("delete").is_some_and(Node::flag),
+    }
+}
+
+fn group_kind(name: &str) -> Option<Result<ChartKind, ()>> {
+    Some(Ok(match name {
+        "barChart" | "bar3DChart" => ChartKind::Column,
+        "lineChart" | "line3DChart" => ChartKind::Line,
+        "areaChart" | "area3DChart" => ChartKind::Area,
+        "pieChart" | "pie3DChart" => ChartKind::Pie,
+        "doughnutChart" => ChartKind::Doughnut,
+        "scatterChart" => ChartKind::Scatter,
+        "radarChart" => ChartKind::Radar,
+        "bubbleChart" => ChartKind::Bubble,
+        "stockChart" | "surfaceChart" | "surface3DChart" | "ofPieChart" => return Some(Err(())),
+        _ => return None,
+    }))
+}
+
+/// Kind, stacking, title, series and formatting of a chart part. None if it's
+/// a kind xl doesn't draw.
+pub(crate) fn parse_chart(bytes: &[u8], wb: &Workbook, theme: &[xl_engine::Rgb]) -> Option<ParsedChart> {
+    let root = dom(bytes)?;
+    if root.child("chartData").is_some() {
+        return parse_chartex(&root, wb, theme);
+    }
+    let chart = root.child("chart")?;
+    let plot = chart.child("plotArea")?;
+    let expr = |src: &str| parse_formula(src.trim().trim_start_matches('='), wb.sheets()).ok().map(Arc::new);
+    let mut options = ChartOptions::blank();
+    let mut lossy = false;
+    // The chart style: plain c:style, or the fallback of Excel's c14 choice.
+    let mut style = None;
+    root.walk(&mut |n| {
+        if n.name == "style" && n.prefix != "c14" && style.is_none() {
+            style = n.num().filter(|v| (1.0..=48.0).contains(v)).map(|v| v as u8);
+        }
+    });
+    options.style = style;
+    options.auto_title_deleted = chart.child("autoTitleDeleted").is_some_and(Node::flag);
+    let title = chart.child("title").map(Node::runs).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    options.legend = chart.child("legend").map(|l| match l.child("legendPos").and_then(Node::val) {
+        Some("b") => LegendPos::Bottom,
+        Some("t") => LegendPos::Top,
+        Some("l") => LegendPos::Left,
+        Some("tr") => LegendPos::TopRight,
+        _ => LegendPos::Right,
+    });
+    lossy |= chart.child("view3D").is_some() || plot.child("dTable").is_some();
+    let axes: Vec<(&str, &Node)> = plot.kids.iter().filter(|k| matches!(k.name.as_str(), "catAx" | "valAx" | "dateAx" | "serAx")).filter_map(|k| Some((k.child("axId")?.val()?, k))).collect();
+    lossy |= axes.iter().any(|(_, a)| a.name == "serAx");
+    let ax_ids = |g: &Node| -> Vec<String> { g.children("axId").filter_map(|a| a.val().map(str::to_string)).collect() };
+    let mut kind: Option<ChartKind> = None;
+    let mut primary: Vec<String> = Vec::new();
+    let mut secondary_ids: Option<Vec<String>> = None;
+    let mut stacked = false;
+    let mut series: Vec<(f64, ChartSeries)> = Vec::new();
+    for g in &plot.kids {
+        let Some(gk) = group_kind(&g.name) else { continue };
+        let mut gk = gk.ok()?;
+        lossy |= g.name.contains("3D") || ["dropLines", "hiLowLines", "upDownBars", "serLines"].iter().any(|k| g.child(k).is_some());
+        if gk == ChartKind::Column && g.child("barDir").and_then(Node::val) == Some("bar") {
+            gk = ChartKind::Bar;
+        }
+        let ids = ax_ids(g);
+        let first = kind.is_none();
+        if first {
+            kind = Some(gk);
+            primary = ids.clone();
+            stacked = matches!(g.child("grouping").and_then(Node::val), Some("stacked" | "percentStacked"));
+            if gk == ChartKind::Doughnut {
+                options.hole_size = g.child("holeSize").and_then(Node::num).map_or(50, |v| v.clamp(1.0, 99.0) as u8);
+            }
+            options.radar_filled = g.child("radarStyle").and_then(Node::val) == Some("filled");
+        }
+        let main = kind?;
+        // Combo charts: a second group of the same kind can't be told apart from the first.
+        if !first && (!main.combinable() || !gk.combinable()) && gk != main {
+            return None;
+        }
+        let secondary = !ids.is_empty() && ids != primary;
+        if secondary && secondary_ids.is_none() {
+            secondary_ids = Some(ids.clone());
+        }
+        let group_labels = g.child("dLbls").map(labels_of);
+        for (n, ser) in g.children("ser").enumerate() {
+            let f = |part: &str| ser.child(part).and_then(|p| p.kids.iter().find_map(|r| r.child("f"))).map(|f| f.text.clone());
+            let Some(values) = f("val").or_else(|| f("yVal")).as_deref().and_then(expr) else { continue };
+            let order = ser.child("order").and_then(Node::num).unwrap_or((series.len() + n) as f64);
+            let name = ser
+                .child("tx")
+                .and_then(|tx| match tx.path(&["strRef", "f"]) {
+                    Some(f) => expr(&f.text),
+                    None => tx.child("v").map(|v| Arc::new(xl_engine::formula::Expr::Text(v.text.clone().into()))),
+                });
+            let categories = f("cat").or_else(|| f("xVal")).as_deref().and_then(expr);
+            let sizes = f("bubbleSize").as_deref().and_then(expr);
+            let mut format = SeriesFormat { kind: (gk != main).then_some(gk), secondary, ..SeriesFormat::default() };
+            if let Some(sp) = ser.child("spPr") {
+                shape_props(sp, &mut format, theme);
+            }
+            if let Some(m) = ser.child("marker") {
+                format.marker = xl_engine::chart::Marker {
+                    shape: m.child("symbol").and_then(Node::val).and_then(MarkerShape::from_name),
+                    size: m.child("size").and_then(Node::num).map(|v| v.clamp(2.0, 72.0) as u8),
+                };
+            }
+            format.smooth = ser.child("smooth").is_some_and(Node::flag);
+            format.points = ser
+                .children("dPt")
+                .filter_map(|p| {
+                    let i = p.child("idx")?.num()? as u32;
+                    match paint_in(p.child("spPr")?, theme) {
+                        Paint::Solid(c) => Some((i, c)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            format.labels = ser.child("dLbls").map(labels_of).or(group_labels).unwrap_or_default();
+            lossy |= ser.child("dLbls").is_some_and(|d| d.child("dLbl").is_some());
+            let trends: Vec<&Node> = ser.children("trendline").collect();
+            lossy |= trends.len() > 1;
+            format.trendline = trends.first().and_then(|t| {
+                let kind = match t.child("trendlineType").and_then(Node::val)? {
+                    "linear" => TrendKind::Linear,
+                    "exp" => TrendKind::Exponential,
+                    "log" => TrendKind::Logarithmic,
+                    "power" => TrendKind::Power,
+                    "poly" => TrendKind::Polynomial(t.child("order").and_then(Node::num).map_or(2, |v| v.clamp(2.0, 6.0) as u8)),
+                    "movingAvg" => TrendKind::MovingAverage(t.child("period").and_then(Node::num).map_or(2, |v| v.clamp(2.0, 255.0) as u8)),
+                    _ => return None,
+                };
+                Some(Trendline { kind, equation: t.child("dispEq").is_some_and(Node::flag), r_squared: t.child("dispRSqr").is_some_and(Node::flag), name: t.child("name").map(|n| n.text.clone()) })
+            });
+            let bars: Vec<&Node> = ser.children("errBars").filter(|e| e.child("errDir").and_then(Node::val) != Some("x")).collect();
+            lossy |= ser.children("errBars").count() > bars.len();
+            format.error_bars = bars.first().and_then(|e| {
+                let kind = match e.child("errValType").and_then(Node::val)? {
+                    "fixedVal" => ErrorKind::Fixed,
+                    "percentage" => ErrorKind::Percent,
+                    "stdDev" => ErrorKind::StdDev,
+                    "stdErr" => ErrorKind::StdErr,
+                    _ => {
+                        lossy = true;
+                        return None;
+                    }
+                };
+                let dir = match e.child("errBarType").and_then(Node::val) {
+                    Some("plus") => ErrorDir::Plus,
+                    Some("minus") => ErrorDir::Minus,
+                    _ => ErrorDir::Both,
+                };
+                Some(ErrorBars { kind, value: e.child("val").and_then(Node::num).unwrap_or(0.0), dir })
+            });
+            series.push((order, ChartSeries { name, categories, values, sizes, format }));
+        }
+    }
+    let kind = kind?;
+    // Legend order is the series' order, whatever group they're in.
+    series.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let axis = |id: Option<&String>| id.and_then(|id| axes.iter().find(|(a, _)| a == id)).map(|(_, n)| axis_of(n)).unwrap_or_default();
+    if kind.is_round() {
+        // No axes: they keep what a new chart has (shown if the kind changes).
+        let d = ChartOptions::default();
+        (options.x_axis, options.y_axis) = (d.x_axis, d.y_axis);
+    } else {
+        options.x_axis = axis(primary.first());
+        options.y_axis = axis(primary.get(1));
+        options.y2_axis = secondary_ids.as_ref().map_or_else(Axis::default, |ids| axis(ids.get(1)));
+    }
+    Some(ParsedChart { kind, stacked, title, series: series.into_iter().map(|s| s.1).collect(), options, lossy })
+}
+
+/// Histogram and waterfall charts (Office 2016 chartex parts).
+fn parse_chartex(root: &Node, wb: &Workbook, theme: &[xl_engine::Rgb]) -> Option<ParsedChart> {
+    let expr = |src: &str| parse_formula(src.trim().trim_start_matches('='), wb.sheets()).ok().map(Arc::new);
+    // Data blocks by id: (categories, values).
+    let data: Vec<(&str, Option<String>, Option<String>)> = root
+        .child("chartData")?
+        .children("data")
+        .map(|d| {
+            let dim = |tag: &str, ty: &str| d.children(tag).find(|n| n.attr("type") == Some(ty)).and_then(|n| n.child("f")).map(|f| f.text.clone());
+            (d.attr("id").unwrap_or("0"), dim("strDim", "cat").or_else(|| dim("numDim", "cat")), dim("numDim", "val"))
+        })
+        .collect();
+    let chart = root.child("chart")?;
+    let text_of = |n: &Node| -> Option<String> {
+        let t = match n.path(&["tx", "txData", "v"]) {
+            Some(v) => v.text.clone(),
+            None => n.runs(),
+        };
+        let t = t.trim().to_string();
+        (!t.is_empty()).then_some(t)
+    };
+    let title = chart.child("title").and_then(text_of);
+    let mut options = ChartOptions::blank();
+    let mut lossy = false;
+    options.legend = chart.child("legend").map(|l| match (l.attr("pos"), l.attr("align")) {
+        (Some("b"), _) => LegendPos::Bottom,
+        (Some("t"), Some("max")) => LegendPos::TopRight,
+        (Some("t"), _) => LegendPos::Top,
+        (Some("l"), _) => LegendPos::Left,
+        _ => LegendPos::Right,
+    });
+    let plot = chart.child("plotArea")?;
+    let mut kind = None;
+    let mut series = Vec::new();
+    for s in plot.child("plotAreaRegion")?.children("series") {
+        let layout = s.child("layoutPr");
+        let k = match s.attr("layoutId")? {
+            "clusteredColumn" if layout.is_none_or(|l| l.child("aggregation").is_none()) => ChartKind::Histogram,
+            "waterfall" => ChartKind::Waterfall,
+            _ => return None,
+        };
+        if kind.is_some_and(|prev| prev != k) {
+            return None;
+        }
+        kind = Some(k);
+        let id = s.child("dataId").and_then(Node::val).unwrap_or("0");
+        let (_, cats, vals) = data.iter().find(|d| d.0 == id)?;
+        let Some(values) = vals.as_deref().and_then(expr) else { continue };
+        let name = s.path(&["tx", "txData"]).and_then(|t| match t.child("f") {
+            Some(f) => expr(&f.text),
+            None => t.child("v").map(|v| Arc::new(xl_engine::formula::Expr::Text(v.text.clone().into()))),
+        });
+        let mut format = SeriesFormat::default();
+        if let Some(sp) = s.child("spPr") {
+            shape_props(sp, &mut format, theme);
+        }
+        format.points = s
+            .children("dataPt")
+            .filter_map(|p| {
+                let i = p.attr("idx")?.parse().ok()?;
+                match paint_in(p.child("spPr")?, theme) {
+                    Paint::Solid(c) => Some((i, c)),
+                    _ => None,
+                }
+            })
+            .collect();
+        if let Some(v) = s.path(&["dataLabels", "visibility"]) {
+            let on = |k: &str| v.attr(k).is_some_and(|x| x == "1" || x == "true");
+            format.labels = DataLabels { value: on("value"), category: on("categoryName"), series: on("seriesName"), percent: false };
+        } else if s.child("dataLabels").is_some() {
+            format.labels.value = true;
+        }
+        if let Some(l) = layout {
+            if let Some(b) = l.child("binning") {
+                let edge = |k: &str| b.attr(k).and_then(|v| v.parse::<f64>().ok());
+                options.bins.underflow = edge("underflow");
+                options.bins.overflow = edge("overflow");
+                options.bins.mode = match (b.child("binSize").and_then(Node::num), b.child("binCount").and_then(Node::num)) {
+                    (Some(w), _) if w > 0.0 => BinMode::Width(w),
+                    (_, Some(c)) if c >= 1.0 => BinMode::Count(c as u32),
+                    _ => BinMode::Auto,
+                };
+            }
+            if let Some(t) = l.child("subtotals") {
+                options.subtotals = t.children("idx").filter_map(|i| i.num()).map(|v| v as u32).collect();
+            }
+            lossy |= l.child("statistics").is_some();
+        }
+        series.push(ChartSeries { name, categories: cats.as_deref().and_then(expr), values, sizes: None, format });
+    }
+    for a in plot.children("axis") {
+        let mut ax = Axis {
+            title: a.child("title").and_then(text_of),
+            gridlines: a.child("majorGridlines").is_some(),
+            minor_gridlines: a.child("minorGridlines").is_some(),
+            hidden: a.attr("hidden").is_some_and(|v| v == "1" || v == "true"),
+            num_fmt: a.child("numFmt").filter(|f| f.attr("sourceLinked") != Some("1")).and_then(|f| f.attr("formatCode")).map(str::to_string),
+            ..Axis::default()
+        };
+        if let Some(v) = a.child("valScaling") {
+            let n = |k: &str| v.attr(k).and_then(|x| x.parse::<f64>().ok());
+            (ax.min, ax.max, ax.major) = (n("min"), n("max"), n("majorUnit"));
+            options.y_axis = ax;
+        } else {
+            options.x_axis = ax;
+        }
+    }
+    lossy |= root.any(&|n| n.name == "txPr");
+    Some(ParsedChart { kind: kind?, stacked: false, title, series, options, lossy })
 }
 
 #[cfg(test)]
@@ -588,5 +1008,15 @@ mod tests {
         assert_eq!(resolve("xl/worksheets/sheet1.xml", "../drawings/drawing1.xml"), "xl/drawings/drawing1.xml");
         assert_eq!(resolve("xl/drawings/drawing1.xml", "../charts/chart3.xml"), "xl/charts/chart3.xml");
         assert_eq!(resolve("xl/worksheets/sheet1.xml", "/xl/drawings/d.xml"), "xl/drawings/d.xml");
+    }
+
+    #[test]
+    fn scheme_colors_with_luminance() {
+        let theme = [0xFFFFFF, 0x000000, 0xE7E6E6, 0x44546A, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47, 0x0563C1, 0x954F72];
+        let n = super::dom(b"<a:schemeClr xmlns:a=\"x\" val=\"accent2\"/>").unwrap();
+        assert_eq!(super::color(&n, &theme), Some(0xED7D31));
+        // 75% luminance of white is Excel's "darker 25%" gray.
+        let n = super::dom(b"<a:schemeClr xmlns:a=\"x\" val=\"bg1\"><a:lumMod val=\"75000\"/></a:schemeClr>").unwrap();
+        assert_eq!(super::color(&n, &theme), Some(0xBFBFBF));
     }
 }

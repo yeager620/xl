@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use gpui::{Pixels, Point};
-use xl_engine::chart::{Chart, ChartKind, ChartSeries};
+use xl_engine::chart::{Chart, ChartKind, ChartSeries, DataLabels, LegendPos, Paint};
 use xl_engine::formula::parse_formula;
 use xl_engine::{CellRef, Range, Value, quote_sheet_name};
 
@@ -60,7 +60,7 @@ impl Spreadsheet {
         }
         let store = self.wb.store(self.cur);
         let text_col = |c: u32| (first..=range.end.row).all(|r| !matches!(store.value(CellRef::new(r, c)), Value::Number(_)));
-        let has_categories = range.cols() > 1 && (text_col(range.start.col) || kind == ChartKind::Scatter);
+        let has_categories = range.cols() > 1 && (text_col(range.start.col) || kind.is_xy());
         let sheet = quote_sheet_name(self.wb.sheet_name(self.cur));
         let reference = |r: Range| parse_formula(&format!("{sheet}!{}", absolute_range(r)), self.wb.sheets()).ok().map(Arc::new);
         let column = |c: u32| Range::new(CellRef::new(first, c), CellRef::new(range.end.row, c));
@@ -74,14 +74,29 @@ impl Spreadsheet {
             }
             let Some(values) = reference(column(c)) else { continue };
             let name = header.then(|| reference(Range::single(CellRef::new(range.start.row, c)))).flatten();
-            series.push(ChartSeries { name, categories: categories.clone(), values });
+            series.push(ChartSeries::new(name, categories.clone(), values));
+        }
+        if kind == ChartKind::Bubble {
+            // Columns pair up: y values, then bubble sizes.
+            let mut paired = Vec::new();
+            let mut it = series.into_iter();
+            while let Some(mut s) = it.next() {
+                s.sizes = it.next().map(|z| z.values);
+                paired.push(s);
+            }
+            series = paired;
+        }
+        if kind.is_chartex() {
+            // Histograms and waterfalls chart one series.
+            series.truncate(1);
         }
         if series.is_empty() {
             self.message = Some(("Select at least one column of numbers to chart".into(), true));
             return;
         }
         let anchor = CellRef::new(range.start.row, (range.end.col + 2).min(xl_engine::MAX_COLS - 1));
-        let chart = Chart { kind, title: None, series, anchor, offset: (0.0, 0.0), size: DEFAULT_SIZE, stacked: false };
+        let mut chart = Chart::new(kind, series, anchor, DEFAULT_SIZE);
+        prepare_kind(&mut chart);
         let mut index = 0;
         self.change_layout(None, |s| {
             if let Some(l) = s.wb.layout_mut(s.cur) {
@@ -208,4 +223,43 @@ impl Spreadsheet {
             }
         });
     }
+}
+
+/// Defaults that make a new chart of its kind look right: scatter charts
+/// show markers only, pies label their slices with percents.
+pub(crate) fn prepare_kind(c: &mut Chart) {
+    for s in &mut c.series {
+        let f = &mut s.format;
+        if c.kind == ChartKind::Scatter && f.line == Paint::Auto {
+            f.line = Paint::None;
+        }
+        if c.kind.is_round() && !f.labels.any() {
+            f.labels.percent = true;
+        }
+    }
+    if c.kind.is_round() || c.series.len() > 1 {
+        c.options.legend.get_or_insert(LegendPos::Bottom);
+    }
+}
+
+/// Change a chart's kind, undoing the defaults of the old kind first.
+pub(crate) fn switch_kind(c: &mut Chart, kind: ChartKind) {
+    if c.kind == kind {
+        return;
+    }
+    for s in &mut c.series {
+        let f = &mut s.format;
+        if c.kind == ChartKind::Scatter && f.line == Paint::None {
+            f.line = Paint::Auto;
+        }
+        if c.kind.is_round() && f.labels == (DataLabels { percent: true, ..DataLabels::default() }) {
+            f.labels = DataLabels::default();
+        }
+        // Combo kinds only mix in category charts.
+        if !kind.combinable() || f.kind == Some(kind) {
+            f.kind = None;
+        }
+    }
+    c.kind = kind;
+    prepare_kind(c);
 }

@@ -528,11 +528,12 @@ fn add_chart(wb: &mut Workbook, ctx: &Ctx) -> Result<Edit, String> {
     wb.layout_mut(s).ok_or("no layout")?.charts.push(Chart {
         kind: ChartKind::Column,
         title: Some("xl check".into()),
-        series: vec![ChartSeries { name: None, categories: None, values: Arc::new(values) }],
+        series: vec![ChartSeries::new(None, None, Arc::new(values))],
         anchor,
         offset: (0.0, 0.0),
         size: (320.0, 180.0),
         stacked: false,
+        options: Default::default(),
     });
     let mut allowed = part_of(ctx, wb, s);
     allowed.extend(ctx.original.keys().filter(|k| k.starts_with("xl/drawings/") || k.starts_with("xl/worksheets/_rels/")).cloned());

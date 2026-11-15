@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod chart_paint;
+mod chart_form;
 mod charts;
 mod chrome;
 mod complete;

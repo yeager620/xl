@@ -1813,6 +1813,8 @@ const REL_DRAWING: &str = "http://schemas.openxmlformats.org/officeDocument/2006
 const REL_CHART: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
 const CT_DRAWING: &str = "application/vnd.openxmlformats-officedocument.drawing+xml";
 const CT_CHART: &str = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+const REL_CHARTEX: &str = "http://schemas.microsoft.com/office/2014/relationships/chartEx";
+const CT_CHARTEX: &str = "application/vnd.ms-office.chartex+xml";
 
 fn free_name(taken: &mut BTreeSet<String>, stem: &str, ext: &str) -> (String, u32) {
     let mut n = 1;
@@ -1900,14 +1902,17 @@ fn sync_charts(
     let mut doc = expand_root(&parts.get(&drawing).ok_or_else(|| format!("missing {drawing}"))?);
     let mut rel_adds = Vec::new();
     for &i in &plan.added {
-        let (name, n) = free_name(taken, "xl/charts/chart", "xml");
-        parts.set(&name, crate::xlsx_chartxml::chart_xml(wb, sheet, &charts[i]).into_bytes());
-        ct_adds.push((format!("/{name}"), CT_CHART));
-        let rid = format!("rIdXlChart{n}");
-        rel_adds.push((rid.clone(), REL_CHART, format!("../charts/chart{n}.xml")));
+        // Histograms and waterfalls are chartex parts in an mc:AlternateContent frame.
+        let ex = charts[i].kind.is_chartex();
+        let (name, n) = free_name(taken, if ex { "xl/charts/chartEx" } else { "xl/charts/chart" }, "xml");
+        let xml = if ex { crate::xlsx_chartxml::chartex_xml(wb, sheet, &charts[i]) } else { crate::xlsx_chartxml::chart_xml(wb, sheet, &charts[i]) };
+        parts.set(&name, xml.into_bytes());
+        ct_adds.push((format!("/{name}"), if ex { CT_CHARTEX } else { CT_CHART }));
+        let rid = format!("rIdXlChart{}{n}", if ex { "Ex" } else { "" });
+        rel_adds.push((rid.clone(), if ex { REL_CHARTEX } else { REL_CHART }, format!("../charts/{}", name.rsplit('/').next().unwrap_or(&name))));
         let (_, root_close, _, kids) = children(&doc)?;
         let index = kids.iter().filter(|k| matches!(k.local.as_str(), "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor")).count();
-        let anchor = crate::xlsx_chartxml::chart_anchor(&rid, 1000 + n, &format!("Chart {n}"));
+        let anchor = if ex { crate::xlsx_chartxml::chartex_anchor(&rid, 3000 + n, &format!("Chart {n}")) } else { crate::xlsx_chartxml::chart_anchor(&rid, 1000 + n, &format!("Chart {n}")) };
         doc = apply_edits(&doc, vec![(root_close, root_close, anchor)]);
         doc = reanchor(&doc, index, &charts[i], wb, sheet)?;
     }
