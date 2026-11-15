@@ -425,7 +425,7 @@ impl Spreadsheet {
                     }
                 })
             })
-            .child(icon("sheet", t.ink_muted))
+            .child(icon(if self.home.is_some() { "house" } else { "sheet" }, t.ink_muted))
             .child(
                 div()
                     .ml(px(4.))
@@ -436,10 +436,10 @@ impl Spreadsheet {
                     .text_size(px(14.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.ink)
-                    .child(self.file_name())
-                    .when(self.dirty, |d| d.child(div().ml(px(4.)).text_color(t.ink_faint).font_weight(FontWeight::NORMAL).child("— edited"))),
+                    .child(if self.home.is_some() { "Home".to_string() } else { self.file_name() })
+                    .when(self.dirty && self.home.is_none(), |d| d.child(div().ml(px(4.)).text_color(t.ink_faint).font_weight(FontWeight::NORMAL).child("— edited"))),
             )
-            .child(tools)
+            .when(self.home.is_none(), |d| d.child(tools))
             .child(div().flex_1().h_full())
             .child(file)
             .child(main_menu)
@@ -552,6 +552,16 @@ impl Spreadsheet {
                 let dark = t.dark;
                 let close = |this: &mut Spreadsheet| this.menu = None;
                 menu_panel(&t, 230.)
+                    .child(menu_item(&t, "m-home", "Home", "Alt+Home").on_click(cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.go_home();
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "m-new", "New blank workbook", "Ctrl+N").on_click(cx.listener(|this, _, window, cx| {
+                        this.menu = None;
+                        this.request(crate::lifecycle::After::New(crate::home::Starter::Blank), window, cx);
+                        cx.notify();
+                    })))
                     .child(menu_item(&t, "m-open", "Open…", "Ctrl+O").on_click(cx.listener(move |this, _, _, cx| {
                         close(this);
                         this.open(cx);
@@ -942,7 +952,7 @@ impl Spreadsheet {
 
 impl Render for Spreadsheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self.title();
+        let title = if self.home.is_some() { "xl".to_string() } else { self.title() };
         if title != self.last_title {
             window.set_window_title(&title);
             self.last_title = title;
@@ -982,6 +992,8 @@ impl Render for Spreadsheet {
             .font_family(crate::FONT)
             .text_size(px(14.))
             .child(self.render_toolbar(window, cx))
+            .when(self.home.is_some(), |d| d.children(self.render_recovery_bar(cx)).child(self.render_home(cx)))
+            .when(self.home.is_none(), |d| d
             .child(self.render_formula_bar(cx))
             .when(self.find.open, |d| d.child(self.render_find_bar(cx)))
             .children(self.render_recovery_bar(cx))
@@ -1003,7 +1015,7 @@ impl Render for Spreadsheet {
                 )
                 .children(self.render_pivot_panel(cx)),
             )
-            .child(self.render_bottom_bar(cx))
+            .child(self.render_bottom_bar(cx)))
             .relative()
             .when(self.menu.is_some() || self.palette.is_some() || self.context.is_some() || self.filter_menu.is_some(), |d| {
                 // Transparent backdrop: a click anywhere outside the open menu or palette closes it.

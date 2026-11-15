@@ -45,6 +45,10 @@ fn icon(path: &str) -> Option<&'static [u8]> {
         "icons/underline.svg" => include_bytes!("../../../assets/icons/underline.svg"),
         "icons/undo-2.svg" => include_bytes!("../../../assets/icons/undo-2.svg"),
         "icons/x.svg" => include_bytes!("../../../assets/icons/x.svg"),
+        "icons/arrow-left.svg" => include_bytes!("../../../assets/icons/arrow-left.svg"),
+        "icons/folder-open.svg" => include_bytes!("../../../assets/icons/folder-open.svg"),
+        "icons/house.svg" => include_bytes!("../../../assets/icons/house.svg"),
+        "icons/pin.svg" => include_bytes!("../../../assets/icons/pin.svg"),
         _ => return None,
     })
 }

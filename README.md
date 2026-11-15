@@ -95,6 +95,8 @@ cargo run --release -p xl-bench  # recalc benchmarks
 | Ctrl+D / Ctrl+R | Fill down / right |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Delete | Clear selection |
+| Alt+Home | Home: new blank workbook, templates, recent files (Esc goes back to the open workbook) |
+| Ctrl+N | New blank workbook (asks first if there are unsaved changes) |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (.xlsx or .csv); you can also drop a file on the window |
 | Ctrl+W / Ctrl+Q | Close / quit (asks first if there are unsaved changes) |
 | Ctrl+PageUp / PageDown | Previous / next sheet (also works mid-formula to point at another sheet) |

@@ -44,19 +44,38 @@ fn fixture() -> xl_engine::Workbook {
     wb
 }
 
-fn setup(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestContext) {
+/// A unique scratch directory name for one test.
+fn scratch(kind: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("xl-test-{kind}-{}-{n}", std::process::id()))
+}
+
+/// A window as xl starts without a file (on the Home page), with private
+/// recovery and recent-files directories.
+fn setup_home(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestContext) {
     let (view, cx) = cx.add_window_view(|window, cx| Spreadsheet::new(None, window, cx));
     view.update(cx, |s, _| {
+        // Never touch the real recovery or data directories from tests.
+        s.recovery_offer = None;
+        s.recovery_dir = scratch("recovery");
+        s.recent = crate::recent::Recent::load(&scratch("recent"));
+    });
+    cx.run_until_parked();
+    (view, cx)
+}
+
+/// A window showing the fixture workbook (past the Home page).
+fn setup(cx: &mut TestAppContext) -> (Entity<Spreadsheet>, &mut VisualTestContext) {
+    let (view, cx) = setup_home(cx);
+    view.update(cx, |s, cx| {
+        s.home = None;
         s.wb = fixture();
         s.cur = s.wb.sheet_ids()[0];
         s.active = CellRef::parse("B4").unwrap();
         s.anchor = s.active;
         s.dirty = false;
-        // Never touch the real recovery directory from tests.
-        s.recovery_offer = None;
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        s.recovery_dir = std::env::temp_dir().join(format!("xl-test-recovery-{}-{n}", std::process::id()));
+        cx.notify();
     });
     cx.run_until_parked();
     (view, cx)
@@ -1325,4 +1344,223 @@ fn goal_seek_and_solver_dialogs(cx: &mut TestAppContext) {
     cx.simulate_input("F1 about 4");
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |s, _| assert!(s.form.is_some() && s.message.as_ref().is_some_and(|(m, err)| *err && m.contains("needs"))));
+}
+
+// ------------------------------------------------------------------ Home
+
+fn on_home(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext) -> bool {
+    view.read_with(cx, |s, _| s.home.is_some())
+}
+
+fn recent_paths(view: &Entity<Spreadsheet>, cx: &mut VisualTestContext) -> Vec<std::path::PathBuf> {
+    view.read_with(cx, |s, _| s.recent.entries().iter().map(|e| e.path.clone()).collect())
+}
+
+#[gpui::test]
+fn home_shows_on_startup_without_a_file(cx: &mut TestAppContext) {
+    let (view, cx) = setup_home(cx);
+    view.read_with(cx, |s, _| {
+        let h = s.home.as_ref().expect("Home is shown at startup");
+        assert!(!h.back, "nothing to go back to at startup");
+        assert_eq!(h.selected, crate::home::HomeItem::Blank);
+    });
+    #[cfg(debug_assertions)]
+    {
+        assert!(cx.debug_bounds("home-blank").is_some(), "the blank tile is drawn");
+        assert!(cx.debug_bounds("home-open").is_some(), "the Open button is drawn");
+        assert!(cx.debug_bounds("home-back").is_none(), "no Back button at startup");
+    }
+    // Escape has nowhere to go back to; typing doesn't start a cell edit.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input("abc");
+    assert!(on_home(&view, cx));
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.home.as_ref().unwrap().filter, "abc", "typing filters the recent list");
+        assert!(s.edit.is_none() && !s.dirty);
+    });
+    cx.simulate_keystrokes("backspace backspace backspace");
+    view.read_with(cx, |s, _| assert!(s.home.as_ref().unwrap().filter.is_empty()));
+}
+
+#[gpui::test]
+fn new_blank_and_every_template_open_untitled_workbooks(cx: &mut TestAppContext) {
+    let (view, cx) = setup_home(cx);
+    // Enter on the selected Blank tile.
+    cx.simulate_keystrokes("enter");
+    assert!(!on_home(&view, cx));
+    view.read_with(cx, |s, _| {
+        assert!(s.path.is_none() && !s.dirty);
+        assert_eq!(s.wb.sheet_ids().len(), 1);
+        assert!(s.wb.store(s.cur).is_empty(), "a blank workbook");
+    });
+    // Each template, chosen from Home.
+    for i in 0..crate::templates::TEMPLATES.len() {
+        cx.simulate_keystrokes("alt-home");
+        view.read_with(cx, |s, _| assert!(s.home.as_ref().unwrap().back, "Home offers to go back"));
+        view.update_in(cx, |s, window, cx| s.activate_home_item(crate::home::HomeItem::Template(i), window, cx));
+        assert!(!on_home(&view, cx), "template {i} opened");
+        view.read_with(cx, |s, _| {
+            assert!(s.path.is_none(), "templates open untitled");
+            assert!(!s.dirty);
+            assert!(s.wb.store(s.cur).len() > 10);
+        });
+    }
+    // The last one was the grade book: a weighted average computes.
+    assert_eq!(sheet(&view, cx), "Grades");
+    view.read_with(cx, |s, _| {
+        let Value::Number(avg) = s.wb.value(s.at(CellRef::parse("G6").unwrap())).clone() else { panic!("no average") };
+        assert!((avg - 89.75).abs() < 1e-9, "weighted average {avg}");
+    });
+    // Keyboard: Home, then Right to the first template (the budget).
+    cx.simulate_keystrokes("alt-home");
+    view.read_with(cx, |s, _| assert_eq!(s.home.as_ref().unwrap().selected, crate::home::HomeItem::Blank));
+    cx.simulate_keystrokes("right enter");
+    assert_eq!(sheet(&view, cx), "Budget");
+    assert_eq!(val(&view, cx, "D13"), Value::Number(-62.0));
+    assert_eq!(shown(&view, cx, "G7"), "$1,946");
+    // Ctrl+N anywhere starts a blank workbook; the palette has a Home command.
+    cx.simulate_keystrokes("ctrl-n");
+    view.read_with(cx, |s, _| assert!(s.wb.store(s.cur).is_empty() && s.home.is_none()));
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("home");
+    cx.simulate_keystrokes("enter");
+    assert!(on_home(&view, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!on_home(&view, cx), "Escape goes back to the workbook");
+}
+
+#[gpui::test]
+fn going_home_keeps_unsaved_work(cx: &mut TestAppContext) {
+    use crate::home::{HomeItem, Starter};
+    use crate::lifecycle::After;
+    let (view, cx) = setup(cx);
+    cx.simulate_input("99");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("alt-home");
+    assert!(on_home(&view, cx));
+    // Back keeps the workbook untouched.
+    view.update_in(cx, |s, window, cx| s.activate_home_item(HomeItem::Back, window, cx));
+    assert!(!on_home(&view, cx));
+    assert_eq!(val(&view, cx, "B4"), Value::Number(99.0));
+    view.read_with(cx, |s, _| assert!(s.dirty));
+    // Starting something else asks first; Cancel stays on Home with the work intact.
+    cx.simulate_keystrokes("alt-home");
+    view.update_in(cx, |s, window, cx| s.activate_home_item(HomeItem::Template(1), window, cx));
+    view.read_with(cx, |s, _| assert_eq!(s.pending, Some(After::New(Starter::Template(1)))));
+    cx.simulate_keystrokes("escape");
+    assert!(on_home(&view, cx));
+    view.read_with(cx, |s, _| assert!(s.pending.is_none() && s.dirty));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(val(&view, cx, "B4"), Value::Number(99.0));
+    // Opening a recent file asks too; Save writes the work, then opens it.
+    let other = scratch("other").with_extension("xlsx");
+    let blank = xl_engine::Workbook::new();
+    xl_io::save(&blank, &other, blank.sheet_ids()[0], None).unwrap();
+    let mine = scratch("mine").with_extension("xlsx");
+    view.update(cx, |s, _| s.path = Some(mine.clone()));
+    cx.simulate_keystrokes("alt-home");
+    view.update_in(cx, |s, window, cx| s.activate_home_item(HomeItem::Recent(other.clone()), window, cx));
+    view.read_with(cx, |s, _| assert_eq!(s.pending, Some(After::Open(other.clone()))));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!on_home(&view, cx));
+    view.read_with(cx, |s, _| assert_eq!(s.path.as_deref(), Some(other.as_path())));
+    let saved = xl_io::open(&mine).unwrap().workbook;
+    assert_eq!(*saved.value(Addr::new(saved.sheet_ids()[0], CellRef::parse("B4").unwrap())), Value::Number(99.0));
+    std::fs::remove_file(other).ok();
+    std::fs::remove_file(mine).ok();
+}
+
+#[gpui::test]
+fn recent_files_record_opens_and_saves(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    let a = scratch("recent-a").with_extension("xlsx");
+    let b = scratch("recent-b").with_extension("csv");
+    view.update(cx, |s, _| {
+        s.save_to(a.clone());
+        s.save_to(b.clone());
+    });
+    let (a, b) = (std::fs::canonicalize(&a).unwrap(), std::fs::canonicalize(&b).unwrap());
+    assert_eq!(recent_paths(&view, cx), [b.clone(), a.clone()], "most recent first");
+    // Opening a file moves it to the top without duplicating it.
+    view.update(cx, |s, cx| s.load(a.clone(), cx));
+    cx.run_until_parked();
+    assert_eq!(recent_paths(&view, cx), [a.clone(), b.clone()]);
+    // Autosave (recovery copies) doesn't count.
+    view.update(cx, |s, _| {
+        s.mark_dirty();
+        s.autosave();
+    });
+    assert_eq!(recent_paths(&view, cx).len(), 2);
+    // Persisted: a fresh load of the store sees the same list.
+    let dir = view.read_with(cx, |s, _| s.recent.dir().to_path_buf());
+    let reloaded = crate::recent::Recent::load(&dir);
+    assert_eq!(reloaded.entries().iter().map(|e| e.path.clone()).collect::<Vec<_>>(), [a.clone(), b.clone()]);
+    // A file that's gone is shown as missing, and can be removed.
+    std::fs::remove_file(&b).unwrap();
+    cx.simulate_keystrokes("alt-home");
+    view.read_with(cx, |s, _| {
+        let e = s.recent.entries();
+        assert!(!e[0].missing && e[1].missing);
+    });
+    // Opening the missing one explains instead of failing silently.
+    view.update_in(cx, |s, window, cx| s.activate_home_item(crate::home::HomeItem::Recent(b.clone()), window, cx));
+    view.read_with(cx, |s, _| {
+        assert!(s.home.is_some() && s.pending.is_none());
+        assert!(s.message.as_ref().is_some_and(|(m, err)| *err && m.contains("Can’t find")));
+    });
+    // Filter, then Delete removes the selected entry.
+    cx.simulate_input("recent-b");
+    view.read_with(cx, |s, _| assert_eq!(s.home.as_ref().unwrap().selected, crate::home::HomeItem::Recent(b.clone())));
+    cx.simulate_keystrokes("delete");
+    assert_eq!(recent_paths(&view, cx), std::slice::from_ref(&a));
+    assert_eq!(crate::recent::Recent::load(&dir).entries().len(), 1);
+    std::fs::remove_file(a).ok();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[gpui::test]
+fn opening_a_recent_entry_loads_it(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    let path = scratch("reopen").with_extension("xlsx");
+    view.update(cx, |s, _| s.save_to(path.clone()));
+    // Something else is open now.
+    cx.simulate_keystrokes("ctrl-n");
+    assert_eq!(val(&view, cx, "D10"), Value::Empty);
+    cx.simulate_keystrokes("alt-home");
+    // Type to filter, which selects the match; Enter opens it.
+    cx.simulate_input("reopen");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!on_home(&view, cx));
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+    view.read_with(cx, |s, _| assert_eq!(s.path.as_deref().map(canon), Some(canon(&path))));
+    assert_eq!(sheet(&view, cx), "Welcome");
+    assert_eq!(shown(&view, cx, "D10"), "$85.08");
+    std::fs::remove_file(path).ok();
+}
+
+#[gpui::test]
+fn home_keeps_the_recovery_offer(cx: &mut TestAppContext) {
+    let (view, cx) = setup_home(cx);
+    let dir = view.read_with(cx, |s, _| s.recovery_dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("999999997.xlsx");
+    let mut wb = xl_engine::Workbook::new();
+    let s0 = wb.sheet_ids()[0];
+    wb.set_input(Addr::new(s0, CellRef::parse("A1").unwrap()), "42").unwrap();
+    xl_io::save(&wb, &file, s0, None).unwrap();
+    view.update(cx, |s, cx| {
+        s.recovery_offer = crate::lifecycle::find_recovery(&dir);
+        assert!(s.recovery_offer.is_some());
+        s.restore_recovery(cx);
+    });
+    cx.run_until_parked();
+    assert!(!on_home(&view, cx), "restoring leaves Home for the workbook");
+    assert_eq!(val(&view, cx, "A1"), Value::Number(42.0));
+    view.read_with(cx, |s, _| {
+        assert!(s.dirty && s.path.is_none());
+        assert!(s.recent.entries().is_empty(), "recovery files aren't recent files");
+    });
+    std::fs::remove_dir_all(dir).ok();
 }
