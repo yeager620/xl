@@ -81,7 +81,7 @@ impl Spreadsheet {
             return;
         }
         let anchor = CellRef::new(range.start.row, (range.end.col + 2).min(xl_engine::MAX_COLS - 1));
-        let chart = Chart { kind, title: None, series, anchor, offset: (0.0, 0.0), size: DEFAULT_SIZE, stacked: false };
+        let chart = Chart { kind, title: None, series, anchor, offset: (0.0, 0.0), size: DEFAULT_SIZE, stacked: false, pivot: None };
         let mut index = 0;
         self.change_layout(None, |s| {
             if let Some(l) = s.wb.layout_mut(s.cur) {

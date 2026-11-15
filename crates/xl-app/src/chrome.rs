@@ -1018,6 +1018,7 @@ impl Render for Spreadsheet {
                     .relative()
                     .overflow_hidden()
                     .child(grid)
+                    .children(self.render_floating_filters(cx))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))

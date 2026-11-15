@@ -63,6 +63,9 @@ pub struct SheetLayout {
     pub tables: Vec<Table>,
     /// Pivot tables whose output is on this sheet.
     pub pivots: Vec<crate::pivot::Pivot>,
+    /// Slicers and timelines floating on this sheet.
+    pub slicers: Vec<crate::slicer::Slicer>,
+    pub timelines: Vec<crate::slicer::Timeline>,
     /// Notes (Excel's comments) on cells.
     pub notes: BTreeMap<CellRef, Note>,
     /// Hyperlinks on cells.
@@ -1104,6 +1107,12 @@ impl Workbook {
                 sd.layout.sparklines.retain_mut(|s| s.apply_shift(op, id));
                 for p in &mut sd.layout.pivots {
                     p.apply_shift(op, id);
+                }
+                for s in &mut sd.layout.slicers {
+                    s.apply_shift(op, id);
+                }
+                for t in &mut sd.layout.timelines {
+                    t.apply_shift(op, id);
                 }
             }
         }

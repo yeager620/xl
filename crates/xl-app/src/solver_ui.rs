@@ -15,6 +15,8 @@ pub(crate) enum FormKind {
     Link,
     /// Data validation for the selection.
     Validation,
+    /// A pivot table's field panel forms.
+    Pivot(crate::pivot_ui::PivotForm),
 }
 
 pub(crate) struct FormDialog {
@@ -65,6 +67,7 @@ impl Spreadsheet {
                 ("Variable cells", "e.g. B2:B4 or B2, D2", String::new()),
                 ("Constraints", "e.g. B5 <= 100; B2:B4 int; C9 = D9", String::new()),
             ],
+            FormKind::Pivot(k) => return self.open_pivot_form(k),
         };
         self.form = Some(FormDialog { kind, fields, goal: SolverGoalKind::Max, non_negative: true });
         self.field = Some(Field::Form(match kind {
@@ -72,6 +75,7 @@ impl Spreadsheet {
             FormKind::Solver => 2,
             FormKind::Link => 0,
             FormKind::Validation => 2,
+            FormKind::Pivot(_) => 0,
         }));
     }
 
@@ -144,6 +148,10 @@ impl Spreadsheet {
             self.apply_link_form(text(0), text(1));
             return;
         }
+        if let FormKind::Pivot(k) = kind {
+            self.run_pivot_form(k, &texts);
+            return;
+        }
         if kind == FormKind::Validation {
             match self.apply_validation_form(&text(0), &text(1), &text(2), &text(3), &text(4)) {
                 Ok(()) => {
@@ -156,7 +164,7 @@ impl Spreadsheet {
             return;
         }
         let result: Result<(Vec<Addr>, String), String> = match kind {
-            FormKind::Link | FormKind::Validation => unreachable!("handled above"),
+            FormKind::Link | FormKind::Validation | FormKind::Pivot(_) => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -326,6 +334,7 @@ impl Spreadsheet {
             FormKind::Solver => "Solver",
             FormKind::Link => "Link",
             FormKind::Validation => "Data validation",
+            FormKind::Pivot(k) => Spreadsheet::pivot_form_title(k),
         };
         let mut body = div().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
@@ -468,6 +477,7 @@ impl Spreadsheet {
                                 FormKind::GoalSeek => "Seek",
                                 FormKind::Solver => "Solve",
                                 FormKind::Link | FormKind::Validation => "Save",
+                                FormKind::Pivot(_) => "OK",
                             }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();

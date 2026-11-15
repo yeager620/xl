@@ -25,6 +25,17 @@ in files with parts that hold cell addresses (hyperlinks, validation,
 drawings, charts, pivot caches). Those saves write a fresh file, which loses
 what xl doesn't model; xl warns first and says why (`xl_io::save_plan`).
 
+## xl's own pivot tables
+
+Pivot tables made in xl are written as their output cells (so every app sees
+the values) plus one custom XML part, `customXml/xlPivots.xml` (with its
+`itemProps` part, related from the workbook), holding the definitions:
+fields, calculated fields, grouping, filters, sorting, "show values as",
+slicers, timelines and which charts are pivot charts. xl reads it back on
+open, so the pivots stay live; patched saves rewrite only that part. Excel
+and LibreOffice keep custom XML as is but don't see a live pivot table
+(xl doesn't write `pivotTable`/`pivotCacheDefinition` parts yet).
+
 ## Checking it
 
 `crates/xl-io/examples/roundtrip.rs` runs each file through a no-op save and

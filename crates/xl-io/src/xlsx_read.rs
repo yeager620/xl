@@ -1010,7 +1010,7 @@ fn validation_from_xml(attrs: &[(String, String)], formulas: &[String], wb: &Wor
 }
 
 /// "A1:B2" (or a single cell) to a range.
-fn parse_range(s: &str) -> Option<Range> {
+pub(crate) fn parse_range(s: &str) -> Option<Range> {
     let (a, b) = s.split_once(':').unwrap_or((s, s));
     Some(Range::new(CellRef::parse(a)?, CellRef::parse(b)?))
 }
@@ -1070,7 +1070,7 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
     // Images that no shown picture uses (in headers, backgrounds, shapes…).
     let mut unshown_media: std::collections::HashSet<String> = names.iter().filter(|n| n.starts_with("xl/media/")).cloned().collect();
     for name in names {
-        if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix)) {
+        if let Some(&(_, label)) = UNSUPPORTED_PARTS.iter().find(|(prefix, _)| name.starts_with(prefix)).filter(|_| !crate::xlsx_pivots::is_ours(name.as_str())) {
             note(label);
         }
     }
@@ -1129,6 +1129,10 @@ pub fn read_xlsx(path: &Path) -> Result<Loaded, String> {
         t.contains("date1904=\"1\"") || t.contains("date1904=\"true\"")
     }) {
         wb.convert_from_1904();
+    }
+    // xl's own pivot tables, slicers and timelines.
+    if let Some(meta) = read_entry(&mut zip, crate::xlsx_pivots::PART)? {
+        crate::xlsx_pivots::read(&meta, &mut wb, &mut warnings);
     }
     // Formulas using tables get their dependencies once the tables are known.
     let has_tables = wb.sheet_ids().iter().any(|&s| !wb.layout(s).tables.is_empty());

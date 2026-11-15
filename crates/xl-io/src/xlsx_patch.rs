@@ -1416,7 +1416,7 @@ const CT_WORKSHEET: &str = "application/vnd.openxmlformats-officedocument.spread
 const CT_SST: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
 
 /// Add and remove relationships in a .rels part (by target).
-fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[String]) -> Result<Vec<u8>, String> {
+pub(crate) fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[String]) -> Result<Vec<u8>, String> {
     let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let text = String::from_utf8_lossy(doc).to_string();
@@ -1432,7 +1432,7 @@ fn patch_rels(doc: &[u8], add: &[(String, &str, String)], remove_targets: &[Stri
     Ok(apply_edits(doc, edits))
 }
 
-fn patch_content_types(doc: &[u8], add: &[(String, &str)], remove: &[String]) -> Result<Vec<u8>, String> {
+pub(crate) fn patch_content_types(doc: &[u8], add: &[(String, &str)], remove: &[String]) -> Result<Vec<u8>, String> {
     let doc = &expand_root(doc);
     let (_, root_close, prefix, kids) = children(doc)?;
     let text = String::from_utf8_lossy(doc).to_string();
@@ -2154,6 +2154,7 @@ pub(crate) fn write_patched(wb: &Workbook, pkg: &Package, path: &Path) -> Result
         rel_removes.push("calcChain.xml".to_string());
         ct_removes.push("/xl/calcChain.xml".to_string());
     }
+    crate::xlsx_pivots::sync_patched(wb, pkg, &mut replaced, &mut added_parts, &mut removed, &mut rel_adds, &mut rel_removes, &mut ct_adds, &mut ct_removes);
     let names_changed = names_digest(wb) != pkg.names;
     let renamed = pkg.sheets.iter().any(|s| wb.sheet_ids().contains(&s.id) && wb.sheet_name(s.id) != s.name);
     let reordered = wb.sheet_ids().iter().filter(|id| pkg.sheets.iter().any(|s| s.id == **id)).zip(pkg.sheets.iter().map(|s| &s.id)).any(|(a, b)| a != b);

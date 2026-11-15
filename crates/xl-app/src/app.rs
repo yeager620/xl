@@ -297,6 +297,8 @@ pub struct Spreadsheet {
     pub(crate) fill_target: Option<Range>,
     /// The open filter dropdown.
     pub(crate) filter_menu: Option<crate::data::FilterMenu>,
+    /// Pivot field panel, slicer and timeline state.
+    pub(crate) pivot_ui: crate::pivot_ui::PivotUi,
     /// Layout when a resize drag began, for its undo step.
     layout_before: Option<(SheetId, SheetLayout)>,
     /// Right-click menu: where it opened and what it's for.
@@ -371,6 +373,7 @@ impl Spreadsheet {
             menu: None,
             layout_before: None,
             filter_menu: None,
+            pivot_ui: Default::default(),
             fill_target: None,
             ac_selected: 0,
             cf_dialog: None,
@@ -1635,7 +1638,7 @@ impl Spreadsheet {
                 self.message = Some(if csv && self.wb.sheet_ids().len() > 1 {
                     (format!("Saved {} (CSV holds only the current sheet)", path.display()), false)
                 } else if pivots && !csv {
-                    (format!("Saved {} — pivot tables are saved as their current values", path.display()), false)
+                    (format!("Saved {} — pivot tables keep working in xl; other apps see their values", path.display()), false)
                 } else {
                     (format!("Saved {}", path.display()), false)
                 });

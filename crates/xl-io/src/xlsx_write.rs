@@ -629,7 +629,10 @@ pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), String> {
         };
         book.define_name(name, &format!("={}", prefix_future_functions(&wb.name_formula(d)))).map_err(err)?;
     }
-    book.save(path).map_err(err)
+    let bytes = book.save_to_buffer().map_err(err)?;
+    // xl's pivot definitions ride along in a custom XML part.
+    let bytes = crate::xlsx_pivots::add_to_new(bytes, wb)?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
