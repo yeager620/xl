@@ -7,3 +7,5 @@ publish = false
 
 [dependencies]
 xl-engine.workspace = true
+xl-io.workspace = true
+xl-sql.workspace = true

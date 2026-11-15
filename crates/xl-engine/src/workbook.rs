@@ -27,6 +27,8 @@ use crate::store::{Cell, CellInput, CellStore};
 use crate::style::Style;
 use crate::value::{ErrorKind, Value};
 
+mod bigdata;
+
 // ------------------------------------------------------------------- sheets
 
 pub struct SheetData {
@@ -757,7 +759,7 @@ impl Workbook {
             return Err("A workbook needs at least one sheet".into());
         }
         let Some(sheet) = self.sheets.get(id) else { return Err("No such sheet".into()) };
-        let cells: Vec<CellRef> = sheet.store.iter().map(|(c, _)| c).collect();
+        let cells: Vec<CellRef> = sheet.store.iter_formulas().map(|(c, _)| c).collect();
         let mut seeds = Vec::new();
         let mut forced = FxHashSet::default();
         for c in cells {
@@ -1220,11 +1222,9 @@ impl Workbook {
     pub fn formula_texts(&self) -> Vec<(Addr, String)> {
         let mut out = Vec::new();
         for &id in &self.sheets.order {
-            for (c, cell) in self.sheets.store(id).unwrap().iter() {
-                if cell.is_formula() {
-                    let a = Addr::new(id, c);
-                    out.push((a, self.input_text(a)));
-                }
+            for (c, _) in self.sheets.store(id).unwrap().iter_formulas() {
+                let a = Addr::new(id, c);
+                out.push((a, self.input_text(a)));
             }
         }
         out
@@ -1248,7 +1248,7 @@ impl Workbook {
         self.graph = DepGraph::default();
         let mut formulas = Vec::new();
         for &id in &self.sheets.order {
-            for (c, cell) in self.sheets.store(id).unwrap().iter() {
+            for (c, cell) in self.sheets.store(id).unwrap().iter_formulas() {
                 if let CellInput::Formula(e) = &cell.input {
                     formulas.push((Addr::new(id, c), e.clone()));
                 }
@@ -1459,7 +1459,7 @@ impl Workbook {
         // column-major with rows in order).
         let mut rows: FxHashMap<(SheetId, u32), Vec<u32>> = FxHashMap::default();
         for &id in &self.sheets.order {
-            for (c, cell) in self.sheets.store(id).unwrap().iter() {
+            for (c, cell) in self.sheets.store(id).unwrap().iter_formulas() {
                 if cell.is_formula() {
                     formulas.push(Addr::new(id, c));
                     rows.entry((id, c.col)).or_default().push(c.row);

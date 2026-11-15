@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xl-engine", "crates/xl-io", "crates/xl-app", "crates/xl-bench", "crates/xl-pack"]
+members = ["crates/xl-engine", "crates/xl-io", "crates/xl-sql", "crates/xl-app", "crates/xl-bench", "crates/xl-pack"]
 exclude = ["vendor"]
 
 [workspace.package]
@@ -13,6 +13,7 @@ homepage = "https://github.com/yeager620/xl"
 [workspace.dependencies]
 xl-engine = { path = "crates/xl-engine" }
 xl-io = { path = "crates/xl-io" }
+xl-sql = { path = "crates/xl-sql" }
 rustc-hash = "2"
 smallvec = "1"
 

@@ -328,7 +328,7 @@ impl Spreadsheet {
         };
 
         // Headers (after the outline gutters, if any).
-        let (gutter_w, gutter_h) = (self.hw() - crate::app::HEADER_W, self.hh() - crate::app::HEADER_H);
+        let (gutter_w, gutter_h) = (self.hw() - self.header_w(), self.hh() - crate::app::HEADER_H);
         ops.push(Op::Quad(fill(b(ox, oy, vw, self.hh()), t.chrome), all));
         ops.push(Op::Quad(fill(b(ox, oy, self.hw(), vh), t.chrome), all));
         for &(c, x, w) in &cols {

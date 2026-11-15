@@ -67,7 +67,14 @@ container for that reason.
 ```sh
 cargo test --workspace           # engine unit/property tests + headless UI interaction tests
 cargo run --release -p xl-bench  # recalc benchmarks
+cargo run --release -p xl-bench -- bigdata [rows]  # 10M-row CSV load, SUM(A:A), SQL group-by
 ```
+
+Sheets hold 16,777,216 rows (16x Excel). Large CSV files open in parallel
+into a compact column store (~8 bytes per number), with progress and Cancel;
+**Query with SQL…** (command palette) runs SQLite over sheets and tables by
+name and CSV files by path, and **Refresh query** re-runs it. Sheets taller
+than 1,048,576 rows can't be saved as .xlsx; xl offers CSV instead.
 
 xlsx saving patches the opened file; `docs/xlsx-fidelity.md` explains what is
 preserved and how to run the round-trip checker over the real-world corpus
@@ -83,9 +90,10 @@ scripts/fetch-xlsx-corpus.sh && cargo run -p xl-io --release --example roundtrip
 | Path | What |
 |---|---|
 | `crates/xl-engine` | Headless core: multi-sheet workbook, formula parser, 77 functions, Excel number formats, dates, dependency graph, incremental recalc |
-| `crates/xl-io` | xlsx read (streaming) / write, CSV/TSV |
+| `crates/xl-io` | xlsx read (streaming) / write, CSV/TSV (parallel import, type inference) |
+| `crates/xl-sql` | SQL over sheets, tables and CSV files (embedded SQLite) |
 | `crates/xl-app` | The GPUI desktop app (`xl` binary): grid, formula bar, sheet tabs, format & style toolbar, command palette, IME input |
-| `crates/xl-bench` | Recalc benchmarks |
+| `crates/xl-bench` | Recalc and big-data benchmarks |
 | `crates/xl-pack` | Packaging helpers (renders the app icon PNGs) |
 | `packaging/` | Desktop entry, AppStream metadata, icon source, .deb / AppImage / Flatpak build scripts |
 | `assets/fonts` | Bundled Source Sans 3 (SIL OFL) |

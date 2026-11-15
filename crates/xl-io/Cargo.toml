@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 xl-engine.workspace = true
 csv = "1"
+memchr = "=2.8.3"
+rayon = "=1.12.0"
 quick-xml = "0.42"
 rust_xlsxwriter = "0.102"
 zip = { version = "9", default-features = false, features = ["deflate"] }

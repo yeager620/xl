@@ -15,6 +15,8 @@ pub(crate) enum FormKind {
     Link,
     /// Data validation for the selection.
     Validation,
+    /// SQL over sheets, tables and CSV files (see `bigdata_ui`).
+    Query,
 }
 
 pub(crate) struct FormDialog {
@@ -59,6 +61,10 @@ impl Spreadsheet {
                     ("Text to display", "Leave as is", self.wb.display(a).text),
                 ]
             }
+            FormKind::Query => vec![
+                ("SQL", "SELECT region, SUM(amount) FROM Sheet1 GROUP BY region", self.big.queries.last().map(|q| q.sql.clone()).unwrap_or_default()),
+                ("Put results in", "A new sheet — or a cell, e.g. Sheet2!A1", String::new()),
+            ],
             FormKind::Solver => vec![
                 ("Objective cell", "The formula to optimize", here),
                 ("Target value", "Only for “value of”", String::new()),
@@ -72,6 +78,7 @@ impl Spreadsheet {
             FormKind::Solver => 2,
             FormKind::Link => 0,
             FormKind::Validation => 2,
+            FormKind::Query => 0,
         }));
     }
 
@@ -144,6 +151,10 @@ impl Spreadsheet {
             self.apply_link_form(text(0), text(1));
             return;
         }
+        if kind == FormKind::Query {
+            self.run_query_form(text(0), text(1));
+            return;
+        }
         if kind == FormKind::Validation {
             match self.apply_validation_form(&text(0), &text(1), &text(2), &text(3), &text(4)) {
                 Ok(()) => {
@@ -156,7 +167,7 @@ impl Spreadsheet {
             return;
         }
         let result: Result<(Vec<Addr>, String), String> = match kind {
-            FormKind::Link | FormKind::Validation => unreachable!("handled above"),
+            FormKind::Link | FormKind::Validation | FormKind::Query => unreachable!("handled above"),
             FormKind::GoalSeek => (|| {
                 let set = self.cell_ref(&text(0))?;
                 let target = text(1).trim().parse::<f64>().map_err(|_| "Enter the value to reach".to_string())?;
@@ -326,6 +337,7 @@ impl Spreadsheet {
             FormKind::Solver => "Solver",
             FormKind::Link => "Link",
             FormKind::Validation => "Data validation",
+            FormKind::Query => "Query with SQL",
         };
         let mut body = div().flex().flex_col().gap(px(8.));
         for (i, (label, hint, text)) in form.fields.iter().enumerate() {
@@ -440,7 +452,7 @@ impl Spreadsheet {
             .child(
                 div()
                     .id("form-dialog")
-                    .w(px(420.))
+                    .w(px(if form.kind == FormKind::Query { 640. } else { 420. }))
                     .p(px(20.))
                     .flex()
                     .flex_col()
@@ -468,6 +480,7 @@ impl Spreadsheet {
                                 FormKind::GoalSeek => "Seek",
                                 FormKind::Solver => "Solve",
                                 FormKind::Link | FormKind::Validation => "Save",
+                                FormKind::Query => "Run",
                             }).bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_form();
                                 cx.notify();

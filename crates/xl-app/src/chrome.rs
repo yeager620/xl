@@ -1067,6 +1067,8 @@ impl Render for Spreadsheet {
         let content = content.when(self.cf_dialog.is_some(), |d| d.child(deferred(self.render_cf_dialog(cx)).with_priority(3)));
         let content = content.when(self.form.is_some(), |d| d.child(deferred(self.render_form(cx)).with_priority(3)));
         let content = content.when(self.lossy_prompt, |d| d.child(deferred(self.render_lossy_dialog(cx)).with_priority(4)));
+        let content = content.when(self.loading.is_some() && self.big.progress.is_some(), |d| d.child(deferred(self.render_load_progress(cx)).with_priority(2)));
+        let content = content.when(self.big.xlsx_refused.is_some(), |d| d.child(deferred(self.render_xlsx_refused(cx)).with_priority(4)));
         self.window_frame(content, window)
     }
 }

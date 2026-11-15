@@ -1,5 +1,8 @@
 mod app;
 mod assets;
+mod bigdata_ui;
+#[cfg(test)]
+mod bigdata_tests;
 mod chart_paint;
 mod charts;
 mod chrome;

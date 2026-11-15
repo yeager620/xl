@@ -93,8 +93,16 @@ impl Spreadsheet {
     pub(crate) fn find_matches(&mut self) -> &[CellRef] {
         let key: CacheKey = (self.find.query.clone(), self.find.match_case, self.find.whole_cell, self.cur, self.edit_generation);
         if self.find.cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            let mut hits: Vec<CellRef> =
-                self.wb.store(self.cur).iter().map(|(c, _)| c).filter(|&c| self.find.matches_text(&self.wb.input_text(Addr::new(self.cur, c)))).collect();
+            // Column by column, dropping cells materialized from compact
+            // storage in between, so a tall sheet never has them all at once.
+            let mut hits: Vec<CellRef> = Vec::new();
+            for col in 0..self.wb.store(self.cur).col_count() {
+                let r = xl_engine::Range::new(CellRef::new(0, col), CellRef::new(xl_engine::MAX_ROWS - 1, col));
+                hits.extend(self.wb.store(self.cur).iter_range(r).map(|(c, _)| c).filter(|&c| self.find.matches_text(&self.wb.input_text(Addr::new(self.cur, c)))));
+                if self.wb.compact_cache_bytes() > 64 << 20 {
+                    self.wb.trim_caches();
+                }
+            }
             hits.sort_unstable_by_key(|c| (c.row, c.col));
             self.find.cache = Some((key, hits));
         }
