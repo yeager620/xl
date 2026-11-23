@@ -4,27 +4,27 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Sun, 15 Nov 2026 12:25:41 +0000
+Date: Mon, 23 Nov 2026 21:47:57 +0000
 Description: xl spreadsheet
 Label: xl
 Origin: xl
 Suite: stable
 MD5Sum:
- 6f1529a2762be8653b4ae200b381d6b7             5067 main/binary-amd64/Packages
- a6a4cff4a43fe2f28f43b2d378206f0a             1481 main/binary-amd64/Packages.gz
+ 5513bf02a7581618df7ed4f89446fc08             5156 main/binary-amd64/Packages
+ 20e320a015f388ff129b432ce6535cfc             1523 main/binary-amd64/Packages.gz
 SHA1:
- a6c9b582273700445b156a300ad1a82ba46ab856             5067 main/binary-amd64/Packages
- 37217d8f6c781583cbf9d668e7a34a79b3a9715b             1481 main/binary-amd64/Packages.gz
+ 35f860dc92d5f8f732bcb1f901574e19f3b844d4             5156 main/binary-amd64/Packages
+ 4b7f6be4bcab9bbed935ddd03ad4f629830d8378             1523 main/binary-amd64/Packages.gz
 SHA256:
- 07e8bd96eda1fee09fe738d0117f73ddec7bb327bbb01b085a4eda0725c1c22c             5067 main/binary-amd64/Packages
- d005a68fddd3ecc81f3da56e08d801d64fed8170bae4190a7c68746402a509d7             1481 main/binary-amd64/Packages.gz
+ f99b552449a7f5dc7ecfc847e7401163987a4c0cee3d81d953c08ccf33394614             5156 main/binary-amd64/Packages
+ 7448a46353f82d61bc432ace7ac2a302ef4974ed09751d8f05817b4fef1b9533             1523 main/binary-amd64/Packages.gz
 SHA512:
- d5734529969e4fd93ef68a44da6e5778b811c0db0f7a232b107fb044983b093b43776d811b3e96d815ac22deda53ed0494d0f23e669f2b39faef2493ab674961             5067 main/binary-amd64/Packages
- 37abf35898bb91e27f0bfa940520f6fdcc39fe505a1345db2c0498a04ae86f737036c34431e1b54d95013f72059093d2c624009fb22d83c6b6e316e12194dfc5             1481 main/binary-amd64/Packages.gz
+ 793b2c1447768d01948538abcbabef354943f305d9ecfcb0a11b6856796c7682424afe759ea1c05bd16683c613ad4901a574dd2880c4952ff5d361aee386b894             5156 main/binary-amd64/Packages
+ 9f59cc2bf48e0a0be1b3ac6e629cd083f7d6f75c667bcec209bdee6e0eef6a052e973749411d9c41ddacc433b35e51210fd5ea83e4f147c15a11b419cc50d905             1523 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCavmkxQAKCRD8DLAncLzv
-iP5lAP4kGg/kvqjsitpHBJ1WZH7pecWv2Ov4SUGTrBsbUXC+vAEAhd49j1wmT2MN
-Wl/LeAaVXaM2p6ek2w4Si/LhTr5RPQM=
-=kN4z
+iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCawS0jQAKCRD8DLAncLzv
+iMopAP9ZqDPWey41HyS0eGE77N2xqJJAzovKIG29wurWC4qXYwEAotXFG1J9eiRX
+/0p+5q2vU4cG90u98dsr0quSn5lA0Ag=
+=zu6a
 -----END PGP SIGNATURE-----
