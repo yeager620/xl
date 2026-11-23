@@ -37,15 +37,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>A budget with live totals for the selected cells</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.1/packaging/screenshots/screenshot-1.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.2/packaging/screenshots/screenshot-1.png</image>
     </screenshot>
     <screenshot>
       <caption>Writing a formula, with each reference highlighted in the grid</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.1/packaging/screenshots/screenshot-2.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.2/packaging/screenshots/screenshot-2.png</image>
     </screenshot>
     <screenshot>
       <caption>Every command a keystroke away in the command palette</caption>
-      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.1/packaging/screenshots/screenshot-3.png</image>
+      <image>https://raw.githubusercontent.com/yeager620/xl/v0.4.2/packaging/screenshots/screenshot-3.png</image>
     </screenshot>
   </screenshots>
   <branding>
@@ -58,6 +58,15 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.4.2" date="2026-11-23">
+      <description>
+        <p>A tidier toolbar:</p>
+        <ul>
+          <li>Alignment, wrap and merge share one menu, and decimal places moved into the number format menu</li>
+          <li>Unsaved changes show as a small dot next to the file name</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-11-23">
       <description>
         <p>Fonts:</p>
