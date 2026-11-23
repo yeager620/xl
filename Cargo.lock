@@ -6983,7 +6983,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xl"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ashpd",
  "chrono",
@@ -7003,7 +7003,7 @@ dependencies = [
 
 [[package]]
 name = "xl-bench"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "xl-engine",
  "xl-io",
@@ -7012,7 +7012,7 @@ dependencies = [
 
 [[package]]
 name = "xl-diff"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "xl-engine",
  "xl-io",
@@ -7020,7 +7020,7 @@ dependencies = [
 
 [[package]]
 name = "xl-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
@@ -7028,7 +7028,7 @@ dependencies = [
 
 [[package]]
 name = "xl-history"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "flate2",
  "sha2 0.10.9",
@@ -7037,7 +7037,7 @@ dependencies = [
 
 [[package]]
 name = "xl-io"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "csv",
  "memchr",
@@ -7050,14 +7050,14 @@ dependencies = [
 
 [[package]]
 name = "xl-pack"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "resvg",
 ]
 
 [[package]]
 name = "xl-script"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mlua",
  "sha2 0.10.9",
@@ -7066,7 +7066,7 @@ dependencies = [
 
 [[package]]
 name = "xl-sql"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rusqlite",
  "xl-engine",
