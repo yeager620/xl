@@ -30,7 +30,7 @@ Architecture: $ARCH
 Maintainer: $MAINTAINER
 Installed-Size: $(du -sk "$STAGE/usr" | cut -f1)
 Depends: ${SHLIBS:+$SHLIBS, }$RUNTIME
-Recommends: mesa-vulkan-drivers | vulkan-icd
+Recommends: mesa-vulkan-drivers | vulkan-icd, fonts-crosextra-carlito, fonts-crosextra-caladea, fonts-liberation2 | fonts-liberation
 Section: misc
 Priority: optional
 Description: Fast native spreadsheet

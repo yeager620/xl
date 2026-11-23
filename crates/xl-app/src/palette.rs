@@ -1,7 +1,7 @@
 //! Command palette (Ctrl+K / Ctrl+Shift+P): fuzzy-search every command, jump
 //! to a cell by typing its address, or start a formula with a function.
 
-use gpui::{Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui::{Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, UniformListScrollHandle, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
 use xl_engine::{CellRef, Func, HAlign};
 
 use crate::app::{BorderPreset, EditMode, Emphasis, Spreadsheet};
@@ -162,6 +162,9 @@ pub fn commands() -> Vec<Command> {
         cmd!("Font size: 14", "", |s, w, cx| s.set_font_size(Some(14.0))),
         cmd!("Font size: 18", "", |s, w, cx| s.set_font_size(Some(18.0))),
         cmd!("Font size: 24", "", |s, w, cx| s.set_font_size(Some(24.0))),
+        cmd!("Font…", "Ctrl+Shift+F", |s, w, cx| s.open_font_picker()),
+        cmd!("Increase font size", "Ctrl+Shift+.", |s, w, cx| s.step_font_size(1)),
+        cmd!("Decrease font size", "Ctrl+Shift+,", |s, w, cx| s.step_font_size(-1)),
         cmd!("Freeze panes at selection", "", |s, w, cx| s.toggle_freeze()),
         cmd!("Freeze top row", "", |s, w, cx| s.set_freeze((1, 0))),
         cmd!("Freeze first column", "", |s, w, cx| s.set_freeze((0, 1))),
@@ -224,6 +227,22 @@ pub enum Item {
     Function(Func),
     /// A script macro (index into the palette's macros).
     Macro(usize),
+    /// An installed font family (index into `fonts::installed()`).
+    Font(usize),
+    /// The workbook's default font.
+    DefaultFont,
+    /// The selection's font, which isn't installed.
+    MissingFont,
+    /// A font size in tenths of a point.
+    Size(u16),
+}
+
+/// Sizes offered by the toolbar and stepped through by grow/shrink.
+pub const FONT_SIZES: [f64; 16] = [8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 36.0, 48.0, 60.0, 72.0];
+
+/// The palette as a font picker: the selection's font when it opened.
+pub struct FontPick {
+    pub current: Option<String>,
 }
 
 pub struct Palette {
@@ -232,11 +251,14 @@ pub struct Palette {
     commands: Vec<Command>,
     /// Script macros: (name, shortcut).
     macros: Vec<(String, String)>,
+    /// Set when picking a font instead of running a command.
+    pub fonts: Option<FontPick>,
+    pub scroll: UniformListScrollHandle,
 }
 
 impl Palette {
     pub fn new() -> Self {
-        Self { query: String::new(), selected: 0, commands: commands(), macros: Vec::new() }
+        Self { query: String::new(), selected: 0, commands: commands(), macros: Vec::new(), fonts: None, scroll: UniformListScrollHandle::new() }
     }
 
     pub fn with_macros(mut self, macros: Vec<(String, String)>) -> Self {
@@ -244,7 +266,41 @@ impl Palette {
         self
     }
 
+    pub fn font_picker(current: Option<String>) -> Self {
+        Self { fonts: Some(FontPick { current }), ..Self::new() }
+    }
+
+    fn font_items(&self, pick: &FontPick) -> Vec<Item> {
+        let q = self.query.trim();
+        let mut out = Vec::new();
+        if let Ok(pt) = q.trim_end_matches("pt").trim().parse::<f64>()
+            && (1.0..=409.0).contains(&pt)
+        {
+            out.push(Item::Size((pt * 10.0).round() as u16));
+        }
+        let fonts = crate::fonts::installed();
+        if q.is_empty() {
+            if pick.current.as_deref().is_some_and(|c| !crate::fonts::is_installed(c)) {
+                out.push(Item::MissingFont);
+            }
+            out.push(Item::DefaultFont);
+            out.extend((0..fonts.len()).map(Item::Font));
+            return out;
+        }
+        if fuzzy_score(q, "Default font").is_some() {
+            out.push(Item::DefaultFont);
+        }
+        let mut scored: Vec<(i32, Item)> = fonts.iter().enumerate().filter_map(|(i, f)| fuzzy_score(q, f).map(|s| (s, Item::Font(i)))).collect();
+        // Best match first; ties stay alphabetical.
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+        out.extend(scored.into_iter().map(|(_, i)| i));
+        out
+    }
+
     pub fn items(&self) -> Vec<Item> {
+        if let Some(pick) = &self.fonts {
+            return self.font_items(pick);
+        }
         let q = self.query.trim();
         let mut out = Vec::new();
         if let Some(c) = CellRef::parse(q) {
@@ -278,6 +334,18 @@ impl Palette {
             Item::GoTo(c) => (format!("Go to {c}"), "Enter".into()),
             Item::Function(f) => (format!("Insert ={}()", f.name()), f.signature().to_string()),
             Item::Macro(i) => (format!("Run script: {}", self.macros[i].0), self.macros[i].1.clone()),
+            Item::Font(i) => {
+                let name = crate::fonts::installed()[i].to_string();
+                let current = self.fonts.as_ref().and_then(|p| p.current.as_deref()).is_some_and(|c| c.eq_ignore_ascii_case(&name));
+                (name, if current { "current".into() } else { String::new() })
+            }
+            Item::DefaultFont => ("Default font".into(), if self.fonts.as_ref().is_some_and(|p| p.current.is_none()) { "current".into() } else { String::new() }),
+            Item::MissingFont => {
+                let name = self.fonts.as_ref().and_then(|p| p.current.clone()).unwrap_or_default();
+                let shown = crate::fonts::resolve(&name).family;
+                (name, format!("not installed · shown as {shown}"))
+            }
+            Item::Size(t) => (format!("Size {} pt", t as f64 / 10.0), "Enter".into()),
         }
     }
 }
@@ -292,6 +360,28 @@ impl Spreadsheet {
         self.palette = Some(Palette::new().with_macros(macros));
     }
 
+    /// Open the palette as a font picker for the selection.
+    pub(crate) fn open_font_picker(&mut self) {
+        if self.edit.is_some() && !self.commit_edit() {
+            return;
+        }
+        self.menu = None;
+        let current = self.wb.style(self.at(self.active)).font_name.as_deref().map(str::to_string);
+        let mut p = Palette::font_picker(current.clone());
+        // Start on the current font.
+        let items = p.items();
+        p.selected = items
+            .iter()
+            .position(|&i| match (i, &current) {
+                (Item::DefaultFont, None) | (Item::MissingFont, Some(_)) => true,
+                (Item::Font(k), Some(c)) => crate::fonts::installed()[k].eq_ignore_ascii_case(c),
+                _ => false,
+            })
+            .unwrap_or(0);
+        p.scroll.scroll_to_item(p.selected, gpui::ScrollStrategy::Center);
+        self.palette = Some(p);
+    }
+
     pub(crate) fn run_palette_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.palette.take() else { return };
         match item {
@@ -303,6 +393,10 @@ impl Spreadsheet {
                     self.run_macro_named(&name.clone());
                 }
             }
+            Item::Font(i) => self.set_font_name(Some(crate::fonts::installed()[i].to_string())),
+            Item::DefaultFont => self.set_font_name(None),
+            Item::MissingFont => {}
+            Item::Size(t) => self.set_font_size(Some(t as f64 / 10.0)),
         }
     }
 
@@ -312,8 +406,14 @@ impl Spreadsheet {
         let n = p.items().len();
         match key {
             "escape" => self.palette = None,
-            "up" => p.selected = p.selected.saturating_sub(1),
-            "down" => p.selected = (p.selected + 1).min(n.saturating_sub(1)),
+            "up" => {
+                p.selected = p.selected.saturating_sub(1);
+                p.scroll.scroll_to_item(p.selected, gpui::ScrollStrategy::Center);
+            }
+            "down" => {
+                p.selected = (p.selected + 1).min(n.saturating_sub(1));
+                p.scroll.scroll_to_item(p.selected, gpui::ScrollStrategy::Center);
+            }
             "backspace" => {
                 p.query.pop();
                 p.selected = 0;
@@ -329,34 +429,56 @@ impl Spreadsheet {
         true
     }
 
+    fn palette_row(&self, i: usize, item: Item, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = self.theme;
+        let p = self.palette.as_ref().unwrap();
+        let (label, hint) = p.label(item);
+        let selected = i == p.selected;
+        // Fonts are listed in their own face.
+        let family = match item {
+            Item::Font(k) => Some(crate::fonts::installed()[k].clone()),
+            Item::MissingFont => Some(crate::fonts::resolve(&label).family),
+            _ => None,
+        };
+        div()
+            .id(("palette-item", i))
+            .h(px(ROW_H))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .px(px(12.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(t.header_selected).text_color(t.ink))
+            .when(!selected, |d| d.hover(|s| s.bg(t.chrome_hover)))
+            .child(div().overflow_hidden().whitespace_nowrap().when_some(family, |d, f| d.font_family(f).text_size(px(15.))).child(SharedString::from(label)))
+            .child(div().flex_none().text_size(px(11.)).text_color(t.ink_muted).child(SharedString::from(hint)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.run_palette_item(item, window, cx);
+                cx.notify();
+            }))
+    }
+
     pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let p = self.palette.as_ref().unwrap();
-        let items = p.items();
-        let rows = items.iter().enumerate().map(|(i, &item)| {
-            let (label, hint) = p.label(item);
-            let selected = i == p.selected;
-            div()
-                .id(("palette-item", i))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .px(px(12.))
-                .py(px(7.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(selected, |d| d.bg(t.header_selected).text_color(t.ink))
-                .when(!selected, |d| d.hover(|s| s.bg(t.chrome_hover)))
-                .child(div().child(SharedString::from(label)))
-                .child(div().text_size(px(11.)).text_color(t.ink_muted).child(SharedString::from(hint)))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.run_palette_item(item, window, cx);
-                    cx.notify();
-                }))
-        });
-        let query: SharedString = if p.query.is_empty() { "Type a command, a cell like B12, or a function…".into() } else { p.query.clone().into() };
+        let n = p.items().len();
+        let placeholder = if p.fonts.is_some() { "Search fonts, or type a size like 14…" } else { "Type a command, a cell like B12, or a function…" };
+        let query: SharedString = if p.query.is_empty() { placeholder.into() } else { p.query.clone().into() };
+        // Only the visible rows are built (there can be hundreds of fonts).
+        let list = gpui::uniform_list(
+            "palette-items",
+            n,
+            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                let Some(p) = this.palette.as_ref() else { return Vec::new() };
+                let items = p.items();
+                range.filter_map(|i| items.get(i).map(|&item| this.palette_row(i, item, cx))).collect()
+            }),
+        )
+        .track_scroll(&p.scroll)
+        .h(px(ROW_H * n.min(MAX_ROWS) as f32));
         div()
             .id("palette")
             .occlude()
@@ -387,10 +509,14 @@ impl Spreadsheet {
                     .child(div().text_color(if p.query.is_empty() { t.ink_muted } else { t.ink }).child(query))
                     .when(!p.query.is_empty(), |d| d.child(div().w(px(1.5)).h(px(16.)).bg(t.accent))),
             )
-            .children(rows)
-            .when(items.is_empty(), |d| d.child(div().px(px(12.)).py(px(8.)).text_color(t.ink_muted).font_weight(FontWeight::NORMAL).child("No matches")))
+            .child(list)
+            .when(n == 0, |d| d.child(div().px(px(12.)).py(px(8.)).text_color(t.ink_muted).font_weight(FontWeight::NORMAL).child("No matches")))
     }
 }
+
+/// Height of a palette row, and how many show before the list scrolls.
+const ROW_H: f32 = 32.0;
+const MAX_ROWS: usize = 13;
 
 #[cfg(test)]
 mod tests {

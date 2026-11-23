@@ -219,7 +219,7 @@ impl Spreadsheet {
                     .cursor_pointer()
                     .hover(|s| s.border_color(t.accent))
                     .child(div().w(px(30.)).h_full().rounded(px(2.)).bg(gpui::rgb(color)))
-                    .tooltip(crate::chrome::tip(t, name, ""))
+                    .tooltip(crate::chrome::tip(t, *name, ""))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.add_cond_format(CfRule::DataBar { color, min: CfValue::Min, max: CfValue::Max });
                         cx.notify();
@@ -233,7 +233,7 @@ impl Spreadsheet {
             for &c in &colors {
                 swatch = swatch.child(div().flex_1().h_full().bg(gpui::rgb(c)));
             }
-            scales = scales.child(swatch.hover(|s| s.border_color(t.accent)).tooltip(crate::chrome::tip(t, name, "")).on_click(cx.listener(move |this, _, _, cx| {
+            scales = scales.child(swatch.hover(|s| s.border_color(t.accent)).tooltip(crate::chrome::tip(t, *name, "")).on_click(cx.listener(move |this, _, _, cx| {
                 let stops = match colors.as_slice() {
                     [lo, hi] => vec![(CfValue::Min, *lo), (CfValue::Max, *hi)],
                     [lo, mid, hi, ..] => vec![(CfValue::Min, *lo), (CfValue::Percentile(50.0), *mid), (CfValue::Max, *hi)],

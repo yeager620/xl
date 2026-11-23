@@ -42,18 +42,23 @@ struct Metrics {
 }
 
 fn metrics(face: usize) -> &'static Metrics {
-    static M: OnceLock<Vec<Metrics>> = OnceLock::new();
-    &M.get_or_init(|| {
-        FACES
-            .iter()
-            .map(|data| {
-                let face = ttf_parser::Face::parse(data, 0).expect("bundled font parses");
-                let adv = |c: char| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(0);
-                let ascii = (0u8..=255).map(|b| adv(b as char)).collect();
-                Metrics { upem: face.units_per_em() as f64, ascent: face.ascender() as f64, descent: -(face.descender() as f64), ascii, face }
-            })
-            .collect()
-    })[face]
+    // Faces are measured once and kept (system faces are added by
+    // crate::fonts as print jobs use them).
+    static M: OnceLock<std::sync::RwLock<Vec<Option<&'static Metrics>>>> = OnceLock::new();
+    let cache = M.get_or_init(Default::default);
+    if let Some(Some(m)) = cache.read().unwrap().get(face) {
+        return m;
+    }
+    let (data, index) = crate::fonts::face_data(face);
+    let face_ = ttf_parser::Face::parse(data, index).or_else(|_| ttf_parser::Face::parse(FACES[0], 0)).expect("bundled font parses");
+    let adv = |c: char| face_.glyph_index(c).and_then(|g| face_.glyph_hor_advance(g)).unwrap_or(0);
+    let ascii = (0u8..=255).map(|b| adv(b as char)).collect();
+    let m: &'static Metrics = Box::leak(Box::new(Metrics { upem: face_.units_per_em() as f64, ascent: face_.ascender() as f64, descent: -(face_.descender() as f64), ascii, face: face_ }));
+    let mut w = cache.write().unwrap();
+    if w.len() <= face {
+        w.resize(face + 1, None);
+    }
+    w[face].get_or_insert(m)
 }
 
 /// Width of `s` in points at `size` points.
@@ -635,7 +640,7 @@ impl<'a> SheetPainter<'a> {
             _ => text_color(st),
         };
         let size = st.font_size.map_or(11.0, |t| t as f64 / 10.0) * s;
-        let face = face_of(st.bold, st.italic);
+        let face = crate::fonts::face_for(st.font_name.as_deref(), st.bold, st.italic);
         let line_h = size * 15.0 / 11.0;
         let pad = PAD * s;
         let avail = (r.w - 2.0 * pad).max(1.0);

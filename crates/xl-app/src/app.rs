@@ -220,6 +220,7 @@ pub enum ContextKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Menu {
     NumberFormat,
+    FontSize,
     TextColor,
     Fill,
     Borders,
@@ -1141,6 +1142,21 @@ impl Spreadsheet {
         self.modify_styles(|st, _, _| st.font_size = tenths);
     }
 
+    /// Font family for the selection (None = the workbook's default font).
+    pub(crate) fn set_font_name(&mut self, name: Option<String>) {
+        let name: Option<std::sync::Arc<str>> = name.map(Into::into);
+        self.modify_styles(|st, _, _| st.font_name = name.clone());
+    }
+
+    /// Step the selection's font size to the next listed size up or down
+    /// (from the active cell's size).
+    pub(crate) fn step_font_size(&mut self, dir: i32) {
+        let cur = self.wb.style(self.at(self.active)).font_size.map_or(11.0, |t| t as f64 / 10.0);
+        let sizes = crate::palette::FONT_SIZES;
+        let next = if dir > 0 { sizes.iter().find(|&&s| s > cur + 0.01).copied().unwrap_or(409.0_f64.min(cur + 12.0)) } else { sizes.iter().rev().find(|&&s| s < cur - 0.01).copied().unwrap_or(1.0_f64.max(cur - 1.0)) };
+        self.set_font_size(if next == 11.0 { None } else { Some(next) });
+    }
+
     /// Freeze rows above and columns left of the active cell, or unfreeze.
     pub(crate) fn toggle_freeze(&mut self) {
         let target = if self.frozen() != (0, 0) { (0, 0) } else { (self.active.row, self.active.col) };
@@ -1645,7 +1661,10 @@ impl Spreadsheet {
                 self.package = loaded.package;
                 self.message = Some(match loaded.warnings.first() {
                     Some(w) => (format!("Opened {name} with {} warning(s): {w}", loaded.warnings.len()), true),
-                    None => (format!("Opened {name} ({} cells)", loaded.cells), false),
+                    None => match crate::fonts::missing_notice(self.wb.font_names()) {
+                        Some(fonts) => (format!("Opened {name}. {fonts}"), false),
+                        None => (format!("Opened {name} ({} cells)", loaded.cells), false),
+                    },
                 });
                 if self.restore_as.is_none() {
                     self.recent.record(&path);
@@ -2079,6 +2098,9 @@ impl Spreadsheet {
             ("g", true) => self.focus_name_box(),
             ("t", true) => self.format_as_table(),
             ("l", true) if shift => self.toggle_filter(),
+            ("f", true) if shift => self.open_font_picker(),
+            (">" | ".", true) if shift => self.step_font_size(1),
+            ("<" | ",", true) if shift => self.step_font_size(-1),
             ("f", true) => self.open_find(false),
             ("h", true) => self.open_find(true),
             ("b", true) => self.toggle_emphasis(Emphasis::Bold),

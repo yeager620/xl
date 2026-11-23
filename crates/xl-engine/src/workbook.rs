@@ -366,6 +366,19 @@ impl StyleTable {
     }
 }
 
+impl Workbook {
+    /// Every font family named by a cell style (the default font aside).
+    pub fn font_names(&self) -> Vec<std::sync::Arc<str>> {
+        let mut out: Vec<std::sync::Arc<str>> = Vec::new();
+        for n in self.styles.list.iter().filter_map(|s| s.font_name.as_ref()) {
+            if !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+        out
+    }
+}
+
 static DEFAULT_STYLE: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Style::default);
 
 // -------------------------------------------------------------------- graph

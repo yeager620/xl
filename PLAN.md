@@ -217,4 +217,5 @@ Save by patching the opened package instead of writing a new file.
 - [x] Bigger data: 16,777,216 rows, compact NaN-boxed store, parallel CSV import with safe type inference, SQL queries over sheets/tables/CSV (SQLite).
 - [x] Scripting: sandboxed Lua 5.4 custom functions (spill arrays) and macros (one undo step), consent per script hash, stored in a custom XML part, editor panel.
 - [x] Version history: deduplicated snapshots with retention, cell-level diffs with row/column alignment, history panel with restore, `xl diff` / `xl textconv` for git.
+- [x] Fonts: any installed family (picker in the palette, previewed in each face; toolbar font and size; Ctrl+Shift+F, Ctrl+Shift+>/<), metric-compatible stand-ins for Office fonts (Calibri→Carlito, Arial→Liberation Sans, …) without changing the file, a notice for fonts that aren't installed, PDFs embed the cells' real fonts.
 - [ ] Follow-ups: print the new chart kinds natively (now approximated); persist SQL queries in the file; write live Excel pivot parts; editor selection/clipboard; check new chart kinds and dynamic arrays in real Excel.

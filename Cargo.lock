@@ -6987,6 +6987,7 @@ version = "0.4.0"
 dependencies = [
  "ashpd",
  "chrono",
+ "fontdb",
  "gpui",
  "gpui_platform",
  "krilla",

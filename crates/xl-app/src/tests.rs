@@ -2290,3 +2290,46 @@ fn spilling_formula_shows_across_cells_and_blocks(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-v");
     assert_eq!(input(&view, cx, "J1"), "21");
 }
+
+#[gpui::test]
+fn picking_fonts_and_sizes(cx: &mut TestAppContext) {
+    let (view, cx) = setup(cx);
+    let style = |view: &Entity<Spreadsheet>, cx: &mut VisualTestContext| view.read_with(cx, |s, _| s.wb.style(s.at(s.active)).clone());
+    // Ctrl+Shift+F opens the palette as a font picker; typing filters it.
+    cx.simulate_keystrokes("ctrl-shift-f");
+    view.read_with(cx, |s, _| assert!(s.palette.as_ref().is_some_and(|p| p.fonts.is_some())));
+    cx.simulate_input(crate::FONT);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(style(&view, cx).font_name.as_deref(), Some(crate::FONT));
+    view.read_with(cx, |s, _| assert!(s.palette.is_none()));
+    // A number picks a size.
+    cx.simulate_keystrokes("ctrl-shift-f");
+    cx.simulate_input("13.5");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(style(&view, cx).font_size, Some(135));
+    // Grow and shrink step through the listed sizes.
+    cx.simulate_keystrokes("ctrl-shift->");
+    assert_eq!(style(&view, cx).font_size, Some(140));
+    view.update(cx, |s, _| s.step_font_size(-1));
+    assert_eq!(style(&view, cx).font_size, Some(120));
+    view.update(cx, |s, _| s.step_font_size(-1));
+    assert_eq!(style(&view, cx).font_size, None, "11 pt is the default size");
+    // "Default font" clears the family; one undo brings it back.
+    view.update(cx, |s, _| s.open_font_picker());
+    cx.simulate_input("default");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(style(&view, cx).font_name, None);
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(style(&view, cx).font_name.as_deref(), Some(crate::FONT));
+    // A font that isn't installed is kept, listed first, and drawn with a stand-in.
+    view.update(cx, |s, cx| {
+        s.set_font_name(Some("Calibri Nonexistent".into()));
+        s.open_font_picker();
+        let p = s.palette.as_ref().unwrap();
+        assert_eq!(p.items()[p.selected], crate::palette::Item::MissingFont);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(style(&view, cx).font_name.as_deref(), Some("Calibri Nonexistent"));
+    cx.simulate_keystrokes("escape");
+}

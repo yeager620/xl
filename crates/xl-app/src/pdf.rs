@@ -49,7 +49,15 @@ fn with_clip(surface: &mut Surface, clip: Option<Rect>, f: impl FnOnce(&mut Surf
 pub fn render(doc: &PrintDoc, title: &str) -> Result<Vec<u8>, String> {
     let mut pdf = Document::new();
     pdf.set_metadata(Metadata::new().title(title.to_string()).creator("xl".to_string()));
-    let fonts: Vec<Font> = FACES.iter().map(|d| Font::new((*d).into(), 0).ok_or("the bundled font couldn't be loaded")).collect::<Result<_, _>>()?;
+    // Every face the pages use, embedded and subsetted.
+    let used = doc.pages.iter().flat_map(|p| &p.items).filter_map(|i| if let Item::Text { face, .. } = i { Some(*face) } else { None }).max().unwrap_or(0);
+    let bundled = Font::new(FACES[0].into(), 0).ok_or("the bundled font couldn't be loaded")?;
+    let fonts: Vec<Font> = (0..=used.max(FACES.len() - 1))
+        .map(|f| {
+            let (data, index) = crate::fonts::face_data(f);
+            Font::new(data.into(), index).unwrap_or_else(|| bundled.clone())
+        })
+        .collect();
     for page in &doc.pages {
         let settings = PageSettings::from_wh(page.width as f32, page.height as f32).ok_or("bad page size")?;
         let mut p = pdf.start_page_with(settings);
@@ -205,6 +213,27 @@ mod tests {
         let bytes = render(&doc, "Chart").unwrap();
         let parsed = lopdf::Document::load_mem(&bytes).unwrap();
         assert!(parsed.extract_text(&[1]).unwrap().contains("Totals"));
+    }
+
+    #[test]
+    fn cells_print_in_their_own_fonts() {
+        // Any installed font other than the bundled one (skip if there's none).
+        let Some(family) = crate::fonts::installed().iter().find(|f| f.as_ref() != crate::FONT && crate::fonts::face_for(Some(f), false, false) >= 4).cloned() else { return };
+        let mut wb = Workbook::new();
+        let s = wb.sheet_ids()[0];
+        wb.set_input(Addr::new(s, CellRef::new(0, 0)), "Hello fonts").unwrap();
+        wb.set_input(Addr::new(s, CellRef::new(1, 0)), "Plain").unwrap();
+        wb.set_style(Addr::new(s, CellRef::new(0, 0)), &xl_engine::Style { font_name: Some(family.to_string().into()), ..Default::default() });
+        let doc = layout(&wb, &[s], &DocInfo::default());
+        let faces: Vec<usize> = doc.pages[0].items.iter().filter_map(|i| if let Item::Text { face, text, .. } = i { (text == "Hello fonts" || text == "Plain").then_some(*face) } else { None }).collect();
+        assert_eq!(faces.len(), 2);
+        assert!(faces[0] >= 4 && faces[1] == 0, "{faces:?}");
+        let bytes = render(&doc, "Fonts").unwrap();
+        let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+        assert!(parsed.extract_text(&[1]).unwrap().contains("Hello fonts"));
+        // Two fonts are embedded: the system one and Source Sans 3.
+        let fonts = parsed.objects.values().filter(|o| o.as_dict().is_ok_and(|d| d.get(b"Type").is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Font")) && d.get(b"Subtype").is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Type0")))).count();
+        assert_eq!(fonts, 2);
     }
 
     /// `XL_PDF_DUMP=out.pdf cargo test -p xl dump_sample_pdf` writes a

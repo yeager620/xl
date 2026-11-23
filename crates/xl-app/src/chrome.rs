@@ -111,8 +111,9 @@ impl Render for Tip {
     }
 }
 
-pub(crate) fn tip(t: Theme, text: &'static str, keys: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| cx.new(|_| Tip { text: text.into(), keys: (!keys.is_empty()).then(|| keys.into()), theme: t }).into()
+pub(crate) fn tip(t: Theme, text: impl Into<SharedString>, keys: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tip { text: text.clone(), keys: (!keys.is_empty()).then(|| keys.into()), theme: t }).into()
 }
 
 // ----------------------------------------------------------------- buttons
@@ -252,6 +253,38 @@ impl Spreadsheet {
             })
     }
 
+    /// The selection's font, in its own face; opens the font picker.
+    fn font_button(&self, st: &xl_engine::Style, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let (label, family, missing): (SharedString, SharedString, bool) = match st.font_name.as_deref() {
+            None => ("Default".into(), crate::FONT.into(), false),
+            Some(n) => {
+                let r = crate::fonts::resolve(n);
+                (n.to_string().into(), r.family, r.substituted)
+            }
+        };
+        let tooltip: SharedString = if missing { format!("Font: {label} isn't installed (shown as {family})").into() } else { "Font".into() };
+        tool_button(&t, "font-name", false)
+            .child(
+                div()
+                    .w(px(112.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(family)
+                    .text_size(px(14.))
+                    .text_color(if missing { t.ink_muted } else { t.ink })
+                    .when(missing, |d| d.italic())
+                    .child(label),
+            )
+            .child(icon("chevron-down", t.ink_faint))
+            .tooltip(tip(t, tooltip, "Ctrl+Shift+F"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.open_font_picker();
+                cx.notify();
+            }))
+    }
+
     fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let client_frame = matches!(window.window_decorations(), Decorations::Client { .. });
@@ -312,6 +345,14 @@ impl Spreadsheet {
                 }),
             ))
             .child(divider(&t))
+            .child(self.font_button(&st, cx))
+            .child(self.menu_button(
+                "font-size",
+                Menu::FontSize,
+                "Font size",
+                div().min_w(px(20.)).text_size(px(14.)).text_color(t.ink).child(SharedString::from(format!("{}", st.font_size.map_or(11.0, |t| t as f64 / 10.0)))).into_any_element(),
+                cx,
+            ))
             .child(emph("bold", "bold", st.bold, Emphasis::Bold, "Bold", "Ctrl+B", cx))
             .child(emph("italic", "italic", st.italic, Emphasis::Italic, "Italic", "Ctrl+I", cx))
             .child(emph("underline", "underline", st.underline, Emphasis::Underline, "Underline", "Ctrl+U", cx))
@@ -495,6 +536,26 @@ impl Spreadsheet {
                             cx.notify();
                         }))
                     }))
+                    .into_any_element()
+            }
+            Menu::FontSize => {
+                let cur = self.wb.style(self.at(self.active)).font_size.map_or(11.0, |t| t as f64 / 10.0);
+                menu_panel(&t, 120.)
+                    .id("font-sizes")
+                    .max_h(px(420.))
+                    .overflow_y_scroll()
+                    .children(crate::palette::FONT_SIZES.into_iter().enumerate().map(|(i, size)| {
+                        menu_item(&t, ("font-size", i), format!("{size}"), if (size - cur).abs() < 0.05 { "✓" } else { "" }).on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_font_size(if size == 11.0 { None } else { Some(size) });
+                            this.menu = None;
+                            cx.notify();
+                        }))
+                    }))
+                    .child(menu_separator(&t))
+                    .child(menu_item(&t, "font-size-other", "Other size…", "").on_click(cx.listener(|this, _, _, cx| {
+                        this.open_font_picker();
+                        cx.notify();
+                    })))
                     .into_any_element()
             }
             Menu::NumberFormat => {

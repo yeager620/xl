@@ -22,6 +22,8 @@ gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", default-featur
 # PDF export (pure Rust, embeds and subsets fonts) and font metrics for print layout.
 krilla = "=0.8.2"
 ttf-parser = "=0.25.1"
+# System font list and font files (same version cosmic-text uses).
+fontdb = "=0.23.0"
 # Printing through the XDG desktop portal (same version GPUI already uses).
 ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "print"] }
 

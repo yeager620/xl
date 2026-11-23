@@ -42,9 +42,10 @@ pub fn cell_font() -> Font {
     font(crate::FONT)
 }
 
-/// The font for a styled cell (its family if set, else the app font).
+/// The font for a styled cell: its family if set (or what stands in for it
+/// when it isn't installed), else the app font.
 pub fn cell_font_for(st: &Style) -> Font {
-    let base = st.font_name.as_deref().map_or_else(cell_font, |name| font(SharedString::from(name.to_string())));
+    let base = st.font_name.as_deref().map_or_else(cell_font, |name| font(crate::fonts::resolve(name).family));
     Font { weight: if st.bold { FontWeight::BOLD } else { FontWeight::NORMAL }, style: if st.italic { FontStyle::Italic } else { FontStyle::Normal }, ..base }
 }
 

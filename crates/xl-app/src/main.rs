@@ -12,6 +12,7 @@ mod cond_ui;
 mod data;
 mod fill;
 mod find;
+mod fonts;
 mod history_ui;
 mod home;
 mod ime;
@@ -81,6 +82,7 @@ fn main() {
         });
     }
     let path = std::env::args().nth(1).map(PathBuf::from);
+    fonts::warm_up();
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         load_fonts(cx);
         cx.on_window_closed(|cx, _| {

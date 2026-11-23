@@ -16,7 +16,7 @@ use xl_engine::page::{Orientation, PAPERS, PageSetup, Pagination};
 use xl_engine::SheetId;
 
 use crate::app::{Field, Spreadsheet};
-use crate::paint::{Op, cell_font, paint_ops, rect, shape};
+use crate::paint::{Op, paint_ops, rect, shape};
 use crate::print_layout::{DocInfo, Item, PageDraw, PrintDoc};
 use crate::printing::Printers;
 
@@ -1287,7 +1287,8 @@ fn paint_page(page: &PageDraw, bounds: Bounds<Pixels>, k: f32, images: &Rc<RefCe
                 if size_px < 1.0 {
                     continue;
                 }
-                let f = gpui::Font { weight: if face / 2 == 1 { FontWeight::BOLD } else { FontWeight::NORMAL }, style: if face % 2 == 1 { FontStyle::Italic } else { FontStyle::Normal }, ..cell_font() };
+                let (family, bold, italic) = crate::fonts::face_font(*face);
+                let f = gpui::Font { weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL }, style: if italic { FontStyle::Italic } else { FontStyle::Normal }, ..gpui::font(family) };
                 let line = shape(window, text.clone(), f, rgb(*color), size_px);
                 let (asc, desc) = crate::print_layout::ascent_descent(*face, *size);
                 let lh = (asc + desc) * k;
