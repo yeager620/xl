@@ -4,27 +4,27 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Mon, 23 Nov 2026 21:47:57 +0000
+Date: Mon, 23 Nov 2026 22:44:56 +0000
 Description: xl spreadsheet
 Label: xl
 Origin: xl
 Suite: stable
 MD5Sum:
- 5513bf02a7581618df7ed4f89446fc08             5156 main/binary-amd64/Packages
- 20e320a015f388ff129b432ce6535cfc             1523 main/binary-amd64/Packages.gz
+ b86520298950e432108737d316c88194             5245 main/binary-amd64/Packages
+ 426f84b57b81a73d805cb4b234cecda9             1529 main/binary-amd64/Packages.gz
 SHA1:
- 35f860dc92d5f8f732bcb1f901574e19f3b844d4             5156 main/binary-amd64/Packages
- 4b7f6be4bcab9bbed935ddd03ad4f629830d8378             1523 main/binary-amd64/Packages.gz
+ 248d6c5060f267776afb7c1d6e4cf6650f63b6ee             5245 main/binary-amd64/Packages
+ 7e5a2f418566c4a6e92bde8ce16c26b1736b23ba             1529 main/binary-amd64/Packages.gz
 SHA256:
- f99b552449a7f5dc7ecfc847e7401163987a4c0cee3d81d953c08ccf33394614             5156 main/binary-amd64/Packages
- 7448a46353f82d61bc432ace7ac2a302ef4974ed09751d8f05817b4fef1b9533             1523 main/binary-amd64/Packages.gz
+ 54898f2c3561150bc2159c79925befa67ef369339e5b13e48928a8f2d6534491             5245 main/binary-amd64/Packages
+ e2294c93897f51d1861c846bedc43eb9ec4bc9dd7a71df04e698a8a517e36982             1529 main/binary-amd64/Packages.gz
 SHA512:
- 793b2c1447768d01948538abcbabef354943f305d9ecfcb0a11b6856796c7682424afe759ea1c05bd16683c613ad4901a574dd2880c4952ff5d361aee386b894             5156 main/binary-amd64/Packages
- 9f59cc2bf48e0a0be1b3ac6e629cd083f7d6f75c667bcec209bdee6e0eef6a052e973749411d9c41ddacc433b35e51210fd5ea83e4f147c15a11b419cc50d905             1523 main/binary-amd64/Packages.gz
+ d3a058b0cda93de65685b7fc005ed0a4f0545c60a5f3df365758d7a42183122bd0acaab032dd7db86dc710d3ff88023e4068acb97450a319a67b410b974f8af0             5245 main/binary-amd64/Packages
+ 2769568d3c434e5d3e575aa02a947796ba5f0ecb6bbf95bd08087710652d6feedac9cee7d2b37a9fc73b97ac23f9017715f1ed6623d5de7e68c9a5ad2aae24d2             1529 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCawS0jQAKCRD8DLAncLzv
-iMopAP9ZqDPWey41HyS0eGE77N2xqJJAzovKIG29wurWC4qXYwEAotXFG1J9eiRX
-/0p+5q2vU4cG90u98dsr0quSn5lA0Ag=
-=zu6a
+iHUEARYKAB0WIQQYJdqFtTkK3typo7n8DLAncLzviAUCawTB6AAKCRD8DLAncLzv
+iOYCAQDUBGNJGLeMb3eOaJ7QXlcRmW820Yj4kzxl+D2LS/uTLwD7B9x6b6n7bQS7
+B6IYz1dwL555mCcdgjTIWxPZQQ2UjwY=
+=EX5y
 -----END PGP SIGNATURE-----
