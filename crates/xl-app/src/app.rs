@@ -221,6 +221,7 @@ pub enum ContextKind {
 pub enum Menu {
     NumberFormat,
     FontSize,
+    Align,
     TextColor,
     Fill,
     Borders,

@@ -332,18 +332,6 @@ impl Spreadsheet {
                     cx.notify();
                 }),
             ))
-            .child(tool_button(&t, "dec-less", false).child(icon("decimals-arrow-left", t.ink)).tooltip(tip(t, "Fewer decimal places", "")).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.bump_decimals(-1);
-                    cx.notify();
-                }),
-            ))
-            .child(tool_button(&t, "dec-more", false).child(icon("decimals-arrow-right", t.ink)).tooltip(tip(t, "More decimal places", "")).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.bump_decimals(1);
-                    cx.notify();
-                }),
-            ))
             .child(divider(&t))
             .child(self.font_button(&st, cx))
             .child(self.menu_button(
@@ -356,7 +344,6 @@ impl Spreadsheet {
             .child(emph("bold", "bold", st.bold, Emphasis::Bold, "Bold", "Ctrl+B", cx))
             .child(emph("italic", "italic", st.italic, Emphasis::Italic, "Italic", "Ctrl+I", cx))
             .child(emph("underline", "underline", st.underline, Emphasis::Underline, "Underline", "Ctrl+U", cx))
-            .child(emph("strike", "strikethrough", st.strike, Emphasis::Strike, "Strikethrough", "Ctrl+5", cx))
             .child(divider(&t))
             .child(self.menu_button(
                 "text-color",
@@ -385,29 +372,21 @@ impl Spreadsheet {
                 cx,
             ))
             .child(divider(&t))
-            .children([("align-left", "align-left", HAlign::Left, "Align left"), ("align-center", "align-center", HAlign::Center, "Center"), (
-                "align-right",
-                "align-right",
-                HAlign::Right,
-                "Align right",
-            )]
-            .map(|(id, name, a, label)| {
-                tool_button(&t, id, st.align == a).child(icon(name, t.ink)).tooltip(tip(t, label, "")).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_align(a);
-                    cx.notify();
-                }))
-            }))
-            .child(tool_button(&t, "wrap", st.wrap).child(icon("wrap-text", t.ink)).tooltip(tip(t, "Wrap text", "")).on_click(cx.listener(|this, _, _, cx| {
-                this.toggle_wrap();
-                cx.notify();
-            })))
-            .child({
-                let merged = self.wb.layout(self.cur).merge_at(self.active).is_some();
-                tool_button(&t, "merge", merged).child(icon("table-cells-merge", t.ink)).tooltip(tip(t, if merged { "Unmerge cells" } else { "Merge and center" }, "")).on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_merge(true);
-                    cx.notify();
-                }))
-            })
+            .child(self.menu_button(
+                "align",
+                Menu::Align,
+                "Alignment",
+                icon(
+                    match st.align {
+                        HAlign::Center => "align-center",
+                        HAlign::Right => "align-right",
+                        _ => "align-left",
+                    },
+                    t.ink,
+                )
+                .into_any_element(),
+                cx,
+            ))
             .child(self.menu_button("borders", Menu::Borders, "Borders", icon("grid-2x2", t.ink).into_any_element(), cx))
             .child(self.menu_button("cond-format", Menu::CondFormat, "Conditional formatting", icon("highlighter", t.ink).into_any_element(), cx))
             .child(self.menu_button("chart", Menu::Chart, "Insert chart", icon("chart-column", t.ink).into_any_element(), cx));
@@ -469,16 +448,20 @@ impl Spreadsheet {
             .child(icon(if self.home.is_some() { "house" } else { "sheet" }, t.ink_muted))
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .ml(px(4.))
                     .mr(px(8.))
                     .max_w(px(220.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_size(px(14.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.ink)
-                    .child(if self.home.is_some() { "Home".to_string() } else { self.file_name() })
-                    .when(self.dirty && self.home.is_none(), |d| d.child(div().ml(px(4.)).text_color(t.ink_faint).font_weight(FontWeight::NORMAL).child("— edited"))),
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if self.home.is_some() { "Home".to_string() } else { self.file_name() }))
+                    .when(self.dirty && self.home.is_none(), |d| {
+                        // A quiet dot marks unsaved changes.
+                        d.child(div().id("unsaved").flex_none().ml(px(6.)).size(px(7.)).rounded_full().bg(t.ink_faint).tooltip(tip(t, "Unsaved changes", "Ctrl+S")))
+                    }),
             )
             .when(self.home.is_none(), |d| d.child(tools))
             .child(div().flex_1().h_full())
@@ -538,6 +521,32 @@ impl Spreadsheet {
                     }))
                     .into_any_element()
             }
+            Menu::Align => {
+                let st = self.wb.style(self.at(self.active)).clone();
+                let merged = self.wb.layout(self.cur).merge_at(self.active).is_some();
+                let check = |on: bool| if on { "✓" } else { "" };
+                let mut panel = menu_panel(&t, 200.);
+                for (i, (label, a)) in [("Align left", HAlign::Left), ("Center", HAlign::Center), ("Align right", HAlign::Right)].into_iter().enumerate() {
+                    panel = panel.child(menu_item(&t, ("align", i), label, check(st.align == a)).on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_align(a);
+                        this.menu = None;
+                        cx.notify();
+                    })));
+                }
+                panel
+                    .child(menu_separator(&t))
+                    .child(menu_item(&t, "wrap", "Wrap text", check(st.wrap)).on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_wrap();
+                        this.menu = None;
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "merge", if merged { "Unmerge cells" } else { "Merge and center" }, "").on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_merge(true);
+                        this.menu = None;
+                        cx.notify();
+                    })))
+                    .into_any_element()
+            }
             Menu::FontSize => {
                 let cur = self.wb.style(self.at(self.active)).font_size.map_or(11.0, |t| t as f64 / 10.0);
                 menu_panel(&t, 120.)
@@ -582,6 +591,15 @@ impl Spreadsheet {
                             cx.notify();
                         }))
                     }))
+                    .child(menu_separator(&t))
+                    .child(menu_item(&t, "dec-more", "More decimal places", "").on_click(cx.listener(|this, _, _, cx| {
+                        this.bump_decimals(1);
+                        cx.notify();
+                    })))
+                    .child(menu_item(&t, "dec-less", "Fewer decimal places", "").on_click(cx.listener(|this, _, _, cx| {
+                        this.bump_decimals(-1);
+                        cx.notify();
+                    })))
                     .into_any_element()
             }
             Menu::CondFormat => self.render_cf_menu(cx).into_any_element(),
